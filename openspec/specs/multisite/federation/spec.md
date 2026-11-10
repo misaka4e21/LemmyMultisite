@@ -1,8 +1,10 @@
+# Federation Specification
+
 ## Purpose
 
 Give each site an independent Fediverse identity, apply its own federation policy, and deliver activities between sites in the same installation through database records instead of HTTP.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Per-site ActivityPub identity
 Each LocalSite SHALL have its own Site actor, keypair, WebFinger subject, actor URL, inbox URL, and outbox URL. Actor and activity identifiers SHALL use the site hostname.
@@ -37,6 +39,11 @@ Federation enabled state, allow lists, block lists, signed fetch, image proxy po
 
 ### Requirement: Per-site outbound queue
 Every outgoing activity SHALL record `local_site_id`. Queue state SHALL be keyed by `(local_site_id, instance_id)`. A worker SHALL send only activities for its site and SHALL sign them with that site's or actor's key.
+
+#### Scenario: Administrator action on a remote object
+- **WHEN** site A's administrator removes a remote post
+- **THEN** the outgoing activity records site A as `local_site_id`
+- **AND** the worker signs it with site A's actor key
 
 #### Scenario: Two queues
 - **WHEN** site A and site B both send to `lemmy.world`

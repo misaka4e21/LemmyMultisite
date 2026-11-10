@@ -27,6 +27,22 @@ Login, registration, password reset, email verification, OAuth callback, and ses
 - **WHEN** a user requests a password reset on site A
 - **THEN** the email link and token work only on site A
 
+### Requirement: Browser JWT cookie
+Browser login SHALL set the site JWT in an HttpOnly cookie scoped to the active site host. The cookie SHALL use Path=/, SameSite=Lax, and Secure when the site scheme is HTTPS. API authentication SHALL accept the JWT from this cookie, and logout SHALL clear it.
+
+#### Scenario: Browser login
+- **WHEN** a user logs in on site A from a browser
+- **THEN** the response sets the site JWT cookie
+- **AND** subsequent same-host API requests authenticate without JavaScript reading the token
+
+#### Scenario: Cross-site cookie
+- **WHEN** a cookie issued for site A is sent to site B
+- **THEN** site B rejects it because the JWT local_site_id does not match Host
+
+#### Scenario: Logout
+- **WHEN** the user logs out
+- **THEN** the response clears the JWT cookie for that host
+
 ### Requirement: Local actor ownership
 Person, Community, Post, Comment, PrivateMessage, and MultiCommunity rows SHALL record an `origin_local_site_id` for objects created by a site and NULL for objects created by an external instance. The system SHALL expose separate checks for "belongs to this installation" and "belongs to this site".
 

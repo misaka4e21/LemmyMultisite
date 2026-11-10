@@ -11,10 +11,7 @@ use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
   pagination::{CursorData, PaginationCursorConversion},
 };
-use lemmy_utils::{
-  error::{LemmyErrorExt, LemmyErrorType, LemmyResult},
-  settings::structs::Settings,
-};
+use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 use url::Url;
 
 impl LocalUserInvite {
@@ -80,8 +77,7 @@ impl LocalUserInvite {
   pub fn is_expired(&self) -> bool {
     self.expires_at.map(|d| d < Utc::now()).unwrap_or(false)
   }
-  pub fn get_invite_url(&self, settings: &Settings) -> LemmyResult<Url> {
-    let protocol_and_hostname = settings.get_protocol_and_hostname();
+  pub fn get_invite_url(&self, protocol_and_hostname: &str) -> LemmyResult<Url> {
     Ok(Url::parse(&format!(
       "{}/signup?token={}",
       protocol_and_hostname, self.token
@@ -100,7 +96,7 @@ mod tests {
   use chrono::{Duration, Utc};
   use lemmy_db_schema_file::newtypes::{InvitationId, LocalUserId};
   use lemmy_diesel_utils::{connection::build_db_pool_for_tests, traits::Crud};
-  use lemmy_utils::{error::LemmyResult, settings::structs::Settings};
+  use lemmy_utils::error::LemmyResult;
   use pretty_assertions::assert_eq;
   use serial_test::serial;
 
@@ -139,11 +135,8 @@ mod tests {
 
   #[test]
   fn test_get_invite_url() -> LemmyResult<()> {
-    let mut settings = Settings::default();
-    settings.hostname = "example.com".to_string();
-    settings.tls_enabled = true;
     let invite = make_invite("abc123", None, 0, false);
-    let url = invite.get_invite_url(&settings)?;
+    let url = invite.get_invite_url("https://example.com")?;
     assert_eq!(url.as_str(), "https://example.com/signup?token=abc123");
     Ok(())
   }

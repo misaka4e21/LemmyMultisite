@@ -4,7 +4,11 @@ use crate::{
   request::{delete_image_alias, fetch_pictrs_proxied_image_details, purge_image_from_pictrs_url},
 };
 use activitypub_federation::config::Data;
-use actix_web::{HttpRequest, http::header::Header};
+use actix_web::{
+  HttpRequest,
+  cookie::{Cookie, SameSite, time::Duration as CookieDuration},
+  http::header::Header,
+};
 use actix_web_httpauth::headers::authorization::{Authorization, Bearer};
 use chrono::{DateTime, Days, Local, TimeZone, Utc};
 use enum_map::{EnumMap, enum_map};
@@ -33,7 +37,7 @@ use lemmy_db_schema_file::{
   InstanceId,
   PersonId,
   enums::{CommunityFollowerState, ImageMode, RegistrationMode, VoteSettings},
-  newtypes::{CommunityId, CommunityTagId, ModlogId, PostId, PostOrCommentId},
+  newtypes::{CommunityId, CommunityTagId, LocalSiteId, ModlogId, PostId, PostOrCommentId},
 };
 use lemmy_db_views_community_follower_approval::PendingFollowerView;
 use lemmy_db_views_community_moderator::{CommunityModeratorView, CommunityPersonBanView};
@@ -43,7 +47,6 @@ use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{connection::DbPool, dburl::DbUrl, traits::Crud};
 use lemmy_utils::{
   CACHE_DURATION_FEDERATION,
-  CacheLock,
   MAX_COMMENT_DEPTH_LIMIT,
   error::{
     LemmyError,
@@ -54,7 +57,6 @@ use lemmy_utils::{
     UntranslatedError,
   },
   rate_limit::{ActionType, BucketConfig},
-  settings::SETTINGS,
   spawn_try_task,
   utils::{
     markdown::{
@@ -74,6 +76,31 @@ use url::{ParseError, Url};
 use urlencoding::encode;
 
 pub const AUTH_COOKIE_NAME: &str = "jwt";
+
+pub fn auth_cookie(token: &str, secure: bool, stay_logged_in: bool) -> Cookie<'static> {
+  let max_age = if stay_logged_in {
+    CookieDuration::days(3650)
+  } else {
+    CookieDuration::days(7)
+  };
+  Cookie::build(AUTH_COOKIE_NAME, token.to_string())
+    .path("/")
+    .http_only(true)
+    .same_site(SameSite::Lax)
+    .secure(secure)
+    .max_age(max_age)
+    .finish()
+}
+
+pub fn remove_auth_cookie(secure: bool) -> Cookie<'static> {
+  Cookie::build(AUTH_COOKIE_NAME, "")
+    .path("/")
+    .http_only(true)
+    .same_site(SameSite::Lax)
+    .secure(secure)
+    .max_age(CookieDuration::ZERO)
+    .finish()
+}
 
 pub async fn is_mod_or_admin(
   pool: &mut DbPool<'_>,
@@ -457,49 +484,57 @@ pub fn local_site_rate_limit_to_rate_limit_config(
 }
 
 pub async fn slur_regex(context: &LemmyContext) -> LemmyResult<Regex> {
-  static CACHE: CacheLock<Regex> = LazyLock::new(|| {
+  static CACHE: LazyLock<Cache<LocalSiteId, Regex>> = LazyLock::new(|| {
     Cache::builder()
-      .max_capacity(1)
+      .max_capacity(100)
       .time_to_live(CACHE_DURATION_FEDERATION)
       .build()
   });
-  Ok(
-    Box::pin(CACHE.try_get_with((), async {
-      let local_site = SiteView::read_local(&mut context.pool())
-        .await
-        .ok()
-        .map(|s| s.local_site);
-      build_and_check_regex(local_site.and_then(|s| s.slur_filter_regex).as_deref())
-    }))
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to construct regex: {e}"))?,
-  )
+  let local_site = match context.tenant() {
+    Some(tenant) => tenant.local_site().clone(),
+    None => {
+      SiteView::read_by_hostname(&mut context.pool(), context.hostname())
+        .await?
+        .local_site
+    }
+  };
+  if let Some(regex) = CACHE.get(&local_site.id).await {
+    return Ok(regex);
+  }
+  let regex = build_and_check_regex(local_site.slur_filter_regex.as_deref())?;
+  CACHE.insert(local_site.id, regex.clone()).await;
+  Ok(regex)
 }
 
 pub async fn get_url_blocklist(context: &LemmyContext) -> LemmyResult<RegexSet> {
-  static URL_BLOCKLIST: CacheLock<RegexSet> = LazyLock::new(|| {
+  static URL_BLOCKLIST: LazyLock<Cache<LocalSiteId, RegexSet>> = LazyLock::new(|| {
     Cache::builder()
-      .max_capacity(1)
+      .max_capacity(100)
       .time_to_live(CACHE_DURATION_FEDERATION)
       .build()
   });
 
-  Ok(
-    URL_BLOCKLIST
-      .try_get_with::<_, LemmyError>((), async {
-        let urls = LocalSiteUrlBlocklist::get_all(&mut context.pool()).await?;
+  let local_site = match context.tenant() {
+    Some(tenant) => tenant.local_site().clone(),
+    None => {
+      SiteView::read_by_hostname(&mut context.pool(), context.hostname())
+        .await?
+        .local_site
+    }
+  };
+  if let Some(set) = URL_BLOCKLIST.get(&local_site.id).await {
+    return Ok(set);
+  }
+  let urls = LocalSiteUrlBlocklist::get_all(&mut context.pool(), local_site.id).await?;
 
-        // The urls are already validated on saving, so just escape them.
-        // If this regex creation changes it must be synced with
-        // lemmy_utils::utils::markdown::create_url_blocklist_test_regex_set.
-        let regexes = urls.iter().map(|url| format!(r"\b{}\b", escape(&url.url)));
+  // The urls are already validated on saving, so just escape them.
+  // If this regex creation changes it must be synced with
+  // lemmy_utils::utils::markdown::create_url_blocklist_test_regex_set.
+  let regexes = urls.iter().map(|url| format!(r"\b{}\b", escape(&url.url)));
 
-        let set = RegexSet::new(regexes)?;
-        Ok(set)
-      })
-      .await
-      .map_err(|e| anyhow::anyhow!("Failed to build URL blocklist due to `{}`", e))?,
-  )
+  let set = RegexSet::new(regexes)?;
+  URL_BLOCKLIST.insert(local_site.id, set.clone()).await;
+  Ok(set)
 }
 
 // `local_site` is optional so that tests work easily
@@ -834,8 +869,8 @@ pub fn generate_followers_url(ap_id: &DbUrl) -> Result<DbUrl, ParseError> {
   Ok(Url::parse(&format!("{ap_id}/followers"))?.into())
 }
 
-pub fn generate_inbox_url() -> LemmyResult<DbUrl> {
-  let url = format!("{}/inbox", SETTINGS.get_protocol_and_hostname());
+pub fn generate_inbox_url(protocol_and_hostname: &str) -> LemmyResult<DbUrl> {
+  let url = format!("{protocol_and_hostname}/inbox");
   Ok(Url::parse(&url)?.into())
 }
 
@@ -902,7 +937,8 @@ pub async fn process_markdown(
   markdown_check_for_blocked_urls(&text, url_blocklist)?;
 
   if local_site.image_mode == ImageMode::ProxyAllImages {
-    let (text, links) = markdown_rewrite_image_links(text);
+    let (text, links) =
+      markdown_rewrite_image_links(text, context.hostname(), &context.protocol_and_hostname());
 
     // Validate the IPs for the links before inserting to the remote image table to prevent SSRF.
     for link in &links {
@@ -915,8 +951,7 @@ pub async fn process_markdown(
       // Insert image details for the remote image
       let details_res = fetch_pictrs_proxied_image_details(&link, context).await;
       if let Ok(details) = details_res {
-        let proxied = build_proxied_image_url(&link, false, local_site, context)?;
-        let details_form = details.build_image_details_form(&proxied);
+        let details_form = details.build_image_details_form(&link, Some(link.to_string()));
         ImageDetails::create(&mut context.pool(), &details_form).await?;
       }
     }
@@ -953,7 +988,7 @@ async fn proxy_image_link_internal(
 ) -> LemmyResult<DbUrl> {
   context.is_valid_ip(&link).await?;
   // Dont rewrite links pointing to local domain.
-  if link.domain() == Some(&context.settings().hostname) {
+  if link.domain() == Some(context.hostname()) {
     Ok(link.into())
   } else if local_site.image_mode == ImageMode::ProxyAllImages {
     RemoteImage::create(&mut context.pool(), vec![link.clone()]).await?;
@@ -963,7 +998,7 @@ async fn proxy_image_link_internal(
     let details_res = fetch_pictrs_proxied_image_details(&link, context).await;
 
     if let Ok(details) = details_res {
-      let details_form = details.build_image_details_form(&proxied);
+      let details_form = details.build_image_details_form(&link, Some(link.to_string()));
       ImageDetails::create(&mut context.pool(), &details_form).await?;
     };
 
@@ -1006,7 +1041,7 @@ fn build_proxied_image_url(
 ) -> LemmyResult<Url> {
   let mut url = format!(
     "{}/api/v4/image/proxy?url={}",
-    context.settings().get_protocol_and_hostname(),
+    context.protocol_and_hostname(),
     encode(link.as_str()),
   );
   if is_thumbnail {
@@ -1019,8 +1054,9 @@ pub async fn local_user_view_from_jwt(
   jwt: &str,
   context: &LemmyContext,
   feed_only: bool,
+  expected_local_site_id: Option<LocalSiteId>,
 ) -> LemmyResult<LocalUserView> {
-  let local_user_id = Claims::validate(jwt, context, feed_only)
+  let local_user_id = Claims::validate(jwt, context, feed_only, expected_local_site_id)
     .await
     .with_lemmy_type(LemmyErrorType::NotLoggedIn)?;
   let local_user_view = LocalUserView::read(&mut context.pool(), local_user_id).await?;
@@ -1182,6 +1218,7 @@ mod tests {
       unresolved_report_count: 0,
       federation_pending: false,
       locked: false,
+      origin_local_site_id: None,
     };
     assert!(check_comment_depth(&comment).is_ok());
     comment.path = Ltree("0.123.456".to_string());
@@ -1204,5 +1241,21 @@ mod tests {
     let generated_secret = generate_totp_2fa_secret();
     let totp = build_totp_2fa("lemmy.ml", "my_name", &generated_secret);
     assert!(totp.is_ok());
+  }
+
+  #[test]
+  fn test_auth_cookie_attributes() {
+    let cookie = auth_cookie("token", true, false);
+    assert_eq!(cookie.name(), AUTH_COOKIE_NAME);
+    assert_eq!(cookie.value(), "token");
+    assert_eq!(cookie.path(), Some("/"));
+    assert_eq!(cookie.http_only(), Some(true));
+    assert_eq!(cookie.secure(), Some(true));
+    assert_eq!(cookie.same_site(), Some(SameSite::Lax));
+    assert_eq!(cookie.max_age(), Some(CookieDuration::days(7)));
+
+    let removal = remove_auth_cookie(true);
+    assert_eq!(removal.name(), AUTH_COOKIE_NAME);
+    assert_eq!(removal.max_age(), Some(CookieDuration::ZERO));
   }
 }

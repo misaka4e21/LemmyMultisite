@@ -1,7 +1,6 @@
 use actix_web::{Error, HttpResponse, Result, web};
-use lemmy_api_utils::context::LemmyContext;
+use lemmy_api_utils::{context::LemmyContext, tenant::TenantContext};
 use lemmy_db_schema_file::enums::RegistrationMode;
-use lemmy_db_views_site::SiteView;
 use lemmy_utils::{
   VERSION,
   cache_header::{cache_1hour, cache_3days},
@@ -29,21 +28,27 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     );
 }
 
-async fn node_info_well_known(context: web::Data<LemmyContext>) -> LemmyResult<HttpResponse> {
+async fn node_info_well_known(
+  _context: web::Data<LemmyContext>,
+  tenant: TenantContext,
+) -> LemmyResult<HttpResponse> {
   let node_info = NodeInfoWellKnown {
     links: vec![NodeInfoWellKnownLinks {
       rel: Url::parse("http://nodeinfo.diaspora.software/ns/schema/2.1")?,
       href: Url::parse(&format!(
         "{}/nodeinfo/2.1",
-        context.settings().get_protocol_and_hostname(),
+        format!("{}://{}", tenant.scheme, tenant.hostname),
       ))?,
     }],
   };
   Ok(HttpResponse::Ok().json(node_info))
 }
 
-async fn node_info(context: web::Data<LemmyContext>) -> Result<HttpResponse, Error> {
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+async fn node_info(
+  _context: web::Data<LemmyContext>,
+  tenant: TenantContext,
+) -> Result<HttpResponse, Error> {
+  let site_view = tenant.site_view.clone();
 
   // Since there are 3 registration options,
   // we need to set open_registrations as true if RegistrationMode is not Closed.

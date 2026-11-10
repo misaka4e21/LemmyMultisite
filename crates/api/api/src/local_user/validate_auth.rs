@@ -4,6 +4,7 @@ use actix_web::{
 };
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{local_user_view_from_jwt, read_auth_token},
 };
 use lemmy_db_views_site::api::SuccessResponse;
@@ -17,7 +18,9 @@ pub async fn validate_auth(
 ) -> LemmyResult<Json<SuccessResponse>> {
   let jwt = read_auth_token(&req)?;
   if let Some(jwt) = jwt {
-    local_user_view_from_jwt(&jwt, &context, false).await?;
+    let expected_local_site_id =
+      TenantContext::from_request_extensions(&req).map(|tenant| tenant.local_site().id);
+    local_user_view_from_jwt(&jwt, &context, false, expected_local_site_id).await?;
   } else {
     return Err(LemmyErrorType::NotLoggedIn.into());
   }

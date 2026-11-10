@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 #[cfg(feature = "full")]
 use lemmy_db_schema_file::schema::private_message;
-use lemmy_db_schema_file::{PersonId, newtypes::PrivateMessageId};
+use lemmy_db_schema_file::{
+  PersonId,
+  newtypes::{LocalSiteId, PrivateMessageId},
+};
 use lemmy_diesel_utils::dburl::DbUrl;
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
@@ -33,6 +36,8 @@ pub struct PrivateMessage {
   pub local: bool,
   pub removed: bool,
   pub deleted_by_recipient: bool,
+  /// The site that created this local private message. NULL for remote messages.
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Clone, derive_new::new)]
@@ -55,6 +60,8 @@ pub struct PrivateMessageInsertForm {
   pub ap_id: Option<DbUrl>,
   #[new(default)]
   pub local: Option<bool>,
+  #[new(default)]
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Clone, Default)]

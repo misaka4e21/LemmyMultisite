@@ -36,7 +36,6 @@ use lemmy_db_schema::{
   traits::Likeable,
 };
 use lemmy_db_schema_file::PersonId;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::{LemmyError, LemmyErrorType, LemmyResult};
 use url::Url;
@@ -121,7 +120,7 @@ impl Activity for CreateOrUpdatePage {
     // allow mods to edit the post
     if !is_same_actor && let Ok(Some(post)) = original_post {
       if is_mod_action {
-        let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+        let local_site = context.site_view()?.local_site.clone();
         let form = PostUpdateForm {
           updated_at: Some(Some(Utc::now())),
           nsfw: post_nsfw(&self.object, &community, Some(&local_site), context).await?,
@@ -140,7 +139,7 @@ impl Activity for CreateOrUpdatePage {
     }
 
     verify_urls_match(self.actor.inner(), self.object.creator()?.inner())?;
-    let site_view = SiteView::read_local(&mut context.pool()).await?;
+    let site_view = context.site_view()?.clone();
 
     let post = ApubPost::from_json(self.object.clone(), context).await?;
 

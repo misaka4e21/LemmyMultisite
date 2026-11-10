@@ -4,7 +4,11 @@ use activitypub_federation::{
 };
 use actix_web::web::{Json, Query};
 use either::Either::*;
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_apub_objects::{
   objects::{SearchableObjects, UserOrCommunity},
   utils::check_is_mod_or_admin,
@@ -15,7 +19,7 @@ use lemmy_db_views_community::{CommunityView, MultiCommunityView};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_person::PersonView;
 use lemmy_db_views_post::PostView;
-use lemmy_db_views_site::{ResolveObjectView, SiteView, api::ResolveObject};
+use lemmy_db_views_site::{ResolveObjectView, api::ResolveObject};
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 use url::Url;
 
@@ -23,11 +27,19 @@ pub async fn resolve_object(
   Query(data): Query<ResolveObject>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<ResolveObjectView>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
   check_private_instance(&local_user_view, &local_site)?;
 
-  let resolve = resolve_object_internal(&data.q, &local_user_view, &context).await?;
+  let resolve = resolve_object_internal(
+    &data.q,
+    &local_user_view,
+    &context,
+    tenant.site_view.site.instance_id,
+    local_site.id,
+  )
+  .await?;
   Ok(Json(resolve))
 }
 
@@ -35,6 +47,8 @@ pub(super) async fn resolve_object_internal(
   query: &str,
   local_user_view: &Option<LocalUserView>,
   context: &Data<LemmyContext>,
+  local_instance_id: lemmy_db_schema_file::InstanceId,
+  local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
 ) -> LemmyResult<ResolveObjectView> {
   use ResolveObjectView::*;
   let is_authenticated = local_user_view.as_ref().is_some_and(|l| !l.banned);
@@ -53,8 +67,6 @@ pub(super) async fn resolve_object_internal(
   let local_user = local_user_view.as_ref().map(|l| l.local_user.clone());
   let is_admin = local_user.as_ref().map(|l| l.admin).unwrap_or_default();
   let pool = &mut context.pool();
-  let local_instance_id = SiteView::read_local(pool).await?.site.instance_id;
-
   Ok(match object {
     Left(Left(Left(p))) => {
       let is_mod = check_is_mod_or_admin(pool, my_person_id, p.community_id)
@@ -68,12 +80,12 @@ pub(super) async fn resolve_object_internal(
     Left(Right(Left(u))) => {
       Person(PersonView::read(pool, u.id, my_person_id_opt, local_instance_id, is_admin).await?)
     }
-    Left(Right(Right(c))) => {
-      Community(CommunityView::read(pool, c.id, local_user.as_ref(), is_admin).await?)
-    }
-    Right(multi) => {
-      MultiCommunity(MultiCommunityView::read(pool, multi.id, my_person_id_opt).await?)
-    }
+    Left(Right(Right(c))) => Community(
+      CommunityView::read(pool, c.id, local_user.as_ref(), is_admin, local_site_id).await?,
+    ),
+    Right(multi) => MultiCommunity(
+      MultiCommunityView::read(pool, multi.id, my_person_id_opt, local_site_id).await?,
+    ),
   })
 }
 
@@ -155,13 +167,34 @@ mod tests {
     let query = post.ap_id.to_string();
 
     // Objects should be resolvable without authentication
-    let res = resolve_object_internal(&query, &None, &context).await?;
+    let res = resolve_object_internal(
+      &query,
+      &None,
+      &context,
+      data.instance.id,
+      data.local_site.id,
+    )
+    .await?;
     assert_response(res, &post);
     // Objects should be resolvable by regular users
-    let res = resolve_object_internal(&query, &Some(regular_user.clone()), &context).await?;
+    let res = resolve_object_internal(
+      &query,
+      &Some(regular_user.clone()),
+      &context,
+      data.instance.id,
+      data.local_site.id,
+    )
+    .await?;
     assert_response(res, &post);
     // Objects should be resolvable by admins
-    let res = resolve_object_internal(&query, &Some(admin_user.clone()), &context).await?;
+    let res = resolve_object_internal(
+      &query,
+      &Some(admin_user.clone()),
+      &context,
+      data.instance.id,
+      data.local_site.id,
+    )
+    .await?;
     assert_response(res, &post);
 
     Post::update(
@@ -175,13 +208,34 @@ mod tests {
     .await?;
 
     // Deleted objects should not be resolvable without authentication
-    let res = resolve_object_internal(&query, &None, &context).await;
+    let res = resolve_object_internal(
+      &query,
+      &None,
+      &context,
+      data.instance.id,
+      data.local_site.id,
+    )
+    .await;
     assert!(res.is_err_and(|e| e.error_type == LemmyErrorType::NotFound));
     // Deleted objects should not be resolvable by regular users
-    let res = resolve_object_internal(&query, &Some(regular_user.clone()), &context).await;
+    let res = resolve_object_internal(
+      &query,
+      &Some(regular_user.clone()),
+      &context,
+      data.instance.id,
+      data.local_site.id,
+    )
+    .await;
     assert!(res.is_err_and(|e| e.error_type == LemmyErrorType::NotFound));
     // Deleted objects should be resolvable by admins
-    let res = resolve_object_internal(&query, &Some(admin_user.clone()), &context).await?;
+    let res = resolve_object_internal(
+      &query,
+      &Some(admin_user.clone()),
+      &context,
+      data.instance.id,
+      data.local_site.id,
+    )
+    .await?;
     assert_response(res, &post);
 
     LocalSite::delete(pool).await?;

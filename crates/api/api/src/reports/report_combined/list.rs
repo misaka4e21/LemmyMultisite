@@ -1,5 +1,9 @@
 use actix_web::web::{Data, Json, Query};
-use lemmy_api_utils::{context::LemmyContext, utils::check_community_mod_of_any_or_admin_action};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_community_mod_of_any_or_admin_action,
+};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_report_combined::{
   ReportCombinedView,
@@ -15,6 +19,7 @@ pub async fn list_reports(
   Query(data): Query<ListReports>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PagedResponse<ReportCombinedView>>> {
   let ListReports {
     unresolved_only,
@@ -34,6 +39,7 @@ pub async fn list_reports(
   }
 
   let reports = ReportCombinedQuery {
+    local_site_id: tenant.local_site().id,
     community_id,
     post_id,
     type_,

@@ -27,7 +27,6 @@ use activitypub_federation::{
 use chrono::{DateTime, Utc};
 use itertools::Itertools;
 use lemmy_api_utils::{context::LemmyContext, utils::proxy_image_link};
-use lemmy_db_views_site::SiteView;
 use lemmy_utils::error::{LemmyError, LemmyErrorType, LemmyResult, UntranslatedError};
 use serde::{Deserialize, Deserializer, Serialize, de::Error};
 use serde_with::skip_serializing_none;
@@ -151,7 +150,7 @@ impl Attachment {
     let name = name.map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "));
 
     if is_image {
-      let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+      let local_site = context.site_view()?.local_site.clone();
       let url = proxy_image_link(url, &local_site, false, context).await?;
       Ok(format!("![{}]({url})", name.unwrap_or_default()))
     } else {

@@ -1,8 +1,8 @@
 {
-  hostname: lemmy-epsilon:8581
   port: 8581
   tls_enabled: false
   setup: {
+    hostname: lemmy-epsilon:8581
     admin_username: lemmy_epsilon
     admin_password: lemmylemmy
     site_name: lemmy-epsilon

@@ -1,4 +1,4 @@
-use lemmy_db_schema::source::local_user::LocalUser;
+use lemmy_db_schema::source::{local_site::LocalSite, local_user::LocalUser};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_diesel_utils::sensitive::SensitiveString;
 use lemmy_utils::{
@@ -17,8 +17,12 @@ pub mod translations {
   rosetta_i18n::include_translations!();
 }
 
-fn inbox_link(settings: &Settings) -> String {
-  format!("{}/inbox", settings.get_protocol_and_hostname())
+fn inbox_link(settings: &Settings, local_site: &LocalSite) -> String {
+  format!(
+    "{}://{}/inbox",
+    settings.get_protocol_string(),
+    local_site.hostname
+  )
 }
 
 #[expect(clippy::expect_used)]

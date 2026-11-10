@@ -81,7 +81,7 @@ fn generate_activity_id<T>(kind: T, context: &LemmyContext) -> LemmyResult<Url>
 where
   T: ToString,
 {
-  let hostname = context.settings().get_protocol_and_hostname();
+  let hostname = context.protocol_and_hostname();
   let kind_str = kind.to_string().to_lowercase();
   let id = format!("{}/activities/{}/{}", hostname, kind_str, Uuid::new_v4());
   Ok(Url::parse(&id)?)
@@ -98,7 +98,7 @@ fn generate_activity_id_with_object_id<T>(
 where
   T: ToString,
 {
-  let hostname = context.settings().get_protocol_and_hostname();
+  let hostname = context.protocol_and_hostname();
   let kind_str = kind.to_string().to_lowercase();
   let mut seed = object_id.clone();
   seed.set_fragment(Some(&timestamp.to_rfc3339()));
@@ -148,6 +148,20 @@ where
 {
   info!("Saving outgoing activity to queue {}", activity.id());
 
+  let local_site_id = match actor.local_site_id() {
+    Some(local_site_id) => local_site_id,
+    None => {
+      let domain = actor
+        .id()
+        .domain()
+        .ok_or(lemmy_utils::error::UntranslatedError::UrlWithoutDomain)?;
+      SiteView::read_by_hostname(&mut data.pool(), domain)
+        .await?
+        .local_site
+        .id
+    }
+  };
+
   let form = SentActivityForm {
     ap_id: activity.id().clone().into(),
     data: serde_json::to_value(activity)?,
@@ -161,6 +175,7 @@ where
     send_community_followers_of: send_targets.community_followers_of.map(|e| e.0),
     actor_type: actor.actor_type(),
     actor_apub_id: actor.id().clone().into(),
+    local_site_id,
   };
   SentActivity::create(&mut data.pool(), form).await?;
 
@@ -433,7 +448,7 @@ pub(crate) async fn post_or_comment_community(
   match post_or_comment {
     PostOrComment::Left(p) => Community::read(&mut context.pool(), p.community_id).await,
     PostOrComment::Right(c) => {
-      let site_view = SiteView::read_local(&mut context.pool()).await?;
+      let site_view = context.site_view()?.clone();
       Ok(
         PostView::read(
           &mut context.pool(),

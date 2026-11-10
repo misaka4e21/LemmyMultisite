@@ -3,7 +3,7 @@ use activitypub_federation::{
   fetch::webfinger::{WEBFINGER_CONTENT_TYPE, Webfinger, WebfingerLink, extract_webfinger_name},
 };
 use actix_web::{HttpResponse, web, web::Query};
-use lemmy_api_utils::context::LemmyContext;
+use lemmy_api_utils::{context::LemmyContext, tenant::TenantContext};
 use lemmy_db_schema::{
   source::{community::Community, person::Person},
   traits::ApubActor,
@@ -37,31 +37,43 @@ pub fn config(cfg: &mut web::ServiceConfig) {
 async fn get_webfinger_response(
   info: Query<Params>,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<HttpResponse> {
   let name = extract_webfinger_name(&info.resource, &context)?;
 
-  let links = if name == context.settings().hostname {
+  let links = if name == tenant.hostname {
     // webfinger response for instance actor (required for mastodon authorized fetch)
-    let url = Url::parse(&context.settings().get_protocol_and_hostname())?;
-    vec![webfinger_link_for_actor(Some(url), "none", &context)?]
+    let url = Url::parse(&format!("{}://{}", tenant.scheme, tenant.hostname))?;
+    vec![webfinger_link_for_actor(Some(url), "none", &tenant)?]
   } else {
     // webfinger response for user/community
-    let user_id: Option<Url> = Person::read_from_name(&mut context.pool(), name, None, false)
-      .await
-      .ok()
-      .flatten()
-      .map(|c| c.ap_id.into());
-    let community_id: Option<Url> =
-      Community::read_from_name(&mut context.pool(), name, None, false)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|c| {
-          c.visibility.can_federate().then(|| {
-            let id: Url = c.ap_id.into();
-            id
-          })
-        });
+    let user_id: Option<Url> = Person::read_from_name(
+      &mut context.pool(),
+      name,
+      None,
+      Some(tenant.local_site().id),
+      false,
+    )
+    .await
+    .ok()
+    .flatten()
+    .map(|c| c.ap_id.into());
+    let community_id: Option<Url> = Community::read_from_name(
+      &mut context.pool(),
+      name,
+      None,
+      Some(tenant.local_site().id),
+      false,
+    )
+    .await
+    .ok()
+    .flatten()
+    .and_then(|c| {
+      c.visibility.can_federate().then(|| {
+        let id: Url = c.ap_id.into();
+        id
+      })
+    });
 
     // NOTE: Do not change the order of these items!
     // Mastodon seems to prioritize the last webfinger item in case of duplicates. Put
@@ -69,8 +81,8 @@ async fn get_webfinger_response(
     // Lemmy also relies on this specific order, so in case a resolve for `reddit@lemmy.world`
     // gives both user and community, the community is returned (also necessary for remote follow).
     vec![
-      webfinger_link_for_actor(user_id, "Person", &context)?,
-      webfinger_link_for_actor(community_id, "Group", &context)?,
+      webfinger_link_for_actor(user_id, "Person", &tenant)?,
+      webfinger_link_for_actor(community_id, "Group", &tenant)?,
     ]
   }
   .into_iter()
@@ -97,7 +109,7 @@ async fn get_webfinger_response(
 fn webfinger_link_for_actor(
   url: Option<Url>,
   kind: &str,
-  context: &LemmyContext,
+  tenant: &TenantContext,
 ) -> LemmyResult<Vec<WebfingerLink>> {
   if let Some(url) = url {
     let type_key = "https://www.w3.org/ns/activitystreams#type"
@@ -123,8 +135,8 @@ fn webfinger_link_for_actor(
     // insert remote follow link
     if kind == "Person" {
       let template = format!(
-        "{}/activitypub/externalInteraction?uri={{uri}}",
-        context.settings().get_protocol_and_hostname()
+        "{}://{}/activitypub/externalInteraction?uri={{uri}}",
+        tenant.scheme, tenant.hostname
       );
       vec.push(WebfingerLink {
         rel: Some("http://ostatus.org/schema/1.0/subscribe".into()),

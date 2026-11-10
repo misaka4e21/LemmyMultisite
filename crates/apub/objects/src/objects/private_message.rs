@@ -22,6 +22,7 @@ use lemmy_api_utils::{
   utils::{check_private_messages_enabled, get_url_blocklist, process_markdown, slur_regex},
 };
 use lemmy_db_schema::{
+  impls::presence::ensure_private_message_site,
   source::{
     instance::{Instance, InstanceActions},
     person::{Person, PersonActions},
@@ -31,7 +32,6 @@ use lemmy_db_schema::{
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_private_message::PrivateMessageView;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::{
   error::{LemmyError, LemmyErrorType, LemmyResult},
@@ -150,7 +150,7 @@ impl Object for ApubPrivateMessage {
     }
     let slur_regex = slur_regex(context).await?;
     let url_blocklist = get_url_blocklist(context).await?;
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = context.site_view()?.local_site.clone();
 
     let content = read_from_string_or_source(&note.content, &None, &note.source);
     let content =
@@ -166,12 +166,26 @@ impl Object for ApubPrivateMessage {
       deleted: Some(false),
       ap_id: Some(note.id.into()),
       local: Some(false),
+      origin_local_site_id: None,
     };
     form = plugin_hook_before("federated_private_message_before_receive", form).await?;
     let timestamp = note.updated.or(note.published).unwrap_or_else(Utc::now);
     let pm = DbPrivateMessage::upsert_apub(&mut context.pool(), timestamp, &form).await?;
+    ensure_private_message_site(
+      &mut context.pool(),
+      context.site_view()?.local_site.id,
+      pm.id,
+      "recipient",
+    )
+    .await?;
     plugin_hook_after("federated_private_message_after_receive", &pm);
-    let view = PrivateMessageView::read(&mut context.pool(), pm.id, None).await?;
+    let view = PrivateMessageView::read(
+      &mut context.pool(),
+      pm.id,
+      None,
+      context.site_view()?.local_site.id,
+    )
+    .await?;
     notify_private_message(&view, pm.updated_at.is_none(), context);
     Ok(pm.into())
   }

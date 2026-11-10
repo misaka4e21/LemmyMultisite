@@ -11,7 +11,7 @@ use lemmy_db_schema_file::{
     PostSortType,
     VoteShow,
   },
-  newtypes::LocalUserId,
+  newtypes::{LocalSiteId, LocalUserId},
 };
 use lemmy_diesel_utils::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,8 @@ pub struct LocalUser {
   /// Whether the UI should hide images and video until the user asks for them.
   /// `auto` follows the device data-saver setting; web UIs treat it as `never`.
   pub low_bandwidth_mode: LowBandwidthMode,
+  /// The site that owns this account.
+  pub local_site_id: LocalSiteId,
 }
 
 #[derive(Clone, derive_new::new)]
@@ -98,6 +100,7 @@ pub struct LocalUser {
 #[cfg_attr(feature = "full", diesel(table_name = local_user))]
 pub struct LocalUserInsertForm {
   pub person_id: PersonId,
+  pub local_site_id: LocalSiteId,
   pub password_encrypted: Option<String>,
   #[new(default)]
   pub email: Option<String>,

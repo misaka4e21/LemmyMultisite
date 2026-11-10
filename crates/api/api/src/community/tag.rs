@@ -32,8 +32,14 @@ pub async fn create_community_tag(
 ) -> LemmyResult<Json<CommunityTag>> {
   is_valid_actor_name(&data.name)?;
 
-  let community_view =
-    CommunityView::read(&mut context.pool(), data.community_id, None, false).await?;
+  let community_view = CommunityView::read(
+    &mut context.pool(),
+    data.community_id,
+    None,
+    false,
+    local_user_view.local_user.local_site_id,
+  )
+  .await?;
   let community = community_view.community;
 
   // Verify that only mods can create tags

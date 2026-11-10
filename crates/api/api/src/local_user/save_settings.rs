@@ -2,6 +2,7 @@ use activitypub_federation::config::Data;
 use actix_web::web::Json;
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{
     check_local_user_banned_or_deleted,
     get_url_blocklist,
@@ -19,10 +20,7 @@ use lemmy_db_schema::{
   utils::limit_fetch_check,
 };
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::{
-  SiteView,
-  api::{SaveUserSettings, SuccessResponse},
-};
+use lemmy_db_views_site::api::{SaveUserSettings, SuccessResponse};
 use lemmy_diesel_utils::{
   traits::Crud,
   utils::{diesel_opt_number_update, diesel_string_update},
@@ -43,9 +41,10 @@ pub async fn save_user_settings(
   Json(data): Json<SaveUserSettings>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SuccessResponse>> {
   check_local_user_banned_or_deleted(&local_user_view)?;
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let slur_regex = slur_regex(&context).await?;
   let url_blocklist = get_url_blocklist(&context).await?;
@@ -70,7 +69,7 @@ pub async fn save_user_settings(
     let previous_email = local_user_view.local_user.email.clone().unwrap_or_default();
     // if email was changed, check that it is not taken and send verification mail
     if previous_email.deref() != email {
-      LocalUser::check_is_email_taken(&mut context.pool(), &email).await?;
+      LocalUser::check_is_email_taken(&mut context.pool(), local_site.id, &email).await?;
       send_verification_email(
         &local_site,
         &local_user_view,

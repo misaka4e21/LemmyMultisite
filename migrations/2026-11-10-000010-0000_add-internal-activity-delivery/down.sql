@@ -1,0 +1,1 @@
+DROP TABLE internal_activity_delivery;

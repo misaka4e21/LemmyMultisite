@@ -6,6 +6,7 @@
   # release / stable version.
 
   setup: {
+    hostname: "localhost"
     admin_username: "lemmy"
     admin_password: "lemmylemmy"
     site_name: "lemmy-dev"
@@ -14,7 +15,6 @@
     connection: "postgres://lemmy:password@postgres:5432/lemmy"
   }
 
-  hostname: "localhost"
   bind: "0.0.0.0"
   port: 8536
 

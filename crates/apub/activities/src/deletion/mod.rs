@@ -45,7 +45,7 @@ use lemmy_db_schema::source::{
   private_message::{PrivateMessage as DbPrivateMessage, PrivateMessageUpdateForm},
 };
 use lemmy_db_schema_file::enums::CommunityVisibility;
-use lemmy_db_views_site::{SiteView, api::DeleteUserForm};
+use lemmy_db_views_site::api::DeleteUserForm;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::{error::LemmyResult, spawn_try_task};
 use std::ops::Deref;
@@ -312,7 +312,7 @@ async fn receive_delete_action(
       .await?;
     }
     DeletableObjects::Person(person) => {
-      let site_view = SiteView::read_local(&mut context.pool()).await?;
+      let site_view = context.site_view()?.clone();
       let local_instance_id = site_view.site.instance_id;
 
       let mut form = DeleteUserForm {

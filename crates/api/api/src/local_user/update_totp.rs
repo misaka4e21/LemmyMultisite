@@ -25,7 +25,7 @@ pub async fn edit_totp(
   check_totp_2fa_valid(
     &local_user_view,
     &Some(data.totp_token.clone()),
-    &context.settings().hostname,
+    context.hostname(),
   )?;
 
   // toggle the 2fa setting

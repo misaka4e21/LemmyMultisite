@@ -1,0 +1,19 @@
+DROP INDEX idx_person_origin_local_site_id;
+
+DROP INDEX idx_person_origin_local_site_name;
+
+DROP INDEX idx_community_origin_local_site_id;
+
+DROP INDEX idx_community_origin_local_site_name;
+
+DROP INDEX idx_post_origin_local_site_id;
+
+DROP INDEX idx_comment_origin_local_site_id;
+
+DROP INDEX idx_private_message_origin_local_site_id;
+
+DROP INDEX idx_multi_community_origin_local_site_id;
+
+DROP INDEX idx_multi_community_origin_local_site_name;
+
+DROP INDEX idx_received_activity_local_site_published;

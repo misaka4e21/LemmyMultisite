@@ -1,5 +1,5 @@
 use crate::source::local_site::{LocalSite, LocalSiteInsertForm, LocalSiteUpdateForm};
-use diesel::dsl::insert_into;
+use diesel::{QueryDsl, dsl::insert_into};
 use diesel_async::RunQueryDsl;
 use lemmy_db_schema_file::schema::local_site;
 use lemmy_diesel_utils::connection::{DbPool, get_conn};
@@ -30,6 +30,15 @@ impl LocalSite {
       .execute(conn)
       .await
       .with_lemmy_type(LemmyErrorType::Deleted)
+  }
+
+  pub async fn list_hostnames(pool: &mut DbPool<'_>) -> LemmyResult<Vec<String>> {
+    let conn = &mut get_conn(pool).await?;
+    local_site::table
+      .select(local_site::hostname)
+      .load(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)
   }
 }
 

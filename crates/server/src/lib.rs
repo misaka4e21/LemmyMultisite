@@ -1,4 +1,3 @@
-use activitypub_federation::config::{FederationConfig, FederationMiddleware};
 use actix_web::{
   App,
   HttpResponse,
@@ -16,15 +15,11 @@ use lemmy_api_utils::{
   send_activity::ActivityChannel,
   utils::local_site_rate_limit_to_rate_limit_config,
 };
-use lemmy_apub::{
-  FEDERATION_HTTP_FETCH_LIMIT,
-  VerifyUrlData,
-  collections::fetch_community_collections,
-};
+use lemmy_apub::collections::fetch_community_collections;
 use lemmy_apub_activities::handle_outgoing_activities;
-use lemmy_apub_objects::objects::{community::FETCH_COMMUNITY_COLLECTIONS, instance::ApubSite};
+use lemmy_apub_objects::objects::community::FETCH_COMMUNITY_COLLECTIONS;
 use lemmy_apub_send::{Opts, SendManager};
-use lemmy_db_schema::source::secret::Secret;
+use lemmy_db_schema::source::{installation_admin::InstallationAdmin, secret::Secret};
 use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::connection::build_db_pool;
 use lemmy_routes::{
@@ -32,6 +27,7 @@ use lemmy_routes::{
   middleware::{
     idempotency::{IdempotencyMiddleware, IdempotencySet},
     session::SessionMiddleware,
+    tenant::TenantMiddleware,
   },
   nodeinfo,
   utils::{
@@ -52,9 +48,11 @@ use lemmy_utils::{
 use reqwest_middleware::ClientBuilder;
 use reqwest_tracing::TracingMiddleware;
 use serde_json::json;
-use std::{ops::Deref, time::Duration};
+use std::time::Duration;
 use tokio::signal::unix::SignalKind;
 use tracing_actix_web::{DefaultRootSpanBuilder, TracingLogger};
+
+mod federation;
 
 #[cfg_attr(target_arch = "x86_64", global_allocator)]
 #[cfg(target_arch = "x86_64")]
@@ -187,10 +185,19 @@ pub async fn start_lemmy_server(args: CmdArgs) -> LemmyResult<()> {
 
   // Make sure the local site is set up.
   let site_view = setup_local_site(&mut (&pool).into(), &SETTINGS).await?;
+  if let (Ok(username), Ok(password)) = (
+    std::env::var("LEMMY_INSTALLATION_ADMIN_USERNAME"),
+    std::env::var("LEMMY_INSTALLATION_ADMIN_PASSWORD"),
+  ) {
+    InstallationAdmin::bootstrap(&mut (&pool).into(), &username, &password).await?;
+  }
   let federation_enabled = site_view.local_site.federation_enabled;
 
   if federation_enabled {
-    println!("Federation enabled, host is {}", SETTINGS.hostname);
+    println!(
+      "Federation enabled, host is {}",
+      site_view.local_site.hostname
+    );
   }
 
   // Set up the rate limiter
@@ -217,24 +224,23 @@ pub async fn start_lemmy_server(args: CmdArgs) -> LemmyResult<()> {
     rate_limit_cell,
   );
 
+  for site in SiteView::read_all(&mut context.pool()).await? {
+    let config = local_site_rate_limit_to_rate_limit_config(&site.local_site_rate_limit);
+    context
+      .rate_limit_cell()
+      .set_config_for_site(site.local_site.id, config);
+  }
+
   if let Some(prometheus) = SETTINGS.prometheus.clone() {
     serve_prometheus(prometheus, context.clone())?;
   }
 
-  let mut federation_config_builder = FederationConfig::builder();
-  federation_config_builder
-    .domain(SETTINGS.hostname.clone())
-    .app_data(context.clone())
-    .client(client.clone())
-    .http_fetch_limit(FEDERATION_HTTP_FETCH_LIMIT)
-    .debug(cfg!(debug_assertions))
-    .http_signature_compat(true)
-    .url_verifier(Box::new(VerifyUrlData(context.inner_pool().clone())));
-  if site_view.local_site.federation_signed_fetch {
-    let site: ApubSite = site_view.site.clone().into();
-    federation_config_builder.signed_fetch_actor(&site);
-  }
-  let federation_config = federation_config_builder.build().await?;
+  let federation_configs = federation::build_federation_configs(&context, None).await?;
+  let federation_config = federation_configs
+    .values()
+    .next()
+    .cloned()
+    .ok_or(LemmyErrorType::LocalSiteNotSetup)?;
 
   FETCH_COMMUNITY_COLLECTIONS
     .set(fetch_community_collections)
@@ -255,9 +261,10 @@ pub async fn start_lemmy_server(args: CmdArgs) -> LemmyResult<()> {
     }
 
     Some(create_http_server(
-      federation_config.clone(),
+      context.clone(),
+      federation_configs.clone(),
       SETTINGS.clone(),
-      site_view,
+      site_view.clone(),
     )?)
   } else {
     None
@@ -265,23 +272,26 @@ pub async fn start_lemmy_server(args: CmdArgs) -> LemmyResult<()> {
 
   // This FederationConfig instance is exclusively used to send activities, so we can safely
   // increase the timeout without affecting timeouts for resolving objects anywhere.
-  let federation_sender_config = if !args.disable_activity_sending {
-    let mut federation_sender_config = federation_config_builder.clone();
-    federation_sender_config.request_timeout(ACTIVITY_SENDING_TIMEOUT);
-    Some(federation_sender_config.build().await?)
+  let federation_sender_configs = if !args.disable_activity_sending {
+    Some(federation::build_federation_configs(&context, Some(ACTIVITY_SENDING_TIMEOUT)).await?)
   } else {
     None
   };
-  let federate = federation_sender_config.map(|cfg| {
-    SendManager::run(
+  let federate = federation_sender_configs.and_then(|configs| {
+    let first = configs.values().next().cloned()?;
+    Some(SendManager::run(
       Opts {
         process_index: args.federate_process_index,
         process_count: args.federate_process_count,
       },
-      cfg,
+      first,
+      configs,
       SETTINGS.federation.clone(),
-    )
+    ))
   });
+  tokio::spawn(lemmy_apub::internal::run_internal_delivery_loop(
+    context.clone(),
+  ));
   let mut interrupt = tokio::signal::unix::signal(SignalKind::interrupt())?;
   let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
 
@@ -330,7 +340,8 @@ fn create_startup_server() -> LemmyResult<ServerHandle> {
 }
 
 fn create_http_server(
-  federation_config: FederationConfig<LemmyContext>,
+  context: LemmyContext,
+  federation_configs: federation::FederationConfigs,
   settings: Settings,
   site_view: SiteView,
 ) -> LemmyResult<ServerHandle> {
@@ -341,8 +352,8 @@ fn create_http_server(
   // Create Http server
   let bind = (settings.bind, settings.port);
   let server = HttpServer::new(move || {
-    let context: LemmyContext = federation_config.deref().clone();
-    let rate_limit = federation_config.rate_limit_cell().clone();
+    let context = context.clone();
+    let rate_limit = context.rate_limit_cell().clone();
 
     let cors_config = cors_config(&settings);
     let app = App::new()
@@ -357,13 +368,17 @@ fn create_http_server(
       .wrap(cors_config)
       .wrap(TracingLogger::<DefaultRootSpanBuilder>::new())
       .app_data(Data::new(context.clone()))
-      .wrap(FederationMiddleware::new(federation_config.clone()))
+      .wrap(federation::TenantFederationMiddleware::new(
+        federation_configs.clone(),
+        context.clone(),
+      ))
       .wrap(IdempotencyMiddleware::new(idempotency_set.clone()))
       .wrap(SessionMiddleware::new(context.clone()))
       .wrap(Condition::new(
         SETTINGS.prometheus.is_some(),
         prom_api_metrics.clone(),
-      ));
+      ))
+      .wrap(TenantMiddleware::new(context.clone()));
 
     // The routes
     app

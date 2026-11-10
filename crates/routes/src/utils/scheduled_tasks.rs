@@ -671,6 +671,7 @@ async fn update_local_user_count(pool: &mut DbPool<'_>) -> LemmyResult<()> {
     .set(local_site::local_users.eq(user_count))
     .execute(conn)
     .await?;
+  SiteView::invalidate_all().await;
 
   info!("Done.");
   Ok(())
@@ -679,14 +680,21 @@ async fn update_local_user_count(pool: &mut DbPool<'_>) -> LemmyResult<()> {
 async fn update_linked_instance_count(pool: &mut DbPool<'_>) -> LemmyResult<()> {
   info!("Updating the linked instance count...");
 
-  let linked_instance_count = FederatedInstanceView::count(pool).await?;
+  let mut linked_instance_counts = Vec::new();
+  for site_view in SiteView::read_all(pool).await? {
+    let count = FederatedInstanceView::count(pool, site_view.local_site.id).await?;
+    linked_instance_counts.push((site_view.local_site.id, count));
+  }
 
   let conn = &mut get_conn(pool).await?;
 
-  update(local_site::table)
-    .set(local_site::linked_instances.eq(linked_instance_count))
-    .execute(conn)
-    .await?;
+  for (local_site_id, count) in linked_instance_counts {
+    update(local_site::table.find(local_site_id))
+      .set(local_site::linked_instances.eq(count))
+      .execute(conn)
+      .await?;
+  }
+  SiteView::invalidate_all().await;
 
   info!("Done.");
   Ok(())
@@ -695,7 +703,6 @@ async fn update_linked_instance_count(pool: &mut DbPool<'_>) -> LemmyResult<()> 
 async fn update_total_counts(pool: &mut DbPool<'_>) -> LemmyResult<()> {
   info!("Updating total counts ...");
 
-  let local_instance_id = SiteView::read_local(pool).await?.instance.id;
   let conn = &mut get_conn(pool).await?;
 
   let total_post_count = post::table
@@ -719,14 +726,9 @@ async fn update_total_counts(pool: &mut DbPool<'_>) -> LemmyResult<()> {
     .await
     .map(i32::try_from)??;
 
-  let banned_on_local_instance = instance_actions::table
-    .find((person::id, local_instance_id))
-    .filter(instance_actions::received_ban_at.is_not_null());
-
   let total_user_count = person::table
     .filter(not(person::deleted))
     .filter(not(person::bot_account))
-    .filter(not(exists(banned_on_local_instance)))
     .select(count_star())
     .first::<i64>(conn)
     .await
@@ -741,6 +743,7 @@ async fn update_total_counts(pool: &mut DbPool<'_>) -> LemmyResult<()> {
     ))
     .execute(conn)
     .await?;
+  SiteView::invalidate_all().await;
 
   info!("Done.");
 
@@ -828,34 +831,38 @@ async fn delete_invitations_when_expired(pool: &mut DbPool<'_>) -> LemmyResult<(
 /// Find all unpublished posts with scheduled date in the future, and publish them.
 async fn publish_scheduled_posts(context: &Data<LemmyContext>) -> LemmyResult<()> {
   let pool = &mut context.pool();
-  let local_instance_id = SiteView::read_local(pool).await?.instance.id;
-  let conn = &mut get_conn(pool).await?;
+  let sites = SiteView::read_all(pool).await?;
+  let mut scheduled_posts = Vec::new();
+  for site_view in sites {
+    let conn = &mut get_conn(pool).await?;
+    let not_community_banned_action = community_actions::table
+      .find((person::id, community::id))
+      .filter(community_actions::received_ban_at.is_not_null());
 
-  let not_community_banned_action = community_actions::table
-    .find((person::id, community::id))
-    .filter(community_actions::received_ban_at.is_not_null());
+    let not_local_banned_action = instance_actions::table
+      .find((person::id, site_view.instance.id))
+      .filter(instance_actions::received_ban_at.is_not_null());
 
-  let not_local_banned_action = instance_actions::table
-    .find((person::id, local_instance_id))
-    .filter(instance_actions::received_ban_at.is_not_null());
-
-  let scheduled_posts: Vec<_> = post::table
-    .inner_join(community::table)
-    .inner_join(person::table)
-    // find all posts which have scheduled_publish_time that is in the  past
-    .filter(post::scheduled_publish_time_at.is_not_null())
-    .filter(coalesce(post::scheduled_publish_time_at, now()).lt(now()))
-    // make sure the post, person and community are still around
-    .filter(not(post::deleted.or(post::removed)))
-    .filter(not(person::deleted))
-    .filter(not(community::removed.or(community::deleted)))
-    // ensure that user isnt banned from community
-    .filter(not(exists(not_community_banned_action)))
-    // ensure that user isnt banned from local
-    .filter(not(exists(not_local_banned_action)))
-    .select(Post::as_select())
-    .get_results::<Post>(conn)
-    .await?;
+    let posts: Vec<Post> = post::table
+      .inner_join(community::table)
+      .inner_join(person::table)
+      // find all posts which have scheduled_publish_time that is in the  past
+      .filter(post::scheduled_publish_time_at.is_not_null())
+      .filter(coalesce(post::scheduled_publish_time_at, now()).lt(now()))
+      .filter(post::origin_local_site_id.eq(site_view.local_site.id))
+      // make sure the post, person and community are still around
+      .filter(not(post::deleted.or(post::removed)))
+      .filter(not(person::deleted))
+      .filter(not(community::removed.or(community::deleted)))
+      // ensure that user isnt banned from community
+      .filter(not(exists(not_community_banned_action)))
+      // ensure that user isnt banned from local
+      .filter(not(exists(not_local_banned_action)))
+      .select(Post::as_select())
+      .get_results::<Post>(conn)
+      .await?;
+    scheduled_posts.extend(posts);
+  }
 
   for post in scheduled_posts {
     // mark post as published in db
@@ -1262,7 +1269,9 @@ mod tests {
     );
     Post::create(pool, &remote_post).await?;
 
-    let local_site_before = SiteView::read_local(pool).await?.local_site;
+    let local_site_before = SiteView::read_by_id(pool, data.local_site.id)
+      .await?
+      .local_site;
     assert_eq!(0, local_site_before.total_posts);
     assert_eq!(0, local_site_before.total_comments);
     assert_eq!(0, local_site_before.total_users);
@@ -1272,7 +1281,9 @@ mod tests {
     // run the queries
     update_total_counts(pool).await?;
     update_linked_instance_count(pool).await?;
-    let local_site_after = SiteView::read_local(pool).await?.local_site;
+    let local_site_after = SiteView::read_by_id(pool, data.local_site.id)
+      .await?
+      .local_site;
 
     // totals include both local and federated objects
     assert_eq!(2, local_site_after.total_posts);
@@ -1450,7 +1461,9 @@ mod tests {
     let conn = &mut get_conn(pool).await?;
     process_retention_percents(conn, ONE_MONTH).await?;
 
-    let local_site = SiteView::read_local(pool).await?.local_site;
+    let local_site = SiteView::read_by_id(pool, data.local_site.id)
+      .await?
+      .local_site;
     assert_eq!(local_site.user_retention_month_percent, 50);
 
     data.delete(pool).await?;

@@ -4,7 +4,7 @@ use lemmy_db_schema_file::{
   InstanceId,
   PersonId,
   enums::{CommunityFollowerState, CommunityNotificationsMode, CommunityVisibility, VoteSettings},
-  newtypes::CommunityId,
+  newtypes::{CommunityId, LocalSiteId},
 };
 use lemmy_diesel_utils::{dburl::DbUrl, sensitive::SensitiveString};
 use serde::{Deserialize, Serialize};
@@ -99,6 +99,8 @@ pub struct Community {
   pub post_downvotes: VoteSettings,
   pub comment_upvotes: VoteSettings,
   pub comment_downvotes: VoteSettings,
+  /// The site that owns this local community. NULL for remote communities.
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Debug, Clone, derive_new::new)]
@@ -158,6 +160,8 @@ pub struct CommunityInsertForm {
   pub comment_upvotes: Option<VoteSettings>,
   #[new(default)]
   pub comment_downvotes: Option<VoteSettings>,
+  #[new(default)]
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -192,6 +196,7 @@ pub struct CommunityUpsertForm {
   pub post_downvotes: Option<VoteSettings>,
   pub comment_upvotes: Option<VoteSettings>,
   pub comment_downvotes: Option<VoteSettings>,
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Debug, Clone, Default)]

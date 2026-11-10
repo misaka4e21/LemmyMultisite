@@ -1,7 +1,7 @@
 use crate::source::federation_allowlist::{FederationAllowList, FederationAllowListForm};
-use diesel::{ExpressionMethods, QueryDsl, delete, dsl::insert_into};
+use diesel::{BoolExpressionMethods, ExpressionMethods, QueryDsl, delete, dsl::insert_into};
 use diesel_async::RunQueryDsl;
-use lemmy_db_schema_file::{InstanceId, schema::federation_allowlist};
+use lemmy_db_schema_file::{InstanceId, newtypes::LocalSiteId, schema::federation_allowlist};
 use lemmy_diesel_utils::connection::{DbPool, get_conn};
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 
@@ -14,12 +14,22 @@ impl FederationAllowList {
       .await
       .with_lemmy_type(LemmyErrorType::CouldntCreate)
   }
-  pub async fn unallow(pool: &mut DbPool<'_>, instance_id_: InstanceId) -> LemmyResult<usize> {
+  pub async fn unallow(
+    pool: &mut DbPool<'_>,
+    local_site_id_: LocalSiteId,
+    instance_id_: InstanceId,
+  ) -> LemmyResult<usize> {
     let conn = &mut get_conn(pool).await?;
-    delete(federation_allowlist::table.filter(federation_allowlist::instance_id.eq(instance_id_)))
-      .execute(conn)
-      .await
-      .with_lemmy_type(LemmyErrorType::Deleted)
+    delete(
+      federation_allowlist::table.filter(
+        federation_allowlist::local_site_id
+          .eq(local_site_id_)
+          .and(federation_allowlist::instance_id.eq(instance_id_)),
+      ),
+    )
+    .execute(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::Deleted)
   }
 }
 
@@ -44,7 +54,7 @@ mod tests {
     ];
     let forms: Vec<_> = instances
       .iter()
-      .map(|i| FederationAllowListForm::new(i.id))
+      .map(|i| FederationAllowListForm::new(i.id, LocalSiteId(1)))
       .collect();
 
     for f in &forms {
@@ -58,7 +68,7 @@ mod tests {
 
     // Now test clearing them
     for f in forms {
-      FederationAllowList::unallow(pool, f.instance_id).await?;
+      FederationAllowList::unallow(pool, LocalSiteId(1), f.instance_id).await?;
     }
     let allows = Instance::allowlist(pool).await?;
     assert_eq!(0, allows.len());

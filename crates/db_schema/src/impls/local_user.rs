@@ -15,7 +15,7 @@ use diesel::{
 use diesel_async::RunQueryDsl;
 use lemmy_db_schema_file::{
   PersonId,
-  newtypes::{CommunityId, LanguageId, LocalUserId},
+  newtypes::{CommunityId, LanguageId, LocalSiteId, LocalUserId},
   schema::{community_actions, local_user, person, registration_application},
 };
 use lemmy_diesel_utils::{
@@ -141,12 +141,18 @@ impl LocalUser {
       .with_lemmy_type(LemmyErrorType::Deleted)
   }
 
-  pub async fn check_is_email_taken(pool: &mut DbPool<'_>, email: &str) -> LemmyResult<()> {
+  pub async fn check_is_email_taken(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    email: &str,
+  ) -> LemmyResult<()> {
     use diesel::dsl::{exists, select};
     let conn = &mut get_conn(pool).await?;
-    select(not(exists(local_user::table.filter(
-      lower(coalesce(local_user::email, "")).eq(email.to_lowercase()),
-    ))))
+    select(not(exists(
+      local_user::table
+        .filter(local_user::local_site_id.eq(local_site_id))
+        .filter(lower(coalesce(local_user::email, "")).eq(email.to_lowercase())),
+    )))
     .get_result::<bool>(conn)
     .await?
     .then_some(())
@@ -353,7 +359,7 @@ impl LocalUserOptionHelper for Option<&LocalUser> {
 
 impl LocalUserInsertForm {
   pub fn test_form(person_id: PersonId) -> Self {
-    Self::new(person_id, Some(String::new()))
+    Self::new(person_id, LocalSiteId(1), Some(String::new()))
   }
 
   pub fn test_form_admin(person_id: PersonId) -> Self {
@@ -440,17 +446,140 @@ mod tests {
     let mut darwin_local_user_form =
       LocalUserInsertForm::test_form_admin(inserted_darwin_person.id);
     darwin_local_user_form.email = Some(darwin_email.into());
-    let _inserted_darwin_local_user =
+    let inserted_darwin_local_user =
       LocalUser::create(pool, &darwin_local_user_form, vec![]).await?;
 
-    let check = LocalUser::check_is_email_taken(pool, darwin_email).await;
+    let check =
+      LocalUser::check_is_email_taken(pool, inserted_darwin_local_user.local_site_id, darwin_email)
+        .await;
     assert!(check.is_err());
 
-    let passed_check = LocalUser::check_is_email_taken(pool, "not_charles@gmail.com").await;
+    let passed_check = LocalUser::check_is_email_taken(
+      pool,
+      inserted_darwin_local_user.local_site_id,
+      "not_charles@gmail.com",
+    )
+    .await;
     assert!(passed_check.is_ok());
 
     Instance::delete(pool, inserted_instance.id).await?;
 
+    Ok(())
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn same_username_and_email_on_two_sites() -> LemmyResult<()> {
+    use crate::source::{
+      community::{Community, CommunityInsertForm},
+      local_site::{LocalSite, LocalSiteInsertForm},
+      site::{Site, SiteUpsertForm},
+    };
+    use chrono::Utc;
+
+    let pool = &build_db_pool_for_tests();
+    let pool = &mut pool.into();
+    let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let first_domain = format!("first-{suffix}.example");
+    let second_domain = format!("second-{suffix}.example");
+    let first_instance = Instance::read_or_create(pool, &first_domain).await?;
+    let second_instance = Instance::read_or_create(pool, &second_domain).await?;
+    let first_site = Site::create(
+      pool,
+      &SiteUpsertForm::new("first site".into(), first_instance.id),
+    )
+    .await?;
+    let second_site = Site::create(
+      pool,
+      &SiteUpsertForm::new("second site".into(), second_instance.id),
+    )
+    .await?;
+    let first_system = Person::create(
+      pool,
+      &PersonInsertForm::test_form(first_instance.id, "first_system"),
+    )
+    .await?;
+    let second_system = Person::create(
+      pool,
+      &PersonInsertForm::test_form(second_instance.id, "second_system"),
+    )
+    .await?;
+    let first_local_site = LocalSite::create(
+      pool,
+      &LocalSiteInsertForm::new(first_site.id, first_system.id, first_domain.clone()),
+    )
+    .await?;
+    let second_local_site = LocalSite::create(
+      pool,
+      &LocalSiteInsertForm::new(second_site.id, second_system.id, second_domain.clone()),
+    )
+    .await?;
+
+    let username = format!("same_name_{suffix}");
+    let first_person = Person::create(
+      pool,
+      &PersonInsertForm {
+        origin_local_site_id: Some(first_local_site.id),
+        ..PersonInsertForm::test_form(first_instance.id, &username)
+      },
+    )
+    .await?;
+    let second_person = Person::create(
+      pool,
+      &PersonInsertForm {
+        origin_local_site_id: Some(second_local_site.id),
+        ..PersonInsertForm::test_form(second_instance.id, &username)
+      },
+    )
+    .await?;
+    assert_ne!(first_person.id, second_person.id);
+
+    let email = format!("same-{suffix}@example.com");
+    let first_user = LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        email: Some(email.clone()),
+        ..LocalUserInsertForm::new(first_person.id, first_local_site.id, Some("pass".into()))
+      },
+      vec![],
+    )
+    .await?;
+    let second_user = LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        email: Some(email.clone()),
+        ..LocalUserInsertForm::new(second_person.id, second_local_site.id, Some("pass".into()))
+      },
+      vec![],
+    )
+    .await?;
+    assert_ne!(first_user.id, second_user.id);
+    assert!(
+      LocalUser::check_is_email_taken(pool, first_local_site.id, &email)
+        .await
+        .is_err()
+    );
+    assert!(
+      LocalUser::check_is_email_taken(pool, second_local_site.id, &email)
+        .await
+        .is_err()
+    );
+
+    let community_name = format!("same_community_{suffix}");
+    let first_community = Community::create(
+      pool,
+      &CommunityInsertForm::new(first_instance.id, community_name.clone(), "pubkey".into()),
+    )
+    .await?;
+    let second_community = Community::create(
+      pool,
+      &CommunityInsertForm::new(second_instance.id, community_name, "pubkey".into()),
+    )
+    .await?;
+    assert_ne!(first_community.id, second_community.id);
+
+    Instance::delete(pool, first_instance.id).await?;
+    Instance::delete(pool, second_instance.id).await?;
     Ok(())
   }
 }

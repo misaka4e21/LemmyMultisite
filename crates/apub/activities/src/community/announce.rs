@@ -91,11 +91,8 @@ impl AnnounceActivity {
       .get("type")
       .and_then(serde_json::Value::as_str)
       .unwrap_or("other");
-    let id = generate_announce_activity_id(
-      inner_kind,
-      &context.settings().get_protocol_and_hostname(),
-      object_id,
-    )?;
+    let id =
+      generate_announce_activity_id(inner_kind, &context.protocol_and_hostname(), object_id)?;
     Ok(AnnounceActivity {
       actor: community.id().clone().into(),
       to: generate_to(community)?,

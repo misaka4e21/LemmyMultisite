@@ -2,8 +2,10 @@ use actix_cors::Cors;
 use lemmy_utils::settings::structs::Settings;
 
 pub mod prometheus_metrics;
+pub mod provision_site;
 pub mod scheduled_tasks;
 pub mod setup_local_site;
+pub mod site_lifecycle;
 
 pub fn cors_config(settings: &Settings) -> Cors {
   let self_origin = settings.get_protocol_and_hostname();

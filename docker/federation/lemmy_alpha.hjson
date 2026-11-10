@@ -1,8 +1,8 @@
 {
-  hostname: lemmy-alpha:8541
   port: 8541
   tls_enabled: false
   setup: {
+    hostname: lemmy-alpha:8541
     admin_username: lemmy_alpha
     admin_password: lemmylemmy
     site_name: lemmy-alpha

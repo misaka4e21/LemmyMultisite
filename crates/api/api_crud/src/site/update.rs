@@ -1,10 +1,11 @@
-use super::not_zero;
+use super::{not_zero, read::invalidate_site_response};
 use crate::site::{application_question_check, site_default_post_listing_type_check};
 use activitypub_federation::config::Data;
 use actix_web::web::Json;
 use chrono::Utc;
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{
     get_url_blocklist,
     is_admin,
@@ -49,8 +50,9 @@ pub async fn edit_site(
   Json(data): Json<EditSite>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SiteResponse>> {
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = tenant.site_view.clone();
   let local_site = site_view.local_site;
   let site = site_view.site;
 
@@ -126,6 +128,8 @@ pub async fn edit_site(
     default_comment_upvotes: data.default_comment_upvotes,
     default_comment_downvotes: data.default_comment_downvotes,
     nsfw_content_disallowed: data.nsfw_content_disallowed,
+    smtp_connection: diesel_string_update(data.smtp_connection.as_deref()),
+    smtp_from_address: diesel_string_update(data.smtp_from_address.as_deref()),
     email_notifications_disabled: data.email_notifications_disabled,
     suggested_multi_community_id,
     image_mode: data.image_mode,
@@ -172,7 +176,8 @@ pub async fn edit_site(
     // If this validation changes it must be synced with
     // lemmy_utils::utils::markdown::create_url_blocklist_test_regex_set.
     let parsed_urls = check_urls_are_valid(&url_blocklist)?;
-    LocalSiteUrlBlocklist::replace(&mut context.pool(), parsed_urls).await?;
+    LocalSiteUrlBlocklist::replace(&mut context.pool(), tenant.local_site().id, parsed_urls)
+      .await?;
   }
 
   // TODO can't think of a better way to do this.
@@ -199,11 +204,16 @@ pub async fn edit_site(
     LocalUser::set_all_users_email_verified(&mut context.pool()).await?;
   }
 
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = SiteView::read_by_hostname(&mut context.pool(), &tenant.hostname).await?;
 
   let rate_limit_config =
     local_site_rate_limit_to_rate_limit_config(&site_view.local_site_rate_limit);
-  context.rate_limit_cell().set_config(rate_limit_config);
+  context
+    .rate_limit_cell()
+    .set_config_for_site(site_view.local_site.id, rate_limit_config);
+  TenantContext::invalidate_all();
+  SiteView::invalidate(site_view.local_site.id).await;
+  invalidate_site_response(site_view.local_site.id).await;
 
   Ok(Json(SiteResponse { site_view }))
 }

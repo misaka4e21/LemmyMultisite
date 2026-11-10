@@ -1,4 +1,5 @@
 use crate::{send::send_email, user_language};
+use lemmy_db_schema::source::local_site::LocalSite;
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_diesel_utils::connection::DbPool;
 use lemmy_utils::{error::LemmyResult, settings::structs::Settings};
@@ -7,22 +8,31 @@ use lemmy_utils::{error::LemmyResult, settings::structs::Settings};
 pub async fn send_new_applicant_email_to_admins(
   applicant_username: &str,
   pool: &mut DbPool<'_>,
+  local_site: &LocalSite,
   settings: &'static Settings,
 ) -> LemmyResult<()> {
   // Collect the admins with emails
-  let admins = LocalUserView::list_admins_with_emails(pool).await?;
+  let admins = LocalUserView::list_admins_with_emails(pool, local_site.id).await?;
 
   let applications_link = &format!(
-    "{}/registration_applications",
-    settings.get_protocol_and_hostname(),
+    "{}://{}/registration_applications",
+    settings.get_protocol_string(),
+    local_site.hostname,
   );
 
   for admin in admins {
     let lang = user_language(&admin.local_user);
     if let Some(email) = admin.local_user.email {
-      let subject = lang.new_application_subject(&settings.hostname, applicant_username);
+      let subject = lang.new_application_subject(&local_site.hostname, applicant_username);
       let body = lang.new_application_body(applications_link);
-      send_email(subject, email, admin.person.name, body, settings);
+      send_email(
+        subject,
+        email,
+        admin.person.name,
+        body,
+        local_site.clone(),
+        settings,
+      );
     }
   }
   Ok(())
@@ -33,20 +43,32 @@ pub async fn send_new_report_email_to_admins(
   reporter_username: &str,
   reported_username: &str,
   pool: &mut DbPool<'_>,
+  local_site: &LocalSite,
   settings: &'static Settings,
 ) -> LemmyResult<()> {
   // Collect the admins with emails
-  let admins = LocalUserView::list_admins_with_emails(pool).await?;
+  let admins = LocalUserView::list_admins_with_emails(pool, local_site.id).await?;
 
-  let reports_link = &format!("{}/reports", settings.get_protocol_and_hostname(),);
+  let reports_link = &format!(
+    "{}://{}/reports",
+    settings.get_protocol_string(),
+    local_site.hostname
+  );
 
   for admin in admins {
     let lang = user_language(&admin.local_user);
     if let Some(email) = admin.local_user.email {
       let subject =
-        lang.new_report_subject(&settings.hostname, reported_username, reporter_username);
+        lang.new_report_subject(&local_site.hostname, reported_username, reporter_username);
       let body = lang.new_report_body(reports_link);
-      send_email(subject, email, admin.person.name, body, settings);
+      send_email(
+        subject,
+        email,
+        admin.person.name,
+        body,
+        local_site.clone(),
+        settings,
+      );
     }
   }
   Ok(())

@@ -47,6 +47,7 @@ pub async fn delete_private_message(
     &mut context.pool(),
     private_message_id,
     Some(&local_user_view.person),
+    local_user_view.local_user.local_site_id,
   )
   .await?;
 

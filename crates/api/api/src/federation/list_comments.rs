@@ -7,7 +7,11 @@ use crate::federation::{
 };
 use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_db_schema::source::comment::Comment;
 use lemmy_db_views_comment::{CommentSlimView, CommentView, api::GetComments, impls::CommentQuery};
 use lemmy_db_views_local_user::LocalUserView;
@@ -20,10 +24,11 @@ async fn list_comments_common(
   data: GetComments,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: &TenantContext,
 ) -> LemmyResult<PagedResponse<CommentView>> {
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
   let GetComments {
     max_depth,
     parent_id,
@@ -103,8 +108,9 @@ pub async fn list_comments(
   Query(data): Query<GetComments>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PagedResponse<CommentView>>> {
-  let common = list_comments_common(data, context, local_user_view).await?;
+  let common = list_comments_common(data, context, local_user_view, &tenant).await?;
 
   Ok(Json(common))
 }
@@ -113,8 +119,9 @@ pub async fn list_comments_slim(
   Query(data): Query<GetComments>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PagedResponse<CommentSlimView>>> {
-  let common = list_comments_common(data, context, local_user_view).await?;
+  let common = list_comments_common(data, context, local_user_view, &tenant).await?;
 
   let data = common
     .items

@@ -8,6 +8,7 @@ use lemmy_api_utils::{
   utils::check_community_mod_action,
 };
 use lemmy_db_schema::{
+  impls::presence::set_post_site_removed,
   source::{
     comment::Comment,
     comment_report::CommentReport,
@@ -37,6 +38,8 @@ pub async fn remove_post(
   // knowing which community the post belongs to.
   let orig_post = Post::read(&mut context.pool(), post_id).await?;
   let community = Community::read(&mut context.pool(), orig_post.community_id).await?;
+  let active_site_id = local_user_view.local_user.local_site_id;
+  let is_origin = orig_post.origin_local_site_id == Some(active_site_id);
 
   check_community_mod_action(&local_user_view, &community, false, &mut context.pool()).await?;
 
@@ -48,16 +51,21 @@ pub async fn remove_post(
   )
   .await?;
 
-  // Update the post
-  let post = Post::update(
-    &mut context.pool(),
-    post_id,
-    &PostUpdateForm {
-      removed: Some(remove_post),
-      ..Default::default()
-    },
-  )
-  .await?;
+  // Origin moderation updates the canonical row; moderation of remote content stays local.
+  let post = if is_origin {
+    Post::update(
+      &mut context.pool(),
+      post_id,
+      &PostUpdateForm {
+        removed: Some(remove_post),
+        ..Default::default()
+      },
+    )
+    .await?
+  } else {
+    set_post_site_removed(&mut context.pool(), active_site_id, post_id, remove_post).await?;
+    orig_post.clone()
+  };
 
   PostReport::resolve_all_for_object(&mut context.pool(), post_id, local_user_view.person.id)
     .await?;
@@ -74,8 +82,13 @@ pub async fn remove_post(
   notify_mod_action(action, context.app_data());
 
   if let Some(remove_children) = data.remove_children {
-    let updated_comments: Vec<Comment> =
-      Comment::update_removed_for_post(&mut context.pool(), post_id, remove_children).await?;
+    let updated_comments: Vec<Comment> = Comment::update_removed_for_post_split(
+      &mut context.pool(),
+      post_id,
+      active_site_id,
+      remove_children,
+    )
+    .await?;
 
     let forms: Vec<_> = updated_comments
       .iter()
@@ -100,16 +113,18 @@ pub async fn remove_post(
       .await?;
   }
 
-  ActivityChannel::submit_activity(
-    SendActivityData::RemovePost {
-      post,
-      moderator: local_user_view.person.clone(),
-      reason: data.reason.clone(),
-      removed: remove_post,
-      with_replies: data.remove_children.unwrap_or_default(),
-    },
-    &context,
-  )?;
+  if is_origin {
+    ActivityChannel::submit_activity(
+      SendActivityData::RemovePost {
+        post,
+        moderator: local_user_view.person.clone(),
+        reason: data.reason.clone(),
+        removed: remove_post,
+        with_replies: data.remove_children.unwrap_or_default(),
+      },
+      &context,
+    )?;
+  }
 
   build_post_response(&context, community.id, local_user_view, post_id).await
 }

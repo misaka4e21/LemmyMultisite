@@ -3,7 +3,8 @@ use actix_web::{HttpRequest, http::header::USER_AGENT};
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use lemmy_db_schema::source::login_token::{LoginToken, LoginTokenCreateForm};
-use lemmy_db_schema_file::newtypes::LocalUserId;
+use lemmy_db_schema_file::newtypes::{LocalSiteId, LocalUserId};
+use lemmy_db_views_local_user::LocalUserView;
 use lemmy_diesel_utils::{sensitive::SensitiveString, traits::Crud};
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,8 @@ pub struct Claims {
   pub iat: i64,
   /// Expiration timestamp
   pub exp: i64,
+  /// The site that issued this token.
+  pub local_site_id: LocalSiteId,
 }
 
 impl Claims {
@@ -27,12 +30,16 @@ impl Claims {
     jwt: &str,
     context: &LemmyContext,
     feed_only: bool,
+    expected_local_site_id: Option<LocalSiteId>,
   ) -> LemmyResult<LocalUserId> {
     let validation = Validation::default();
     let jwt_secret = &context.secret().jwt_secret;
     let key = DecodingKey::from_secret(jwt_secret.as_ref());
     let claims =
       decode::<Claims>(jwt, &key, &validation).with_lemmy_type(LemmyErrorType::NotLoggedIn)?;
+    if expected_local_site_id.is_some_and(|site| site != claims.claims.local_site_id) {
+      return Err(LemmyErrorType::SiteMismatch.into());
+    }
     let user_id = LocalUserId(claims.claims.sub.parse()?);
     LoginToken::validate(&mut context.pool(), user_id, jwt, feed_only).await?;
     Ok(user_id)
@@ -40,14 +47,16 @@ impl Claims {
 
   fn generate_token(
     user_id: LocalUserId,
+    local_site_id: LocalSiteId,
     context: &LemmyContext,
     exp: DateTime<Utc>,
   ) -> LemmyResult<SensitiveString> {
     let my_claims = Claims {
       sub: user_id.0.to_string(),
-      iss: context.settings().hostname.clone(),
+      iss: context.hostname().to_string(),
       iat: Utc::now().timestamp(),
       exp: exp.timestamp(),
+      local_site_id,
     };
     let secret = &context.secret().jwt_secret;
     let key = EncodingKey::from_secret(secret.as_ref());
@@ -68,7 +77,8 @@ impl Claims {
       // Login expires after one week
       now + Duration::weeks(1)
     };
-    let token = Claims::generate_token(user_id, context, exp)?;
+    let local_user = LocalUserView::read(&mut context.pool(), user_id).await?;
+    let token = Claims::generate_token(user_id, local_user.local_user.local_site_id, context, exp)?;
     let ip = req
       .connection_info()
       .realip_remote_addr()
@@ -97,7 +107,13 @@ impl Claims {
     if let Some(token) = LoginToken::read_feed_only(pool, user_id).await? {
       return Ok(token.token);
     }
-    let token = Claims::generate_token(user_id, context, DateTime::<Utc>::MAX_UTC)?;
+    let local_user = LocalUserView::read(pool, user_id).await?;
+    let token = Claims::generate_token(
+      user_id,
+      local_user.local_user.local_site_id,
+      context,
+      DateTime::<Utc>::MAX_UTC,
+    )?;
     let form = LoginTokenCreateForm {
       token: token.clone(),
       user_id,
@@ -144,7 +160,7 @@ mod tests {
     let req = TestRequest::default().to_http_request();
     let jwt = Claims::generate(inserted_local_user.id, None, req, &context).await?;
 
-    let valid = Claims::validate(&jwt, &context, false).await;
+    let valid = Claims::validate(&jwt, &context, false, None).await;
     assert!(valid.is_ok());
 
     let num_deleted = Person::delete(pool, inserted_person.id).await?;

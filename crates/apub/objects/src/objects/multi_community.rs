@@ -25,6 +25,7 @@ use lemmy_api_utils::{
   utils::{process_markdown_opt, slur_regex},
 };
 use lemmy_db_schema::{
+  impls::presence::ensure_multi_community_site,
   source::{
     multi_community::{MultiCommunity, MultiCommunityInsertForm},
     person::Person,
@@ -32,7 +33,6 @@ use lemmy_db_schema::{
   traits::ApubActor,
 };
 use lemmy_db_schema_file::enums::ActorType;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{sensitive::SensitiveString, traits::Crud};
 use lemmy_utils::{
   error::{LemmyError, LemmyErrorType, LemmyResult},
@@ -103,7 +103,7 @@ impl Object for ApubMultiCommunity {
   }
 
   async fn into_json(self, context: &Data<Self::DataType>) -> LemmyResult<Self::Kind> {
-    let site_view = SiteView::read_local(&mut context.pool()).await?;
+    let site_view = context.site_view()?.clone();
     let site = ApubSite(site_view.site.clone());
     let creator = Person::read(&mut context.pool(), self.creator_id).await?;
     Ok(Feed {
@@ -140,7 +140,7 @@ impl Object for ApubMultiCommunity {
   async fn from_json(json: Self::Kind, context: &Data<LemmyContext>) -> LemmyResult<Self> {
     let creator = json.attributed_to.dereference(context).await?;
     let slur_regex = slur_regex(context).await?;
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = context.site_view()?.local_site.clone();
 
     // Use empty regex so that url blocklist doesnt prevent community federation.
     let url_blocklist = RegexSet::empty();
@@ -183,11 +183,18 @@ impl Object for ApubMultiCommunity {
       inbox_url: Some(json.inbox.into()),
       following_url: Some(json.following.clone().into()),
       last_refreshed_at: Some(Utc::now()),
+      origin_local_site_id: None,
     };
 
-    let multi = MultiCommunity::upsert(&mut context.pool(), &form)
+    let multi: ApubMultiCommunity = MultiCommunity::upsert(&mut context.pool(), &form)
       .await?
       .into();
+    ensure_multi_community_site(
+      &mut context.pool(),
+      context.site_view()?.local_site.id,
+      multi.id,
+    )
+    .await?;
     json.following.dereference(&multi, context).await?;
     Ok(multi)
   }
@@ -214,5 +221,9 @@ impl Actor for ApubMultiCommunity {
 impl GetActorType for ApubMultiCommunity {
   fn actor_type(&self) -> ActorType {
     ActorType::MultiCommunity
+  }
+
+  fn local_site_id(&self) -> Option<lemmy_db_schema_file::newtypes::LocalSiteId> {
+    self.0.origin_local_site_id
   }
 }

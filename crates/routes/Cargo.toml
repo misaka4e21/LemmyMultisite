@@ -59,6 +59,7 @@ rss = "2.1.2"
 actix-web-prom = "0.10.0"
 actix-cors = "0.7.2"
 rand = { workspace = true }
+sha2 = "0.11.1"
 percent-encoding = "2.3.2"
 urlencoding = { workspace = true }
 diesel-uplete.workspace = true

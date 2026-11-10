@@ -6,7 +6,15 @@ use diesel_async::SimpleAsyncConnection;
 use diesel_uplete::UpleteCount;
 use lemmy_db_schema::{
   assert_length,
-  impls::actor_language::UNDETERMINED_ID,
+  impls::{
+    actor_language::UNDETERMINED_ID,
+    presence::{
+      ensure_post_site,
+      set_post_site_featured,
+      set_post_site_locked,
+      set_post_site_removed,
+    },
+  },
   source::{
     actor_language::LocalUserLanguage,
     comment::{Comment, CommentInsertForm},
@@ -21,6 +29,7 @@ use lemmy_db_schema::{
       CommunityUpdateForm,
     },
     community_tag::{CommunityTag, CommunityTagInsertForm, PostCommunityTag},
+    images::{ImageDetails, ImageDetailsInsertForm},
     instance::{
       Instance,
       InstanceActions,
@@ -30,12 +39,13 @@ use lemmy_db_schema::{
     },
     keyword_block::LocalUserKeywordBlock,
     language::Language,
-    local_site::{LocalSite, LocalSiteUpdateForm},
+    local_site::{LocalSite, LocalSiteInsertForm, LocalSiteUpdateForm},
     local_user::{LocalUser, LocalUserInsertForm, LocalUserUpdateForm},
     multi_community::{MultiCommunity, MultiCommunityInsertForm},
     person::{Person, PersonActions, PersonBlockForm, PersonInsertForm, PersonNoteForm},
     post::{Post, PostActions, PostHideForm, PostInsertForm, PostLikeForm, PostUpdateForm},
-    site::Site,
+    post_thumbnail::{PostThumbnailSource, PostThumbnailSourceForm},
+    site::{Site, SiteUpsertForm},
   },
   test_data::TestData,
   traits::{Bannable, Blockable, Followable, Likeable},
@@ -46,7 +56,7 @@ use lemmy_db_schema_file::{
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_diesel_utils::{
-  connection::{ActualDbPool, DbPool, build_db_pool, get_conn},
+  connection::{ActualDbPool, DbPool, build_db_pool, build_db_pool_for_tests, get_conn},
   pagination::PaginationCursor,
   traits::Crud,
 };
@@ -58,6 +68,157 @@ use std::{
   time::{Duration, Instant},
 };
 use test_context::{AsyncTestContext, test_context};
+
+#[tokio::test]
+#[serial]
+async fn local_removal_stays_local() -> LemmyResult<()> {
+  let pool = &build_db_pool_for_tests();
+  let pool = &mut pool.into();
+  let data = TestData::create(pool).await?;
+
+  let community = Community::create(
+    pool,
+    &CommunityInsertForm::new(data.instance.id, "remote_community".into(), "pubkey".into()),
+  )
+  .await?;
+  let post = Post::create(
+    pool,
+    &PostInsertForm {
+      local: Some(false),
+      origin_local_site_id: None,
+      ap_id: Some(Url::parse("https://remote.example/post/1")?.into()),
+      ..PostInsertForm::new("remote post".into(), data.person.id, community.id)
+    },
+  )
+  .await?;
+  ensure_post_site(pool, data.local_site.id, post.id).await?;
+
+  let second_instance = Instance::read_or_create(pool, "second.example").await?;
+  let second_site = Site::create(
+    pool,
+    &SiteUpsertForm::new("second site".into(), second_instance.id),
+  )
+  .await?;
+  let second_system = Person::create(
+    pool,
+    &PersonInsertForm {
+      local: Some(false),
+      ..PersonInsertForm::test_form(second_instance.id, "second_system")
+    },
+  )
+  .await?;
+  let second_local_site = LocalSite::create(
+    pool,
+    &LocalSiteInsertForm::new(
+      second_site.id,
+      second_system.id,
+      second_instance.domain.clone(),
+    ),
+  )
+  .await?;
+
+  // The second site cannot read the post before delivery creates its presence row.
+  let undelivered = PostView::read(pool, post.id, None, second_site.instance_id, false).await;
+  assert!(undelivered.is_err());
+
+  ensure_post_site(pool, second_local_site.id, post.id).await?;
+
+  set_post_site_locked(pool, data.local_site.id, post.id, true).await?;
+  set_post_site_featured(pool, data.local_site.id, post.id, true).await?;
+  let first_site_view = PostView::read(pool, post.id, None, data.site.instance_id, false).await?;
+  assert!(first_site_view.post.locked);
+  assert!(first_site_view.post.featured_local);
+  let second_site_view =
+    PostView::read(pool, post.id, None, second_site.instance_id, false).await?;
+  assert!(!second_site_view.post.locked);
+  assert!(!second_site_view.post.featured_local);
+
+  ImageDetails::create(
+    pool,
+    &ImageDetailsInsertForm {
+      link: Url::parse("https://first.example/api/v4/image/shared_alias")?.into(),
+      source_hash: Some("shared_remote_image".to_string()),
+      width: 10,
+      height: 20,
+      content_type: "image/png".to_string(),
+      blurhash: None,
+    },
+  )
+  .await?;
+  PostThumbnailSource::upsert(
+    pool,
+    &PostThumbnailSourceForm {
+      post_id: post.id,
+      source_hash: "shared_remote_image".to_string(),
+      pictrs_alias: Some("shared_alias".to_string()),
+    },
+  )
+  .await?;
+  Post::update(
+    pool,
+    post.id,
+    &PostUpdateForm {
+      thumbnail_url: Some(Some(Url::parse("https://remote.example/image.png")?.into())),
+      ..Default::default()
+    },
+  )
+  .await?;
+  let first_with_details =
+    PostView::read(pool, post.id, None, data.site.instance_id, false).await?;
+  assert!(first_with_details.image_details.is_some());
+  assert_eq!(
+    first_with_details
+      .post
+      .thumbnail_url
+      .as_ref()
+      .and_then(|u| u.inner().host_str()),
+    Some(data.local_site.hostname.as_str())
+  );
+  assert_eq!(
+    first_with_details
+      .image_details
+      .as_ref()
+      .and_then(|d| d.link.inner().host_str()),
+    Some(data.local_site.hostname.as_str())
+  );
+  assert_eq!(
+    first_with_details
+      .post
+      .thumbnail_url
+      .as_ref()
+      .map(|u| u.inner().path()),
+    Some("/api/v4/image/shared_alias")
+  );
+  let second_with_details =
+    PostView::read(pool, post.id, None, second_site.instance_id, false).await?;
+  assert!(second_with_details.image_details.is_some());
+  assert_eq!(
+    second_with_details
+      .post
+      .thumbnail_url
+      .as_ref()
+      .and_then(|u| u.inner().host_str()),
+    Some(second_local_site.hostname.as_str())
+  );
+  assert_eq!(
+    second_with_details
+      .image_details
+      .as_ref()
+      .and_then(|d| d.link.inner().host_str()),
+    Some(second_local_site.hostname.as_str())
+  );
+
+  set_post_site_removed(pool, data.local_site.id, post.id, true).await?;
+
+  let hidden = PostView::read(pool, post.id, None, data.site.instance_id, false).await;
+  assert!(hidden.is_err());
+  let visible = PostView::read(pool, post.id, None, second_site.instance_id, false).await?;
+  assert!(!visible.post.removed);
+  assert!(!Post::read(pool, post.id).await?.removed);
+
+  Instance::delete(pool, second_instance.id).await?;
+  data.delete(pool).await
+}
 use url::Url;
 
 const POST_BY_BLOCKED_PERSON: &str = "post by blocked person";

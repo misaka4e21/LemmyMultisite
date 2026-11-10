@@ -2,6 +2,7 @@ use activitypub_federation::config::Data;
 use actix_web::web::Json;
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{
     check_local_user_banned_or_deleted,
     get_url_blocklist,
@@ -10,6 +11,7 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_schema::{
+  impls::presence::ensure_multi_community_site,
   source::multi_community::{MultiCommunity, MultiCommunityFollowForm, MultiCommunityInsertForm},
   traits::ApubActor,
 };
@@ -39,11 +41,12 @@ pub async fn create_multi_community(
   Json(data): Json<CreateMultiCommunity>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<MultiCommunityResponse>> {
   check_local_user_banned_or_deleted(&local_user_view)?;
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
 
   let my_person_id = local_user_view.person.id;
 
@@ -52,7 +55,8 @@ pub async fn create_multi_community(
 
   check_slurs(&data.name, &slur_regex)?;
 
-  let ap_id = MultiCommunity::generate_local_actor_url(&data.name, context.settings())?;
+  let ap_id =
+    MultiCommunity::generate_local_actor_url(&data.name, &context.protocol_and_hostname())?;
   let following_url = Url::parse(&format!("{}/following", ap_id))?;
 
   // Check for duplicate multi-comm with the same name
@@ -89,6 +93,7 @@ pub async fn create_multi_community(
   is_valid_actor_name(&data.name)?;
 
   let form = MultiCommunityInsertForm {
+    origin_local_site_id: Some(local_site.id),
     title,
     summary,
     sidebar,
@@ -105,6 +110,7 @@ pub async fn create_multi_community(
   };
 
   let multi = MultiCommunity::create(&mut context.pool(), &form).await?;
+  ensure_multi_community_site(&mut context.pool(), local_site.id, multi.id).await?;
 
   // You follow your own community
   let follow_form = MultiCommunityFollowForm {
@@ -114,8 +120,13 @@ pub async fn create_multi_community(
   };
   MultiCommunity::follow(&mut context.pool(), &follow_form).await?;
 
-  let multi_community_view =
-    MultiCommunityView::read(&mut context.pool(), multi.id, Some(my_person_id)).await?;
+  let multi_community_view = MultiCommunityView::read(
+    &mut context.pool(),
+    multi.id,
+    Some(my_person_id),
+    local_site.id,
+  )
+  .await?;
 
   Ok(Json(MultiCommunityResponse {
     multi_community_view,

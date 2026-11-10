@@ -2,10 +2,10 @@ use crate::{util::CancellableTask, worker::InstanceWorker};
 use activitypub_federation::config::FederationConfig;
 use lemmy_api_utils::context::LemmyContext;
 use lemmy_db_schema::source::instance::Instance;
-use lemmy_db_schema_file::InstanceId;
+use lemmy_db_schema_file::{InstanceId, newtypes::LocalSiteId};
 use lemmy_utils::{error::LemmyResult, settings::structs::FederationWorkerConfig};
 use stats::receive_print_stats;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
   sync::mpsc::{UnboundedSender, unbounded_channel},
   task::JoinHandle,
@@ -37,8 +37,9 @@ pub struct Opts {
 
 pub struct SendManager {
   opts: Opts,
-  workers: HashMap<InstanceId, CancellableTask>,
+  workers: HashMap<(LocalSiteId, InstanceId), CancellableTask>,
   context: FederationConfig<LemmyContext>,
+  configs: Arc<HashMap<LocalSiteId, FederationConfig<LemmyContext>>>,
   stats_sender: UnboundedSender<FederationQueueStateWithDomain>,
   exit_print: JoinHandle<()>,
   federation_worker_config: FederationWorkerConfig,
@@ -48,6 +49,7 @@ impl SendManager {
   fn new(
     opts: Opts,
     context: FederationConfig<LemmyContext>,
+    configs: Arc<HashMap<LocalSiteId, FederationConfig<LemmyContext>>>,
     federation_worker_config: FederationWorkerConfig,
   ) -> Self {
     assert!(opts.process_count > 0);
@@ -64,6 +66,7 @@ impl SendManager {
         stats_receiver,
       )),
       context,
+      configs,
       federation_worker_config,
     }
   }
@@ -71,13 +74,14 @@ impl SendManager {
   pub fn run(
     opts: Opts,
     context: FederationConfig<LemmyContext>,
+    configs: Arc<HashMap<LocalSiteId, FederationConfig<LemmyContext>>>,
     config: FederationWorkerConfig,
   ) -> CancellableTask {
     CancellableTask::spawn(WORKER_EXIT_TIMEOUT, move |cancel| {
       let opts = opts.clone();
       let config = config.clone();
       let context = context.clone();
-      let mut manager = Self::new(opts, context, config);
+      let mut manager = Self::new(opts, context, configs.clone(), config);
       async move {
         let result = manager.do_loop(cancel).await;
         // the loop function will only return if there is (a) an internal error (e.g. db connection
@@ -103,59 +107,59 @@ impl SendManager {
       "Starting federation workers for process count {} and index {}",
       self.opts.process_count, process_index
     );
-    let local_domain = self.context.settings().get_hostname_without_port()?;
     let mut pool = self.context.pool();
     loop {
       let mut total_count = 0;
       let mut dead_count = 0;
       let mut disallowed_count = 0;
-      for (instance, allowed, is_dead) in
-        Instance::read_federated_with_blocked_and_dead(&mut pool).await?
-      {
-        if instance.domain == local_domain {
-          continue;
-        }
-        if instance.id.inner() % self.opts.process_count != process_index {
-          continue;
-        }
-        total_count += 1;
-        if !allowed {
-          disallowed_count += 1;
-        }
-        if is_dead {
-          dead_count += 1;
-        }
-        let should_federate = allowed && !is_dead;
-        if should_federate {
-          if self.workers.contains_key(&instance.id) {
-            // worker already running
+      for (local_site_id, site_config) in self.configs.iter() {
+        let local_site_id = *local_site_id;
+        let local_domain = site_config.domain();
+        for (instance, allowed, is_dead) in
+          Instance::read_federated_with_blocked_and_dead(&mut pool, local_site_id).await?
+        {
+          if instance.domain == local_domain {
             continue;
           }
-          // create new worker
-          let context = self.context.clone();
-          let stats_sender = self.stats_sender.clone();
-          let federation_worker_config = self.federation_worker_config.clone();
+          if instance.id.inner() % self.opts.process_count != process_index {
+            continue;
+          }
+          total_count += 1;
+          if !allowed {
+            disallowed_count += 1;
+          }
+          if is_dead {
+            dead_count += 1;
+          }
+          let should_federate = allowed && !is_dead;
+          let key = (local_site_id, instance.id);
+          if should_federate {
+            if self.workers.contains_key(&key) {
+              continue;
+            }
+            let site_config = site_config.clone();
+            let stats_sender = self.stats_sender.clone();
+            let federation_worker_config = self.federation_worker_config.clone();
 
-          self.workers.insert(
-            instance.id,
-            CancellableTask::spawn(WORKER_EXIT_TIMEOUT, move |stop| {
-              // if the instance worker ends unexpectedly due to internal/db errors, this lambda is
-              // rerun by cancellabletask.
-              let instance = instance.clone();
-              InstanceWorker::init_and_loop(
-                instance,
-                context.clone(),
-                federation_worker_config.clone(),
-                stop,
-                stats_sender.clone(),
-              )
-            }),
-          );
-        } else if !should_federate
-          && let Some(worker) = self.workers.remove(&instance.id)
-          && let Err(e) = worker.cancel().await
-        {
-          tracing::error!("error stopping worker: {e}");
+            self.workers.insert(
+              key,
+              CancellableTask::spawn(WORKER_EXIT_TIMEOUT, move |stop| {
+                let instance = instance.clone();
+                InstanceWorker::init_and_loop(
+                  instance,
+                  local_site_id,
+                  site_config.clone(),
+                  federation_worker_config.clone(),
+                  stop,
+                  stats_sender.clone(),
+                )
+              }),
+            );
+          } else if let Some(worker) = self.workers.remove(&key)
+            && let Err(e) = worker.cancel().await
+          {
+            tracing::error!("error stopping worker: {e}");
+          }
         }
       }
       let worker_count = self.workers.len();
@@ -204,6 +208,7 @@ mod test {
     instance::InstanceForm,
     person::{Person, PersonInsertForm},
   };
+  use lemmy_db_schema_file::newtypes::LocalSiteId;
   use lemmy_diesel_utils::traits::Crud;
   use lemmy_utils::error::LemmyError;
   use serial_test::serial;
@@ -245,7 +250,9 @@ mod test {
         Instance::read_or_create(pool, "gamma.com").await?,
       ];
 
-      let send_manager = SendManager::new(opts, federation_config, federation_worker_config);
+      let configs = Arc::new(HashMap::from([(LocalSiteId(1), federation_config.clone())]));
+      let send_manager =
+        SendManager::new(opts, federation_config, configs, federation_worker_config);
       Ok(Self {
         send_manager,
         context,
@@ -280,7 +287,12 @@ mod test {
 
     data.run().await?;
     assert_eq!(3, data.send_manager.workers.len());
-    let workers: HashSet<_> = data.send_manager.workers.keys().cloned().collect();
+    let workers: HashSet<_> = data
+      .send_manager
+      .workers
+      .keys()
+      .map(|(_, instance_id)| *instance_id)
+      .collect();
     let instances: HashSet<_> = data.instances.iter().map(|i| i.id).collect();
     assert_eq!(instances, workers);
 
@@ -293,7 +305,7 @@ mod test {
   #[serial]
   async fn test_send_manager_processes() -> LemmyResult<()> {
     let active = Arc::new(Mutex::new(vec![]));
-    let execute = |count, index, active: Arc<Mutex<Vec<InstanceId>>>| async move {
+    let execute = |count, index, active: Arc<Mutex<Vec<(LocalSiteId, InstanceId)>>>| async move {
       let mut data = TestData::init(count, index).await?;
       data.run().await?;
       assert_eq!(1, data.send_manager.workers.len());
@@ -322,13 +334,13 @@ mod test {
     let instance_id = data.instances[0].id;
     let form = PersonInsertForm::new("tim".to_string(), String::new(), instance_id);
     let person = Person::create(&mut data.context.pool(), &form).await?;
-    let form = FederationBlockListForm::new(instance_id, None);
+    let form = FederationBlockListForm::new(instance_id, LocalSiteId(1), None);
     FederationBlockList::block(&mut data.context.pool(), &form).await?;
     data.run().await?;
     let workers = &data.send_manager.workers;
     assert_eq!(2, workers.len());
-    assert!(workers.contains_key(&data.instances[1].id));
-    assert!(workers.contains_key(&data.instances[2].id));
+    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[1].id)));
+    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[2].id)));
 
     Person::delete(&mut data.context.pool(), person.id).await?;
     data.cleanup().await?;
@@ -344,12 +356,12 @@ mod test {
     let instance_id = data.instances[0].id;
     let form = PersonInsertForm::new("tim".to_string(), String::new(), instance_id);
     let person = Person::create(&mut data.context.pool(), &form).await?;
-    let form = FederationAllowListForm::new(data.instances[0].id);
+    let form = FederationAllowListForm::new(data.instances[0].id, LocalSiteId(1));
     FederationAllowList::allow(&mut data.context.pool(), &form).await?;
     data.run().await?;
     let workers = &data.send_manager.workers;
     assert_eq!(1, workers.len());
-    assert!(workers.contains_key(&data.instances[0].id));
+    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[0].id)));
 
     Person::delete(&mut data.context.pool(), person.id).await?;
     data.cleanup().await?;
@@ -372,8 +384,8 @@ mod test {
     data.run().await?;
     let workers = &data.send_manager.workers;
     assert_eq!(2, workers.len());
-    assert!(workers.contains_key(&data.instances[1].id));
-    assert!(workers.contains_key(&data.instances[2].id));
+    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[1].id)));
+    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[2].id)));
 
     data.cleanup().await?;
     Ok(())

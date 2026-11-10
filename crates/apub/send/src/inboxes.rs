@@ -224,7 +224,7 @@ mod tests {
   use lemmy_db_schema_file::{
     InstanceId,
     enums::ActorType,
-    newtypes::{ActivityId, CommunityId, SiteId},
+    newtypes::{ActivityId, CommunityId, LocalSiteId, SiteId},
   };
   use lemmy_utils::error::LemmyResult;
   use mockall::mock;
@@ -263,6 +263,7 @@ mod tests {
       send_all_instances: false,
       actor_type: ActorType::Person,
       actor_apub_id: None,
+      local_site_id: LocalSiteId(1),
     };
 
     let result = collector.get_inbox_urls(&activity).await?;
@@ -309,6 +310,7 @@ mod tests {
       send_all_instances: true,
       actor_type: ActorType::Person,
       actor_apub_id: None,
+      local_site_id: LocalSiteId(1),
     };
 
     let result = collector.get_inbox_urls(&activity).await?;
@@ -348,6 +350,7 @@ mod tests {
       send_all_instances: false,
       actor_type: ActorType::Person,
       actor_apub_id: None,
+      local_site_id: LocalSiteId(1),
     };
 
     let result = collector.get_inbox_urls(&activity).await?;
@@ -380,6 +383,7 @@ mod tests {
       send_all_instances: false,
       actor_type: ActorType::Person,
       actor_apub_id: None,
+      local_site_id: LocalSiteId(1),
     };
 
     let result = collector.get_inbox_urls(&activity).await?;
@@ -444,6 +448,7 @@ mod tests {
       send_all_instances: true,
       actor_type: ActorType::Person,
       actor_apub_id: None,
+      local_site_id: LocalSiteId(1),
     };
 
     let result = collector.get_inbox_urls(&activity).await?;
@@ -556,6 +561,7 @@ mod tests {
       send_all_instances: true,
       actor_type: ActorType::Person,
       actor_apub_id: None,
+      local_site_id: LocalSiteId(1),
     };
 
     let result = collector.get_inbox_urls(&activity).await?;

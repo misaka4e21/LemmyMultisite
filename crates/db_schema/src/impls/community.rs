@@ -1,5 +1,6 @@
 use crate::{
   diesel::{DecoratableTarget, JoinOnDsl, OptionalExtension},
+  impls::presence::{default_local_site_id, ensure_community_site},
   source::{
     actor_language::CommunityLanguage,
     community::{
@@ -34,7 +35,7 @@ use diesel_uplete::{UpleteCount, uplete};
 use lemmy_db_schema_file::{
   PersonId,
   enums::{CommunityFollowerState, CommunityNotificationsMode, CommunityVisibility, ListingType},
-  newtypes::CommunityId,
+  newtypes::{CommunityId, LocalSiteId},
   schema::{comment, community, community_actions, instance, local_user, post},
 };
 use lemmy_diesel_utils::{
@@ -65,6 +66,16 @@ impl Crud for Community {
 
     // Initialize languages for new community
     CommunityLanguage::update(pool, vec![], community_.id).await?;
+
+    if form.local.unwrap_or(true) {
+      let local_site_id = match form.origin_local_site_id {
+        Some(local_site_id) => Some(local_site_id),
+        None => default_local_site_id(pool).await?,
+      };
+      if let Some(local_site_id) = local_site_id {
+        ensure_community_site(pool, local_site_id, community_.id).await?;
+      }
+    }
 
     Ok(community_)
   }
@@ -625,6 +636,7 @@ impl ApubActor for Community {
     pool: &mut DbPool<'_>,
     community_name: &str,
     domain: Option<&str>,
+    local_site_id: Option<LocalSiteId>,
     include_deleted: bool,
   ) -> LemmyResult<Option<Self>> {
     let conn = &mut get_conn(pool).await?;
@@ -638,6 +650,8 @@ impl ApubActor for Community {
     }
     if let Some(domain) = domain {
       q = q.filter(lower(instance::domain).eq(domain.to_lowercase()))
+    } else if let Some(local_site_id) = local_site_id {
+      q = q.filter(community::origin_local_site_id.eq(local_site_id))
     } else {
       q = q.filter(community::local.eq(true))
     }
@@ -657,9 +671,8 @@ impl ApubActor for Community {
     format_actor_url(&self.name, domain, 'c', settings)
   }
 
-  fn generate_local_actor_url(name: &str, settings: &Settings) -> LemmyResult<DbUrl> {
-    let domain = settings.get_protocol_and_hostname();
-    Ok(Url::parse(&format!("{domain}/c/{name}"))?.into())
+  fn generate_local_actor_url(name: &str, protocol_and_hostname: &str) -> LemmyResult<DbUrl> {
+    Ok(Url::parse(&format!("{protocol_and_hostname}/c/{name}"))?.into())
   }
 }
 
@@ -723,6 +736,7 @@ mod tests {
       ap_id: inserted_community.ap_id.clone(),
       local: true,
       private_key: None,
+      origin_local_site_id: None,
       public_key: "pubkey".to_owned(),
       last_refreshed_at: inserted_community.published_at,
       icon: None,

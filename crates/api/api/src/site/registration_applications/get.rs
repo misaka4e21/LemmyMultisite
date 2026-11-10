@@ -17,8 +17,12 @@ pub async fn get_registration_application(
   is_admin(&local_user_view)?;
 
   // Read the view
-  let registration_application =
-    RegistrationApplicationView::read_by_person(&mut context.pool(), data.person_id).await?;
+  let registration_application = RegistrationApplicationView::read_by_person(
+    &mut context.pool(),
+    local_user_view.local_user.local_site_id,
+    data.person_id,
+  )
+  .await?;
 
   Ok(Json(RegistrationApplicationResponse {
     registration_application,

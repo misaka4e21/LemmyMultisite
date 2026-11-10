@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use diesel::Queryable;
 use lemmy_db_schema_file::{
   enums::ActorType,
-  newtypes::{ActivityId, CommunityId},
+  newtypes::{ActivityId, CommunityId, LocalSiteId},
   schema::{received_activity, sent_activity},
 };
 use lemmy_diesel_utils::dburl::DbUrl;
@@ -68,6 +68,7 @@ pub struct SentActivity {
   pub send_all_instances: bool,
   pub actor_type: ActorType,
   pub actor_apub_id: Option<DbUrl>,
+  pub local_site_id: LocalSiteId,
 }
 
 #[cfg_attr(feature = "full", derive(Insertable))]
@@ -81,6 +82,7 @@ pub struct SentActivityForm {
   pub send_all_instances: bool,
   pub actor_type: ActorType,
   pub actor_apub_id: DbUrl,
+  pub local_site_id: LocalSiteId,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -91,4 +93,5 @@ pub struct SentActivityForm {
 pub struct ReceivedActivity {
   pub ap_id: DbUrl,
   pub published_at: DateTime<Utc>,
+  pub local_site_id: LocalSiteId,
 }

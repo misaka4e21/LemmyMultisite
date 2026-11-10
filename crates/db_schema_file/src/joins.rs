@@ -24,9 +24,17 @@ use crate::{
     person_actions,
     post,
     post_actions,
+    post_thumbnail_source,
   },
 };
-use diesel::{BoolExpressionMethods, ExpressionMethods, JoinOnDsl, NullableExpressionMethods};
+use diesel::{
+  BoolExpressionMethods,
+  ExpressionMethods,
+  JoinOnDsl,
+  NullableExpressionMethods,
+  QueryDsl,
+  dsl::exists,
+};
 
 #[diesel::dsl::auto_type]
 pub fn creator_local_user_admin_join() -> _ {
@@ -122,7 +130,19 @@ pub fn my_instance_persons_actions_join_1(my_person_id: Option<PersonId>) -> _ {
 
 #[diesel::dsl::auto_type]
 pub fn image_details_join() -> _ {
-  image_details::table.on(post::thumbnail_url.eq(image_details::link.nullable()))
+  image_details::table.on(
+    post::thumbnail_url
+      .eq(image_details::link.nullable())
+      .or(exists(
+        post_thumbnail_source::table
+          .filter(post_thumbnail_source::post_id.eq(post::id))
+          .filter(
+            post_thumbnail_source::source_hash
+              .nullable()
+              .eq(image_details::source_hash),
+          ),
+      )),
+  )
 }
 
 #[diesel::dsl::auto_type]

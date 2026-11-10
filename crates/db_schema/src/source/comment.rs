@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use lemmy_db_schema_file::{
   PersonId,
-  newtypes::{CommentId, CommunityId, LanguageId, PostId},
+  newtypes::{CommentId, CommunityId, LanguageId, LocalSiteId, PostId},
 };
 use lemmy_diesel_utils::dburl::DbUrl;
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,8 @@ pub struct Comment {
   /// This field is a dupe of post.community_id, but necessary for join performance.
   #[serde(skip)]
   pub community_id: CommunityId,
+  /// The site that created this local comment. NULL for remote comments.
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Debug, Clone, derive_new::new, Serialize, Deserialize)]
@@ -102,6 +104,8 @@ pub struct CommentInsertForm {
   pub federation_pending: Option<bool>,
   #[new(default)]
   pub locked: Option<bool>,
+  #[new(default)]
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Debug, Clone, Default)]

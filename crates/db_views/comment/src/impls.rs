@@ -2,10 +2,12 @@ use crate::{CommentSlimView, CommentView};
 use diesel::{
   BoolExpressionMethods,
   ExpressionMethods,
+  JoinOnDsl,
   NullableExpressionMethods,
   PgTextExpressionMethods,
   QueryDsl,
   SelectableHelper,
+  dsl::exists,
 };
 use diesel_async::RunQueryDsl;
 use diesel_ltree::{Ltree, LtreeExtensions, nlevel};
@@ -53,7 +55,7 @@ use lemmy_db_schema_file::{
     my_person_actions_join,
   },
   newtypes::{CommentId, CommunityId, PostId},
-  schema::{comment, community, person, post},
+  schema::{comment, comment_site, community, local_site, person, post, site},
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
@@ -124,6 +126,13 @@ impl CommentView {
     let conn = &mut get_conn(pool).await?;
 
     let mut query = Self::joins(my_local_user.person_id(), local_instance_id)
+      .filter(exists(
+        comment_site::table
+          .inner_join(local_site::table.on(local_site::id.eq(comment_site::local_site_id)))
+          .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+          .filter(comment_site::comment_id.eq(comment::id))
+          .filter(site::instance_id.eq(local_instance_id)),
+      ))
       .filter(comment::id.eq(comment_id))
       .select(Self::as_select())
       .into_boxed();
@@ -146,10 +155,20 @@ impl CommentView {
         .or(post::creator_id.nullable().eq(my_local_user.person_id())),
     );
 
-    query
+    let mut view = query
       .first::<Self>(conn)
       .await
-      .with_lemmy_type(LemmyErrorType::NotFound)
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    let site_removed = comment_site::table
+      .inner_join(local_site::table.on(local_site::id.eq(comment_site::local_site_id)))
+      .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+      .filter(comment_site::comment_id.eq(comment_id))
+      .filter(site::instance_id.eq(local_instance_id))
+      .select(comment_site::removed)
+      .first::<bool>(conn)
+      .await?;
+    view.comment.removed |= site_removed;
+    Ok(view)
   }
 
   pub fn map_to_slim(self) -> CommentSlimView {
@@ -197,6 +216,11 @@ impl CommentQuery<'_> {
     let my_person_id = self.local_user.person_id();
 
     let mut query = CommentView::joins(my_person_id, site.instance_id)
+      .filter(exists(
+        comment_site::table
+          .filter(comment_site::comment_id.eq(comment::id))
+          .filter(comment_site::local_site_id.eq(local_site.id)),
+      ))
       .select(CommentView::as_select())
       .into_boxed();
 
@@ -377,7 +401,18 @@ impl CommentQuery<'_> {
     .then_order_by(key::id);
 
     let conn = &mut get_conn(pool).await?;
-    let res = pq.load::<CommentView>(conn).await?;
+    let mut res = pq.load::<CommentView>(conn).await?;
+    let locally_removed: Vec<CommentId> = comment_site::table
+      .filter(comment_site::local_site_id.eq(local_site.id))
+      .filter(comment_site::removed.eq(true))
+      .select(comment_site::comment_id)
+      .load(conn)
+      .await?;
+    for comment_view in &mut res {
+      if locally_removed.contains(&comment_view.comment.id) {
+        comment_view.comment.removed = true;
+      }
+    }
 
     paginate_response(res, limit, self.page_cursor)
   }

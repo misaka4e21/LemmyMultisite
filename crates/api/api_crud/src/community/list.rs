@@ -1,5 +1,9 @@
 use actix_web::web::{Data, Json, Query};
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_db_views_community::{CommunityView, api::ListCommunities, impls::CommunityQuery};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::SiteView;
@@ -10,10 +14,11 @@ pub async fn list_communities(
   Query(data): Query<ListCommunities>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PagedResponse<CommunityView>>> {
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
 
   check_private_instance(&local_user_view, &local_site)?;
 

@@ -1,6 +1,10 @@
 use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_db_views_community::{
   MultiCommunityView,
   api::ListMultiCommunities,
@@ -15,8 +19,9 @@ pub async fn list_multi_communities(
   Query(data): Query<ListMultiCommunities>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PagedResponse<MultiCommunityView>>> {
-  let SiteView { local_site, .. } = SiteView::read_local(&mut context.pool()).await?;
+  let SiteView { local_site, .. } = tenant.site_view.clone();
   check_private_instance(&local_user_view, &local_site)?;
 
   let res = MultiCommunityQuery {
@@ -31,7 +36,7 @@ pub async fn list_multi_communities(
     limit: data.limit,
     no_limit: None,
   }
-  .list(&mut context.pool())
+  .list(&mut context.pool(), local_site.id)
   .await?;
 
   Ok(Json(res))

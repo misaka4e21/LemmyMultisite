@@ -37,7 +37,6 @@ use lemmy_db_schema::{
   traits::Likeable,
 };
 use lemmy_db_schema_file::PersonId;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::{LemmyError, LemmyResult};
 use serde_json::{from_value, to_value};
@@ -121,7 +120,7 @@ impl Activity for CreateOrUpdateNote {
   }
 
   async fn receive(self, context: &Data<Self::DataType>) -> LemmyResult<()> {
-    let site_view = SiteView::read_local(&mut context.pool()).await?;
+    let site_view = context.site_view()?.clone();
 
     // Need to do this check here instead of Note::from_json because we need the person who
     // send the activity, not the comment author.

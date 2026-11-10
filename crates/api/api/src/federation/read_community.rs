@@ -3,6 +3,7 @@ use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{check_private_instance, is_mod_or_admin_opt, read_site_for_actor},
 };
 use lemmy_db_schema::source::actor_language::CommunityLanguage;
@@ -12,15 +13,15 @@ use lemmy_db_views_community::{
 };
 use lemmy_db_views_community_moderator::CommunityModeratorView;
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::SiteView;
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 
 pub async fn get_community(
   Query(data): Query<GetCommunity>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetCommunityResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   check_private_instance(&local_user_view, &local_site)?;
 
@@ -43,6 +44,7 @@ pub async fn get_community(
     community_id,
     local_user,
     is_mod_or_admin,
+    local_site.id,
   )
   .await?;
 

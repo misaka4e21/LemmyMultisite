@@ -12,7 +12,7 @@ use lemmy_db_schema_file::{
   InstanceId,
   PersonId,
   enums::CommunityFollowerState,
-  newtypes::{CommunityId, MultiCommunityId},
+  newtypes::{CommunityId, LocalSiteId, MultiCommunityId},
 };
 use lemmy_diesel_utils::{dburl::DbUrl, sensitive::SensitiveString};
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,8 @@ pub struct MultiCommunity {
   pub communities: i32,
   /// A sidebar in markdown.
   pub sidebar: Option<String>,
+  /// The site that created this local multi-community. NULL for remote ones.
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Debug, Clone, derive_new::new)]
@@ -84,6 +86,8 @@ pub struct MultiCommunityInsertForm {
   pub inbox_url: Option<DbUrl>,
   #[new(default)]
   pub following_url: Option<DbUrl>,
+  #[new(default)]
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Debug, Clone)]

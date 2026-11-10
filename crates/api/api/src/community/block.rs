@@ -56,6 +56,7 @@ pub async fn user_block_community(
     community_id,
     Some(&local_user_view.local_user),
     false,
+    local_user_view.local_user.local_site_id,
   )
   .await?;
 

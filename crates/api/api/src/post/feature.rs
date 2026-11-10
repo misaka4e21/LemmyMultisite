@@ -8,6 +8,7 @@ use lemmy_api_utils::{
 };
 use lemmy_db_schema::{
   PostFeatureType,
+  impls::presence::set_post_site_featured,
   source::{
     community::Community,
     modlog::{Modlog, ModlogInsertForm},
@@ -34,38 +35,46 @@ pub async fn feature_post(
     is_admin(&local_user_view)?;
   }
 
-  // Update the post
+  // Update the post. Local features are site-scoped and are not federated.
   let post_id = data.post_id;
-  let (post_form, modlog_form) = if data.feature_type == PostFeatureType::Community {
-    (
-      PostUpdateForm {
+  let active_site_id = local_user_view.local_user.local_site_id;
+  let (post, modlog_form, send_activity) = if data.feature_type == PostFeatureType::Community {
+    let post = Post::update(
+      &mut context.pool(),
+      post_id,
+      &PostUpdateForm {
         featured_community: Some(data.featured),
         ..Default::default()
       },
+    )
+    .await?;
+    (
+      post,
       ModlogInsertForm::mod_feature_post_community(
         local_user_view.person.id,
         &orig_post,
         data.featured,
       ),
+      true,
     )
   } else {
+    set_post_site_featured(&mut context.pool(), active_site_id, post_id, data.featured).await?;
     (
-      PostUpdateForm {
-        featured_local: Some(data.featured),
-        ..Default::default()
-      },
+      orig_post.clone(),
       ModlogInsertForm::admin_feature_post_site(&local_user_view.person, &orig_post, data.featured),
+      false,
     )
   };
-  let post = Post::update(&mut context.pool(), post_id, &post_form).await?;
 
   // Mod tables
   Modlog::create(&mut context.pool(), &[modlog_form]).await?;
 
-  ActivityChannel::submit_activity(
-    SendActivityData::FeaturePost(post, local_user_view.person.clone(), data.featured),
-    &context,
-  )?;
+  if send_activity {
+    ActivityChannel::submit_activity(
+      SendActivityData::FeaturePost(post, local_user_view.person.clone(), data.featured),
+      &context,
+    )?;
+  }
 
   build_post_response(&context, orig_post.community_id, local_user_view, post_id).await
 }

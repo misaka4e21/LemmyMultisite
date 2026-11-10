@@ -1,6 +1,7 @@
 use actix_web::{Error, HttpRequest, http::header::*, web};
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{local_user_view_from_jwt, read_auth_token},
 };
 use lemmy_email::{translations::Lang, user_language};
@@ -15,7 +16,13 @@ pub(crate) async fn get_lang_or_negotiate(
   // The local user view is optional, since they may not be logged in.
   // Also the All / Local type feeds don't need a login, and don't pass a jwt.
   let lang = if let Some(jwt) = jwt
-    && let Some(local_user_view) = local_user_view_from_jwt(&jwt, context, true).await.ok()
+    && let Some(local_user_view) = {
+      let expected_local_site_id =
+        TenantContext::from_request_extensions(req).map(|tenant| tenant.local_site().id);
+      local_user_view_from_jwt(&jwt, context, true, expected_local_site_id)
+        .await
+        .ok()
+    }
   {
     user_language(&local_user_view.local_user)
   } else if req.headers().contains_key(ACCEPT_LANGUAGE) {

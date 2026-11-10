@@ -1,5 +1,6 @@
 use crate::{
   diesel::{DecoratableTarget, OptionalExtension},
+  impls::presence::{default_local_site_id, ensure_private_message_site},
   source::{
     person::Person,
     private_message::{PrivateMessage, PrivateMessageInsertForm, PrivateMessageUpdateForm},
@@ -15,10 +16,7 @@ use lemmy_diesel_utils::{
   traits::Crud,
   utils::functions::coalesce,
 };
-use lemmy_utils::{
-  error::{LemmyErrorExt, LemmyErrorType, LemmyResult},
-  settings::structs::Settings,
-};
+use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 use url::Url;
 
 impl Crud for PrivateMessage {
@@ -28,11 +26,27 @@ impl Crud for PrivateMessage {
 
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(private_message::table)
+    let private_message = insert_into(private_message::table)
       .values(form)
       .get_result::<Self>(conn)
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
+      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+    if form.local.unwrap_or(true) {
+      let local_site_id = match form.origin_local_site_id {
+        Some(local_site_id) => Some(local_site_id),
+        None => default_local_site_id(&mut conn.into()).await?,
+      };
+      if let Some(local_site_id) = local_site_id {
+        ensure_private_message_site(
+          &mut conn.into(),
+          local_site_id,
+          private_message.id,
+          "sender",
+        )
+        .await?;
+      }
+    }
+    Ok(private_message)
   }
 
   async fn update(
@@ -81,9 +95,14 @@ impl PrivateMessage {
       .optional()
       .with_lemmy_type(LemmyErrorType::NotFound)
   }
-  pub fn local_url(&self, settings: &Settings) -> LemmyResult<DbUrl> {
-    let domain = settings.get_protocol_and_hostname();
-    Ok(Url::parse(&format!("{domain}/private_message/{}", self.id))?.into())
+  pub fn local_url(&self, protocol_and_hostname: &str) -> LemmyResult<DbUrl> {
+    Ok(
+      Url::parse(&format!(
+        "{protocol_and_hostname}/private_message/{}",
+        self.id
+      ))?
+      .into(),
+    )
   }
 
   pub async fn update_removed_for_creator(
@@ -162,6 +181,7 @@ mod tests {
       ))?
       .into(),
       local: true,
+      origin_local_site_id: None,
       removed: false,
       deleted_by_recipient: false,
     };

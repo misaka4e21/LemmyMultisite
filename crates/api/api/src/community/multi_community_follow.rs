@@ -49,8 +49,13 @@ pub async fn follow_multi_community(
     )?;
   }
 
-  let multi_community_view =
-    MultiCommunityView::read(&mut context.pool(), multi_community_id, Some(my_person_id)).await?;
+  let multi_community_view = MultiCommunityView::read(
+    &mut context.pool(),
+    multi_community_id,
+    Some(my_person_id),
+    local_user_view.local_user.local_site_id,
+  )
+  .await?;
 
   Ok(Json(MultiCommunityResponse {
     multi_community_view,

@@ -5,10 +5,10 @@ use crate::{
     list::list_registration_applications,
   },
 };
-use activitypub_federation::config::Data;
+use activitypub_federation::config::{Data, FederationConfig};
 use actix_web::web::{Json, Query};
 use lemmy_api_crud::site::update::edit_site;
-use lemmy_api_utils::context::LemmyContext;
+use lemmy_api_utils::{context::LemmyContext, tenant::TenantContext};
 use lemmy_db_schema::{
   source::{
     local_site::{LocalSite, LocalSiteUpdateForm},
@@ -18,16 +18,17 @@ use lemmy_db_schema::{
   },
   test_data::TestData,
 };
-use lemmy_db_schema_file::{InstanceId, enums::RegistrationMode};
+use lemmy_db_schema_file::{InstanceId, enums::RegistrationMode, newtypes::LocalSiteId};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_registration_applications::{
   RegistrationApplicationView,
   api::ApproveRegistrationApplication,
 };
-use lemmy_db_views_site::api::EditSite;
+use lemmy_db_views_site::{SiteView, api::EditSite};
 use lemmy_diesel_utils::{connection::DbPool, traits::Crud};
 use lemmy_utils::{CACHE_DURATION_API, error::LemmyResult};
 use serial_test::serial;
+use std::sync::Arc;
 
 async fn create_test_site(context: &Data<LemmyContext>) -> LemmyResult<(TestData, LocalUserView)> {
   let pool = &mut context.pool();
@@ -50,7 +51,10 @@ async fn create_test_site(context: &Data<LemmyContext>) -> LemmyResult<(TestData
   .await?;
   LocalUser::create(
     pool,
-    &LocalUserInsertForm::test_form_admin(admin_person.id),
+    &LocalUserInsertForm {
+      local_site_id: data.local_site.id,
+      ..LocalUserInsertForm::test_form_admin(admin_person.id)
+    },
     vec![],
   )
   .await?;
@@ -63,6 +67,7 @@ async fn create_test_site(context: &Data<LemmyContext>) -> LemmyResult<(TestData
 async fn signup(
   pool: &mut DbPool<'_>,
   instance_id: InstanceId,
+  local_site_id: LocalSiteId,
   name: &str,
   email: Option<&str>,
 ) -> LemmyResult<(LocalUser, RegistrationApplication)> {
@@ -71,11 +76,15 @@ async fn signup(
 
   let local_user_insert_form = match email {
     Some(email) => LocalUserInsertForm {
+      local_site_id,
       email: Some(email.to_string()),
       email_verified: Some(false),
       ..LocalUserInsertForm::test_form(person.id)
     },
-    None => LocalUserInsertForm::test_form(person.id),
+    None => LocalUserInsertForm {
+      local_site_id,
+      ..LocalUserInsertForm::test_form(person.id)
+    },
   };
 
   let local_user = LocalUser::create(pool, &local_user_insert_form, vec![]).await?;
@@ -97,12 +106,23 @@ async fn get_application_statuses(
   Vec<RegistrationApplicationView>,
   Vec<RegistrationApplicationView>,
 )> {
-  let Json(unread_counts) = get_unread_counts(context.clone(), admin.clone()).await?;
+  let tenant = tenant_for_local_site(
+    context,
+    context
+      .tenant()
+      .expect("test context must have a tenant")
+      .local_site()
+      .id,
+  )
+  .await?;
+  let Json(unread_counts) =
+    get_unread_counts(context.clone(), admin.clone(), tenant.clone()).await?;
 
   let Json(unread_applications) = list_registration_applications(
     Query::from_query("unread_only=true")?,
     context.clone(),
     admin.clone(),
+    tenant.clone(),
   )
   .await?;
 
@@ -110,6 +130,7 @@ async fn get_application_statuses(
     Query::from_query("unread_only=false")?,
     context.clone(),
     admin,
+    tenant,
   )
   .await?;
 
@@ -122,14 +143,49 @@ async fn get_application_statuses(
   ))
 }
 
+async fn tenant_context(
+  context: &Data<LemmyContext>,
+  local_site_id: LocalSiteId,
+) -> LemmyResult<Data<LemmyContext>> {
+  let site_view = SiteView::read_by_id(&mut context.pool(), local_site_id).await?;
+  let tenant = TenantContext {
+    hostname: site_view.local_site.hostname.clone(),
+    scheme: site_view.site.ap_id.scheme().to_string(),
+    site_view,
+  };
+  let context = (*context).clone().with_tenant(Arc::new(tenant.clone()));
+  Ok(
+    FederationConfig::builder()
+      .domain(tenant.hostname)
+      .app_data(context)
+      .debug(true)
+      .http_fetch_limit(0)
+      .build()
+      .await?
+      .to_request_data(),
+  )
+}
+
+async fn tenant_for_local_site(
+  context: &Data<LemmyContext>,
+  local_site_id: LocalSiteId,
+) -> LemmyResult<TenantContext> {
+  let site_view = SiteView::read_by_id(&mut context.pool(), local_site_id).await?;
+  Ok(TenantContext {
+    hostname: site_view.local_site.hostname.clone(),
+    scheme: site_view.site.ap_id.scheme().to_string(),
+    site_view,
+  })
+}
+
 #[serial]
 #[tokio::test]
 #[expect(clippy::indexing_slicing)]
 async fn test_application_approval() -> LemmyResult<()> {
-  let context = LemmyContext::init_test_context().await;
+  let base_context = LemmyContext::init_test_context().await;
+  let (data, admin_local_user_view) = create_test_site(&base_context).await?;
+  let context = tenant_context(&base_context, data.local_site.id).await?;
   let pool = &mut context.pool();
-
-  let (data, admin_local_user_view) = create_test_site(&context).await?;
 
   // Non-unread counts unfortunately are duplicated due to different types (i64 vs usize)
   let mut expected_total_applications = 0;
@@ -138,6 +194,7 @@ async fn test_application_approval() -> LemmyResult<()> {
   let (local_user_with_email, app_with_email) = signup(
     pool,
     data.instance.id,
+    data.local_site.id,
     "user_w_email",
     Some("lemmy@localhost"),
   )
@@ -213,6 +270,7 @@ async fn test_application_approval() -> LemmyResult<()> {
   let (_local_user, app_with_email_2) = signup(
     pool,
     data.instance.id,
+    data.local_site.id,
     "user_w_email_2",
     Some("lemmy2@localhost"),
   )
@@ -235,6 +293,7 @@ async fn test_application_approval() -> LemmyResult<()> {
     }),
     context.clone(),
     admin_local_user_view.clone(),
+    (**context.tenant().expect("test context must have a tenant")).clone(),
   ))
   .await?;
 
@@ -279,7 +338,14 @@ async fn test_application_approval() -> LemmyResult<()> {
   );
   assert_eq!(all_applications.len(), expected_total_applications,);
 
-  signup(pool, data.instance.id, "user_wo_email", None).await?;
+  signup(
+    pool,
+    data.instance.id,
+    data.local_site.id,
+    "user_wo_email",
+    None,
+  )
+  .await?;
 
   expected_total_applications += 1;
   expected_unread_applications += 1;
@@ -295,7 +361,14 @@ async fn test_application_approval() -> LemmyResult<()> {
   );
   assert_eq!(all_applications.len(), expected_total_applications,);
 
-  signup(pool, data.instance.id, "user_w_email_3", None).await?;
+  signup(
+    pool,
+    data.instance.id,
+    data.local_site.id,
+    "user_w_email_3",
+    None,
+  )
+  .await?;
 
   expected_total_applications += 1;
   expected_unread_applications += 1;
@@ -318,6 +391,7 @@ async fn test_application_approval() -> LemmyResult<()> {
     }),
     context.clone(),
     admin_local_user_view.clone(),
+    (**context.tenant().expect("test context must have a tenant")).clone(),
   ))
   .await?;
 

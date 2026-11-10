@@ -1,4 +1,5 @@
 use crate::{
+  impls::presence::{default_local_site_id, ensure_post_site, set_post_site_featured},
   source::post::{
     Post,
     PostActions,
@@ -32,7 +33,7 @@ use lemmy_db_schema_file::{
   InstanceId,
   PersonId,
   enums::{CommunityVisibility, PostNotificationsMode},
-  newtypes::{CommunityId, PostId},
+  newtypes::{CommunityId, LocalSiteId, PostId},
   schema::{community, local_user, person, post, post_actions},
 };
 use lemmy_diesel_utils::{
@@ -44,10 +45,7 @@ use lemmy_diesel_utils::{
     now,
   },
 };
-use lemmy_utils::{
-  error::{LemmyErrorExt, LemmyErrorType, LemmyResult},
-  settings::structs::Settings,
-};
+use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 use url::Url;
 
 impl Crud for Post {
@@ -57,11 +55,24 @@ impl Crud for Post {
 
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(post::table)
+    let post = insert_into(post::table)
       .values(form)
       .get_result::<Self>(conn)
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
+      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+    if form.local.unwrap_or(form.ap_id.is_none()) {
+      let local_site_id = match form.origin_local_site_id {
+        Some(local_site_id) => Some(local_site_id),
+        None => default_local_site_id(&mut conn.into()).await?,
+      };
+      if let Some(local_site_id) = local_site_id {
+        ensure_post_site(&mut conn.into(), local_site_id, post.id).await?;
+        if form.featured_local.unwrap_or(false) {
+          set_post_site_featured(&mut conn.into(), local_site_id, post.id, true).await?;
+        }
+      }
+    }
+    Ok(post)
   }
 
   async fn update(
@@ -123,12 +134,14 @@ impl Post {
 
   pub async fn list_for_sitemap(
     pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
   ) -> LemmyResult<Vec<(DbUrl, chrono::DateTime<Utc>)>> {
     let conn = &mut get_conn(pool).await?;
     post::table
       .inner_join(community::table)
       .select((post::ap_id, coalesce(post::updated_at, post::published_at)))
       .filter(post::local.eq(true))
+      .filter(post::origin_local_site_id.eq(local_site_id))
       .filter(post::deleted.eq(false))
       .filter(post::removed.eq(false))
       .filter(community::removed.eq(false))
@@ -336,9 +349,11 @@ impl Post {
       .await
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
-  pub fn local_url(&self, settings: &Settings) -> LemmyResult<Url> {
-    let domain = settings.get_protocol_and_hostname();
-    Ok(Url::parse(&format!("{domain}/post/{}", self.id))?)
+  pub fn local_url(&self, protocol_and_hostname: &str) -> LemmyResult<Url> {
+    Ok(Url::parse(&format!(
+      "{protocol_and_hostname}/post/{}",
+      self.id
+    ))?)
   }
 
   /// The comment was created locally and sent back, indicating that the community accepted it
@@ -656,6 +671,7 @@ mod tests {
       thumbnail_url: None,
       ap_id: Url::parse(&format!("https://lemmy-alpha/post/{}", inserted_post.id))?.into(),
       local: true,
+      origin_local_site_id: None,
       language_id: Default::default(),
       featured_community: false,
       featured_local: false,

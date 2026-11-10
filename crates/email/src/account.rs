@@ -16,6 +16,7 @@ use lemmy_utils::{
 pub async fn send_password_reset_email(
   user: &LocalUserView,
   pool: &mut DbPool<'_>,
+  local_site: &LocalSite,
   settings: &'static Settings,
 ) -> LemmyResult<()> {
   // Generate a random token
@@ -23,11 +24,22 @@ pub async fn send_password_reset_email(
 
   let lang = user_language(&user.local_user);
   let subject = lang.password_reset_subject(&user.person.name);
-  let protocol_and_hostname = settings.get_protocol_and_hostname();
+  let protocol_and_hostname = format!(
+    "{}://{}",
+    settings.get_protocol_string(),
+    local_site.hostname
+  );
   let reset_link = format!("{}/password_change/{}", protocol_and_hostname, token);
   let email = user_email(user)?;
   let body = lang.password_reset_body(reset_link, &user.person.name);
-  send_email(subject, email, user.person.name.clone(), body, settings);
+  send_email(
+    subject,
+    email,
+    user.person.name.clone(),
+    body,
+    local_site.clone(),
+    settings,
+  );
 
   // Insert the row after successful send, to avoid using daily reset limit while
   // email sending is broken.
@@ -50,23 +62,31 @@ pub async fn send_verification_email(
     verification_token: uuid::Uuid::new_v4().to_string(),
   };
   let verify_link = format!(
-    "{}/verify_email/{}",
-    settings.get_protocol_and_hostname(),
+    "{}://{}/verify_email/{}",
+    settings.get_protocol_string(),
+    local_site.hostname,
     form.verification_token
   );
   EmailVerification::create(pool, &form).await?;
 
   let lang = user_language(&user.local_user);
-  let subject = lang.verify_email_subject(&settings.hostname);
+  let subject = lang.verify_email_subject(&local_site.hostname);
 
   // If an application is required, use a translation that includes that warning.
   let body = if local_site.registration_mode == RegistrationMode::RequireApplication {
-    lang.verify_email_body_with_application(&settings.hostname, &user.person.name, verify_link)
+    lang.verify_email_body_with_application(&local_site.hostname, &user.person.name, verify_link)
   } else {
-    lang.verify_email_body(&settings.hostname, &user.person.name, verify_link)
+    lang.verify_email_body(&local_site.hostname, &user.person.name, verify_link)
   };
 
-  send_email(subject, new_email, user.person.name.clone(), body, settings);
+  send_email(
+    subject,
+    new_email,
+    user.person.name.clone(),
+    body,
+    local_site.clone(),
+    settings,
+  );
   Ok(())
 }
 
@@ -91,19 +111,28 @@ pub async fn send_verification_email_if_required(
 
 pub fn send_application_approved_email(
   user: &LocalUserView,
+  local_site: &LocalSite,
   settings: &'static Settings,
 ) -> LemmyResult<()> {
   let lang = user_language(&user.local_user);
   let subject = lang.registration_approved_subject(&user.person.name);
   let email = user_email(user)?;
-  let body = lang.registration_approved_body(&settings.hostname);
-  send_email(subject, email, user.person.name.clone(), body, settings);
+  let body = lang.registration_approved_body(&local_site.hostname);
+  send_email(
+    subject,
+    email,
+    user.person.name.clone(),
+    body,
+    local_site.clone(),
+    settings,
+  );
   Ok(())
 }
 
 pub fn send_application_denied_email(
   user: &LocalUserView,
   deny_reason: Option<String>,
+  local_site: &LocalSite,
   settings: &'static Settings,
 ) -> LemmyResult<()> {
   let lang = user_language(&user.local_user);
@@ -112,16 +141,24 @@ pub fn send_application_denied_email(
   let body = match deny_reason {
     Some(deny_reason) => {
       let markdown = markdown_to_html(&deny_reason);
-      lang.registration_denied_reason_body(&settings.hostname, &markdown)
+      lang.registration_denied_reason_body(&local_site.hostname, &markdown)
     }
-    None => lang.registration_denied_body(&settings.hostname),
+    None => lang.registration_denied_body(&local_site.hostname),
   };
-  send_email(subject, email, user.person.name.clone(), body, settings);
+  send_email(
+    subject,
+    email,
+    user.person.name.clone(),
+    body,
+    local_site.clone(),
+    settings,
+  );
   Ok(())
 }
 
 pub fn send_email_verified_email(
   user: &LocalUserView,
+  local_site: &LocalSite,
   settings: &'static Settings,
 ) -> LemmyResult<()> {
   let lang = user_language(&user.local_user);
@@ -133,6 +170,7 @@ pub fn send_email_verified_email(
     email,
     user.person.name.clone(),
     body.to_string(),
+    local_site.clone(),
     settings,
   );
   Ok(())

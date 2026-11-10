@@ -9,6 +9,7 @@ use core::future::Ready;
 use futures_util::future::LocalBoxFuture;
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{local_user_view_from_jwt, read_auth_token},
 };
 use std::{future::ready, rc::Rc};
@@ -71,7 +72,12 @@ where
         // Ignore any invalid auth so the site can still be used
         // This means it is be impossible to get any error message for invalid jwt. Need
         // to use `/api/v4/account/validate_auth` for that.
-        let local_user_view = local_user_view_from_jwt(jwt, &context, false).await.ok();
+        let expected_local_site_id = TenantContext::from_request_extensions(req.request())
+          .map(|tenant| tenant.local_site().id);
+        let local_user_view =
+          local_user_view_from_jwt(jwt, &context, false, expected_local_site_id)
+            .await
+            .ok();
         if let Some(local_user_view) = local_user_view {
           req.extensions_mut().insert(local_user_view);
         }
@@ -131,7 +137,7 @@ mod tests {
     let req = TestRequest::default().to_http_request();
     let jwt = Claims::generate(inserted_local_user.id, None, req, &context).await?;
 
-    let valid = Claims::validate(&jwt, &context, false).await;
+    let valid = Claims::validate(&jwt, &context, false, None).await;
     assert!(valid.is_ok());
 
     let num_deleted = Person::delete(pool, inserted_person.id).await?;

@@ -13,8 +13,13 @@ pub async fn list_all_media(
   // Only let admins view all media
   is_admin(&local_user_view)?;
 
-  let images =
-    LocalImageView::get_all_paged(&mut context.pool(), data.page_cursor, data.limit).await?;
+  let images = LocalImageView::get_all_paged(
+    &mut context.pool(),
+    local_user_view.local_user.local_site_id,
+    data.page_cursor,
+    data.limit,
+  )
+  .await?;
 
   Ok(Json(images))
 }

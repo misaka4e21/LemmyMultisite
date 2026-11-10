@@ -4,6 +4,7 @@ use crate::{
   api::{GetFederatedInstances, GetFederatedInstancesKind, UserSettingsBackup},
 };
 use diesel::{
+  BoolExpressionMethods,
   ExpressionMethods,
   JoinOnDsl,
   OptionalExtension,
@@ -20,6 +21,7 @@ use lemmy_db_schema::{
     instance::{Instance, instance_keys as key},
     keyword_block::LocalUserKeywordBlock,
     language::Language,
+    local_site::LocalSite,
     local_user::LocalUser,
     person::Person,
   },
@@ -27,6 +29,7 @@ use lemmy_db_schema::{
 };
 use lemmy_db_schema_file::{
   InstanceId,
+  newtypes::LocalSiteId,
   schema::{
     federation_allowlist,
     federation_blocklist,
@@ -42,47 +45,88 @@ use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
   pagination::{CursorData, PagedResponse, PaginationCursorConversion, paginate_response},
   traits::Crud,
-  utils::fuzzy_search,
+  utils::{functions::lower, fuzzy_search},
 };
-use lemmy_utils::{
-  CacheLock,
-  build_cache,
-  error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult},
-};
-use std::{
-  collections::HashMap,
-  sync::{Arc, LazyLock},
-};
+use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
+use moka::future::Cache;
+use std::{collections::HashMap, sync::LazyLock};
 
 impl SiteView {
-  pub async fn read_local(pool: &mut DbPool<'_>) -> LemmyResult<Self> {
-    static CACHE: CacheLock<SiteView> = LazyLock::new(build_cache);
-    CACHE
-      .try_get_with((), async move {
-        let conn = &mut get_conn(pool).await?;
-        let local_site = site::table
-          .inner_join(local_site::table)
-          .inner_join(instance::table)
-          .inner_join(
-            local_site_rate_limit::table
-              .on(local_site::id.eq(local_site_rate_limit::local_site_id)),
-          )
-          .select(Self::as_select())
-          .first(conn)
-          .await
-          .optional()?
-          .ok_or(LemmyErrorType::LocalSiteNotSetup)?;
-        Ok(local_site)
-      })
+  fn by_id_cache() -> &'static Cache<LocalSiteId, SiteView> {
+    static CACHE: LazyLock<Cache<LocalSiteId, SiteView>> =
+      LazyLock::new(|| Cache::builder().max_capacity(1000).build());
+    &CACHE
+  }
+
+  pub async fn invalidate(local_site_id: LocalSiteId) {
+    Self::by_id_cache().invalidate(&local_site_id).await;
+  }
+
+  pub async fn invalidate_all() {
+    Self::by_id_cache().invalidate_all();
+  }
+
+  pub async fn read_by_hostname(pool: &mut DbPool<'_>, hostname: &str) -> LemmyResult<Self> {
+    let conn = &mut get_conn(pool).await?;
+    site::table
+      .inner_join(local_site::table)
+      .inner_join(instance::table)
+      .inner_join(
+        local_site_rate_limit::table.on(local_site::id.eq(local_site_rate_limit::local_site_id)),
+      )
+      .filter(lower(local_site::hostname).eq(hostname.to_lowercase()))
+      .filter(local_site::disabled.eq(false))
+      .select(Self::as_select())
+      .first(conn)
       .await
-      .map_err(|e: Arc<LemmyError>| anyhow::anyhow!("err getting local site: {e:?}").into())
+      .optional()?
+      .ok_or(LemmyErrorType::LocalSiteNotSetup.into())
+  }
+
+  pub async fn read_by_id(pool: &mut DbPool<'_>, local_site_id: LocalSiteId) -> LemmyResult<Self> {
+    if let Some(site_view) = Self::by_id_cache().get(&local_site_id).await {
+      return Ok(site_view);
+    }
+    let conn = &mut get_conn(pool).await?;
+    let site_view = site::table
+      .inner_join(local_site::table)
+      .inner_join(instance::table)
+      .inner_join(
+        local_site_rate_limit::table.on(local_site::id.eq(local_site_rate_limit::local_site_id)),
+      )
+      .filter(local_site::id.eq(local_site_id))
+      .select(Self::as_select())
+      .first(conn)
+      .await
+      .optional()?
+      .ok_or(LemmyErrorType::LocalSiteNotSetup)?;
+    Self::by_id_cache()
+      .insert(local_site_id, site_view.clone())
+      .await;
+    Ok(site_view)
+  }
+
+  pub async fn read_all(pool: &mut DbPool<'_>) -> LemmyResult<Vec<Self>> {
+    let conn = &mut get_conn(pool).await?;
+    site::table
+      .inner_join(local_site::table)
+      .inner_join(instance::table)
+      .inner_join(
+        local_site_rate_limit::table.on(local_site::id.eq(local_site_rate_limit::local_site_id)),
+      )
+      .select(Self::as_select())
+      .load(conn)
+      .await
+      .map_err(Into::into)
   }
 
   /// A special site bot user, solely made for following non-local communities for
   /// multi-communities.
-  pub async fn read_system_account(pool: &mut DbPool<'_>) -> LemmyResult<Person> {
-    let site_view = SiteView::read_local(pool).await?;
-    Person::read(pool, site_view.local_site.system_account).await
+  pub async fn read_system_account(
+    pool: &mut DbPool<'_>,
+    local_site: &LocalSite,
+  ) -> LemmyResult<Person> {
+    Person::read(pool, local_site.system_account).await
   }
 }
 
@@ -126,19 +170,37 @@ pub async fn user_backup_list_to_user_settings_backup(
 
 impl FederatedInstanceView {
   #[diesel::dsl::auto_type(no_type_alias)]
-  fn joins() -> _ {
+  fn joins(local_site_id: LocalSiteId) -> _ {
     instance::table
       // omit instance representing the local site
       .left_join(site::table.left_join(local_site::table))
       .filter(local_site::id.is_null())
-      .left_join(federation_blocklist::table)
-      .left_join(federation_allowlist::table)
-      .left_join(federation_queue_state::table)
+      .left_join(
+        federation_blocklist::table.on(
+          federation_blocklist::instance_id
+            .eq(instance::id)
+            .and(federation_blocklist::local_site_id.eq(local_site_id)),
+        ),
+      )
+      .left_join(
+        federation_allowlist::table.on(
+          federation_allowlist::instance_id
+            .eq(instance::id)
+            .and(federation_allowlist::local_site_id.eq(local_site_id)),
+        ),
+      )
+      .left_join(
+        federation_queue_state::table.on(
+          federation_queue_state::instance_id
+            .eq(instance::id)
+            .and(federation_queue_state::local_site_id.eq(local_site_id)),
+        ),
+      )
   }
 
-  pub async fn count(pool: &mut DbPool<'_>) -> LemmyResult<i32> {
+  pub async fn count(pool: &mut DbPool<'_>, local_site_id: LocalSiteId) -> LemmyResult<i32> {
     let conn = &mut get_conn(pool).await?;
-    let count = Self::joins()
+    let count = Self::joins(local_site_id)
       .filter(federation_blocklist::instance_id.is_null())
       .select(count_star())
       .first::<i64>(conn)
@@ -149,9 +211,10 @@ impl FederatedInstanceView {
   pub async fn list(
     pool: &mut DbPool<'_>,
     data: GetFederatedInstances,
+    local_site_id: LocalSiteId,
   ) -> LemmyResult<PagedResponse<Self>> {
     let limit = limit_fetch(data.limit, None)?;
-    let mut query = Self::joins()
+    let mut query = Self::joins(local_site_id)
       .select(Self::as_select())
       .limit(limit)
       .into_boxed();
@@ -189,9 +252,13 @@ impl FederatedInstanceView {
     paginate_response(res, limit, data.page_cursor)
   }
 
-  pub async fn read(pool: &mut DbPool<'_>, instance_id: InstanceId) -> LemmyResult<Self> {
+  pub async fn read(
+    pool: &mut DbPool<'_>,
+    instance_id: InstanceId,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    Self::joins()
+    Self::joins(local_site_id)
       .filter(instance::id.eq(instance_id))
       .select(Self::as_select())
       .get_result(conn)
@@ -227,6 +294,8 @@ mod tests {
       federation_allowlist::{FederationAllowList, FederationAllowListForm},
       federation_queue_state::FederationQueueState,
       instance::Instance,
+      local_site::{LocalSite, LocalSiteInsertForm},
+      person::{Person, PersonInsertForm},
       site::{Site, SiteUpsertForm},
     },
   };
@@ -245,7 +314,18 @@ mod tests {
     let instance1 = Instance::read_or_create(pool, "example1.com").await?;
     let site_form = SiteUpsertForm::new("Example".to_string(), instance0.id);
     let site = Site::create(pool, &site_form).await?;
-    let form = FederationAllowListForm::new(instance0.id);
+    let system = Person::create(
+      pool,
+      &PersonInsertForm::test_form(instance0.id, "federated_site_system"),
+    )
+    .await?;
+    let local_site = LocalSite::create(
+      pool,
+      &LocalSiteInsertForm::new(site.id, system.id, instance0.domain.clone()),
+    )
+    .await?;
+    let local_site_id = local_site.id;
+    let form = FederationAllowListForm::new(instance0.id, local_site_id);
     let allow = FederationAllowList::allow(pool, &form).await?;
     let queue_state = FederationQueueState {
       instance_id: instance0.id,
@@ -253,6 +333,7 @@ mod tests {
       last_successful_id: None,
       last_successful_published_time_at: None,
       last_retry_at: None,
+      local_site_id,
     };
     FederationQueueState::upsert(pool, &queue_state).await?;
 
@@ -263,7 +344,7 @@ mod tests {
       page_cursor: None,
       limit: None,
     };
-    let list = FederatedInstanceView::list(pool, data).await?;
+    let list = FederatedInstanceView::list(pool, data, local_site_id).await?;
     assert_length!(2, list);
 
     // compare first result

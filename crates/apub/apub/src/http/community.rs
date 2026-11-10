@@ -52,10 +52,16 @@ pub(crate) async fn get_apub_community_http(
   context: Data<LemmyContext>,
 ) -> LemmyResult<HttpResponse> {
   let (name, domain) = info.split_name();
-  let community: ApubCommunity = Community::read_from_name(&mut context.pool(), name, domain, true)
-    .await?
-    .ok_or(LemmyErrorType::NotFound)?
-    .into();
+  let community: ApubCommunity = Community::read_from_name(
+    &mut context.pool(),
+    name,
+    domain,
+    Some(context.site_view()?.local_site.id),
+    true,
+  )
+  .await?
+  .ok_or(LemmyErrorType::NotFound)?
+  .into();
 
   check_community_fetchable(&community)?;
 
@@ -69,9 +75,15 @@ pub(crate) async fn get_apub_community_followers(
   context: Data<LemmyContext>,
   request: HttpRequest,
 ) -> LemmyResult<HttpResponse> {
-  let community = Community::read_from_name(&mut context.pool(), &info.name, None, false)
-    .await?
-    .ok_or(LemmyErrorType::NotFound)?;
+  let community = Community::read_from_name(
+    &mut context.pool(),
+    &info.name,
+    None,
+    Some(context.site_view()?.local_site.id),
+    false,
+  )
+  .await?
+  .ok_or(LemmyErrorType::NotFound)?;
   if let Some(is_follower) = &query.is_follower {
     return check_is_follower(community, is_follower, context, request).await;
   }
@@ -121,11 +133,16 @@ pub(crate) async fn get_apub_community_outbox(
   context: Data<LemmyContext>,
   request: HttpRequest,
 ) -> LemmyResult<HttpResponse> {
-  let community: ApubCommunity =
-    Community::read_from_name(&mut context.pool(), &info.name, None, false)
-      .await?
-      .ok_or(LemmyErrorType::NotFound)?
-      .into();
+  let community: ApubCommunity = Community::read_from_name(
+    &mut context.pool(),
+    &info.name,
+    None,
+    Some(context.site_view()?.local_site.id),
+    false,
+  )
+  .await?
+  .ok_or(LemmyErrorType::NotFound)?
+  .into();
   check_community_content_fetchable(&community, &request, &context).await?;
   let outbox = ApubCommunityOutbox::read_local(&community, &context).await?;
   Ok(create_http_response(outbox, &FEDERATION_CONTEXT)?)
@@ -135,11 +152,16 @@ pub(crate) async fn get_apub_community_moderators(
   info: Path<ActorPath>,
   context: Data<LemmyContext>,
 ) -> LemmyResult<HttpResponse> {
-  let community: ApubCommunity =
-    Community::read_from_name(&mut context.pool(), &info.name, None, false)
-      .await?
-      .ok_or(LemmyErrorType::NotFound)?
-      .into();
+  let community: ApubCommunity = Community::read_from_name(
+    &mut context.pool(),
+    &info.name,
+    None,
+    Some(context.site_view()?.local_site.id),
+    false,
+  )
+  .await?
+  .ok_or(LemmyErrorType::NotFound)?
+  .into();
   check_community_fetchable(&community)?;
   let moderators = ApubCommunityModerators::read_local(&community, &context).await?;
   Ok(create_http_response(moderators, &FEDERATION_CONTEXT)?)
@@ -151,11 +173,16 @@ pub(crate) async fn get_apub_community_featured(
   context: Data<LemmyContext>,
   request: HttpRequest,
 ) -> LemmyResult<HttpResponse> {
-  let community: ApubCommunity =
-    Community::read_from_name(&mut context.pool(), &info.name, None, false)
-      .await?
-      .ok_or(LemmyErrorType::NotFound)?
-      .into();
+  let community: ApubCommunity = Community::read_from_name(
+    &mut context.pool(),
+    &info.name,
+    None,
+    Some(context.site_view()?.local_site.id),
+    false,
+  )
+  .await?
+  .ok_or(LemmyErrorType::NotFound)?
+  .into();
   check_community_content_fetchable(&community, &request, &context).await?;
   let featured = ApubCommunityFeatured::read_local(&community, &context).await?;
   Ok(create_http_response(featured, &FEDERATION_CONTEXT)?)
@@ -166,11 +193,16 @@ pub(crate) async fn get_apub_person_multi_community(
   context: Data<LemmyContext>,
 ) -> LemmyResult<HttpResponse> {
   let (name, domain) = path.split_name();
-  let multi: ApubMultiCommunity =
-    MultiCommunity::read_from_name(&mut context.pool(), name, domain, false)
-      .await?
-      .ok_or(LemmyErrorType::NotFound)?
-      .into();
+  let multi: ApubMultiCommunity = MultiCommunity::read_from_name(
+    &mut context.pool(),
+    name,
+    domain,
+    Some(context.site_view()?.local_site.id),
+    false,
+  )
+  .await?
+  .ok_or(LemmyErrorType::NotFound)?
+  .into();
 
   multi.http_response(&FEDERATION_CONTEXT, &context).await
 }
@@ -179,10 +211,16 @@ pub(crate) async fn get_apub_person_multi_community_follows(
   path: Path<ActorPath>,
   context: Data<LemmyContext>,
 ) -> LemmyResult<HttpResponse> {
-  let multi = MultiCommunity::read_from_name(&mut context.pool(), &path.name, None, false)
-    .await?
-    .ok_or(LemmyErrorType::NotFound)?
-    .into();
+  let multi = MultiCommunity::read_from_name(
+    &mut context.pool(),
+    &path.name,
+    None,
+    Some(context.site_view()?.local_site.id),
+    false,
+  )
+  .await?
+  .ok_or(LemmyErrorType::NotFound)?
+  .into();
 
   let collection = ApubFeedCollection::read_local(&multi, &context).await?;
   Ok(create_http_response(collection, &FEDERATION_CONTEXT)?)
@@ -199,11 +237,16 @@ pub(crate) async fn get_apub_community_tag_http(
   info: Path<CommunityTagPath>,
   context: Data<LemmyContext>,
 ) -> LemmyResult<HttpResponse> {
-  let community: ApubCommunity =
-    Community::read_from_name(&mut context.pool(), &info.community_name, None, true)
-      .await?
-      .ok_or(LemmyErrorType::NotFound)?
-      .into();
+  let community: ApubCommunity = Community::read_from_name(
+    &mut context.pool(),
+    &info.community_name,
+    None,
+    Some(context.site_view()?.local_site.id),
+    true,
+  )
+  .await?
+  .ok_or(LemmyErrorType::NotFound)?
+  .into();
 
   check_community_fetchable(&community)?;
 

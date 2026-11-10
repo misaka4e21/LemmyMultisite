@@ -7,6 +7,7 @@ use lemmy_api_utils::{
   notify::NotifyData,
   plugins::{plugin_hook_after, plugin_hook_before},
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::{
     check_comment_deleted_or_removed,
     check_comment_depth,
@@ -20,7 +21,7 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_schema::{
-  impls::actor_language::validate_post_language,
+  impls::{actor_language::validate_post_language, presence::ensure_comment_site},
   source::{
     comment::{Comment, CommentActions, CommentInsertForm, CommentLikeForm},
     notification::Notification,
@@ -30,7 +31,6 @@ use lemmy_db_schema::{
 use lemmy_db_views_comment::api::{CommentResponse, CreateComment};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_post::PostView;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
@@ -41,8 +41,9 @@ pub async fn create_comment(
   Json(data): Json<CreateComment>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommentResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let slur_regex = slur_regex(&context).await?;
   let url_blocklist = get_url_blocklist(&context).await?;
@@ -107,6 +108,7 @@ pub async fn create_comment(
   }
 
   let mut comment_form = CommentInsertForm {
+    origin_local_site_id: Some(local_site.id),
     language_id: data.language_id,
     federation_pending: Some(community_use_pending(&post_view.community, &context).await),
     ..CommentInsertForm::new(my_person_id, post_id, community_id, content.clone())
@@ -118,6 +120,7 @@ pub async fn create_comment(
   let parent_path = parent_opt.clone().map(|t| t.path);
   let inserted_comment =
     Comment::create(&mut context.pool(), &comment_form, parent_path.as_ref()).await?;
+  ensure_comment_site(&mut context.pool(), local_site.id, inserted_comment.id).await?;
   plugin_hook_after("local_comment_after_create", &inserted_comment);
 
   NotifyData {

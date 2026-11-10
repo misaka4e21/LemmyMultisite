@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use lemmy_db_schema_file::{
   PersonId,
   enums::PostNotificationsMode,
-  newtypes::{CommunityId, LanguageId, PostId},
+  newtypes::{CommunityId, LanguageId, LocalSiteId, PostId},
 };
 use lemmy_diesel_utils::dburl::DbUrl;
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,8 @@ pub struct Post {
   pub federation_pending: bool,
   pub embed_video_width: Option<i32>,
   pub embed_video_height: Option<i32>,
+  /// The site that created this local post. NULL for remote posts.
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 // TODO: FromBytes, ToBytes are only needed to develop wasm plugin, could be behind feature flag
@@ -147,6 +149,8 @@ pub struct PostInsertForm {
   pub scheduled_publish_time_at: Option<DateTime<Utc>>,
   #[new(default)]
   pub federation_pending: Option<bool>,
+  #[new(default)]
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -212,6 +216,7 @@ pub struct PostUpsertForm {
   pub alt_text: Option<Option<String>>,
   pub scheduled_publish_time_at: Option<Option<DateTime<Utc>>>,
   pub federation_pending: Option<bool>,
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[skip_serializing_none]

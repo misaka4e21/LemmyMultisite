@@ -6,6 +6,7 @@ use lemmy_api_utils::{
   context::LemmyContext,
   plugins::plugin_hook_after,
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::{check_local_user_banned_or_deleted, slur_regex},
 };
 use lemmy_db_schema::{
@@ -21,7 +22,6 @@ use lemmy_db_views_report_combined::{
   ReportCombinedViewInternal,
   api::{CreatePrivateMessageReport, PrivateMessageReportResponse},
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_email::admin::send_new_report_email_to_admins;
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
@@ -30,6 +30,7 @@ pub async fn create_pm_report(
   Json(data): Json<CreatePrivateMessageReport>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PrivateMessageReportResponse>> {
   check_local_user_banned_or_deleted(&local_user_view)?;
   let reason = data.reason.trim().to_string();
@@ -63,12 +64,13 @@ pub async fn create_pm_report(
   );
 
   // Email the admins
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
   if local_site.reports_email_admins {
     send_new_report_email_to_admins(
       &private_message_report_view.creator.name,
       &private_message_report_view.private_message_creator.name,
       &mut context.pool(),
+      &local_site,
       context.settings(),
     )
     .await?;

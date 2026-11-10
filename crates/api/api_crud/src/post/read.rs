@@ -1,6 +1,7 @@
 use actix_web::web::{Data, Json, Query};
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{check_private_instance, is_mod_or_admin_opt, update_read_comments},
 };
 use lemmy_db_schema::source::{
@@ -24,10 +25,11 @@ pub async fn get_post(
   Query(data): Query<GetPost>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetPostResponse>> {
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
   let local_instance_id = site.instance_id;
 
   check_private_instance(&local_user_view, &local_site)?;
@@ -84,6 +86,7 @@ pub async fn get_post(
     community_id,
     local_user.as_ref(),
     is_mod_or_admin,
+    local_site.id,
   )
   .await?;
 

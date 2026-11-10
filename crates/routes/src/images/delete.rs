@@ -3,26 +3,28 @@ use actix_web::web::*;
 use lemmy_api_utils::{
   context::LemmyContext,
   request::{delete_image_alias, purge_image_from_pictrs},
+  tenant::TenantContext,
   utils::{is_admin, is_mod_or_admin},
 };
 use lemmy_db_schema::source::{
   community::{Community, CommunityUpdateForm},
-  images::LocalImage,
+  media::MediaReference,
   person::{Person, PersonUpdateForm},
   site::{Site, SiteUpdateForm},
 };
 use lemmy_db_views_community::api::CommunityIdQuery;
 use lemmy_db_views_local_image::api::DeleteImageParams;
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::{SiteView, api::SuccessResponse};
+use lemmy_db_views_site::api::SuccessResponse;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::LemmyResult;
 
 pub async fn delete_site_icon(
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SuccessResponse>> {
-  let site = SiteView::read_local(&mut context.pool()).await?.site;
+  let site = tenant.site().clone();
   is_admin(&local_user_view)?;
 
   delete_old_image(&site.icon, &context).await?;
@@ -38,8 +40,9 @@ pub async fn delete_site_icon(
 pub async fn delete_site_banner(
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SuccessResponse>> {
-  let site = SiteView::read_local(&mut context.pool()).await?.site;
+  let site = tenant.site().clone();
   is_admin(&local_user_view)?;
 
   delete_old_image(&site.banner, &context).await?;
@@ -127,14 +130,26 @@ pub async fn delete_image(
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
 ) -> LemmyResult<Json<SuccessResponse>> {
-  LocalImage::validate_by_alias_and_user(
+  let local_site_id = local_user_view.local_user.local_site_id;
+  let person_id = local_user_view.person.id;
+  MediaReference::validate_by_alias_and_user(
     &mut context.pool(),
     &data.filename,
-    local_user_view.person.id,
+    local_site_id,
+    person_id,
   )
   .await?;
 
-  delete_image_alias(&data.filename, &context).await?;
+  let delete_alias = MediaReference::delete_for_site_and_user(
+    &mut context.pool(),
+    &data.filename,
+    local_site_id,
+    person_id,
+  )
+  .await?;
+  if delete_alias {
+    delete_image_alias(&data.filename, &context).await?;
+  }
 
   Ok(Json(SuccessResponse::default()))
 }

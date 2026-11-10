@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use lemmy_db_schema_file::newtypes::LocalSiteId;
 #[cfg(feature = "full")]
 use lemmy_db_schema_file::schema::local_site_url_blocklist;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ pub struct LocalSiteUrlBlocklist {
   pub url: String,
   pub published_at: DateTime<Utc>,
   pub updated_at: Option<DateTime<Utc>>,
+  pub local_site_id: LocalSiteId,
 }
 
 #[derive(Default, Clone)]
@@ -23,5 +25,6 @@ pub struct LocalSiteUrlBlocklist {
 #[cfg_attr(feature = "full", diesel(table_name = local_site_url_blocklist))]
 pub struct LocalSiteUrlBlocklistForm {
   pub url: String,
+  pub local_site_id: LocalSiteId,
   pub updated_at: Option<DateTime<Utc>>,
 }

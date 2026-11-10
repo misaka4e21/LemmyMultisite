@@ -25,7 +25,7 @@ use lemmy_db_schema_file::{
   aliases,
   enums::{CommunityVisibility, ListingType, ModlogKind},
   newtypes::{CommentId, CommunityId, ModlogId, PostId},
-  schema::{comment, community, community_actions, instance, modlog, person, post},
+  schema::{comment, community, community_actions, instance, local_user, modlog, person, post},
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
@@ -116,6 +116,13 @@ impl ModlogQuery<'_> {
     let my_person_id = self.local_user.person_id();
 
     let mut query = ModlogView::joins(my_person_id)
+      .filter(
+        modlog::mod_id.eq_any(
+          local_user::table
+            .filter(local_user::local_site_id.eq(local_site.id))
+            .select(local_user::person_id),
+        ),
+      )
       .select(ModlogView::as_select())
       .limit(limit)
       .into_boxed();
@@ -265,7 +272,8 @@ mod tests {
     let site = Site::create(pool, &site_form).await?;
     let system_acct =
       Person::create(pool, &PersonInsertForm::test_form(instance.id, "langs")).await?;
-    let local_site_form = LocalSiteInsertForm::new(site.id, system_acct.id);
+    let local_site_form =
+      LocalSiteInsertForm::new(site.id, system_acct.id, instance.domain.clone());
     let local_site = LocalSite::create(pool, &local_site_form).await?;
 
     let timmy_form = PersonInsertForm::test_form(instance.id, "timmy_rcv");

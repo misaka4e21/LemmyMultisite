@@ -3,6 +3,7 @@ use actix_web::web::Json;
 use lemmy_api_utils::{
   build_response::build_community_response,
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{
     check_local_user_banned_or_deleted,
     check_nsfw_allowed,
@@ -17,6 +18,7 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_schema::{
+  impls::presence::ensure_community_site,
   source::{
     actor_language::{CommunityLanguage, LocalUserLanguage, SiteLanguage},
     community::{
@@ -51,11 +53,12 @@ pub async fn create_community(
   Json(data): Json<CreateCommunity>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommunityResponse>> {
   check_local_user_banned_or_deleted(&local_user_view)?;
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
 
   if local_site.community_creation_admin_only && is_admin(&local_user_view).is_err() {
     return Err(LemmyErrorType::OnlyAdminsCanCreateCommunities.into());
@@ -94,7 +97,7 @@ pub async fn create_community(
   is_valid_actor_name(&data.name)?;
 
   // Check for duplicate community with the same name
-  let ap_id = Community::generate_local_actor_url(&data.name, context.settings())?;
+  let ap_id = Community::generate_local_actor_url(&data.name, &context.protocol_and_hostname())?;
   let community_dupe = Community::read_from_apub_id(&mut context.pool(), &ap_id).await?;
   if community_dupe.is_some() {
     return Err(LemmyErrorType::AlreadyExists.into());
@@ -102,6 +105,7 @@ pub async fn create_community(
 
   let keypair = generate_actor_keypair()?;
   let community_form = CommunityInsertForm {
+    origin_local_site_id: Some(local_site.id),
     sidebar,
     summary,
     title,
@@ -109,7 +113,7 @@ pub async fn create_community(
     ap_id: Some(ap_id.clone()),
     private_key: Some(keypair.private_key),
     followers_url: Some(generate_followers_url(&ap_id)?),
-    inbox_url: Some(generate_inbox_url()?),
+    inbox_url: Some(generate_inbox_url(&context.protocol_and_hostname())?),
     moderators_url: Some(generate_moderators_url(&ap_id)?),
     featured_url: Some(generate_featured_url(&ap_id)?),
     posting_restricted_to_mods: data.posting_restricted_to_mods,
@@ -134,6 +138,7 @@ pub async fn create_community(
   };
 
   let inserted_community = Community::create(&mut context.pool(), &community_form).await?;
+  ensure_community_site(&mut context.pool(), local_site.id, inserted_community.id).await?;
   let community_id = inserted_community.id;
 
   // The community creator becomes a moderator

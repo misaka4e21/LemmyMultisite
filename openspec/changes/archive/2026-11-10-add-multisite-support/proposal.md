@@ -7,6 +7,7 @@ LemmyMultisite currently behaves like upstream single-site Lemmy. One hostname i
 - Separate the installation from LocalSite. Each LocalSite has its own hostname, Site actor, keys, administrators, accounts, communities, and federation policy.
 - Resolve the tenant from Host for API, WebFinger, ActivityPub, feeds, images, mail, and scheduled work.
 - Keep local accounts isolated by site. `alice@A` and `alice@B` are different accounts with different passwords and Person rows. JWT carries `local_site_id` and must match Host.
+- Browser sessions set the site JWT in a host-scoped HttpOnly cookie with SameSite=Lax. Login and logout update it, and the Elm frontend relies on the cookie instead of reading a token from JavaScript.
 - Store canonical ActivityPub objects once. Remote Person, Community, Post, and Comment rows are shared. Each site has presence and state rows for visibility, local moderation, featured state, aggregates, and derived media.
 - Deduplicate uploads by content hash. A global media object holds the canonical alias, and site rows reference it. Deletion follows reference counts.
 - Serve `/api/v4/image/{alias}` from each site's hostname while using one pict-rs backend.
@@ -33,5 +34,6 @@ None. `openspec/specs/` is empty, so all capabilities are new.
 - Database: `local_site`, `local_user`, `person`, `community`, `post`, `comment`, `private_message`, `multi_community`, `sent_activity`, `received_activity`, `federation_queue_state`, `federation_allowlist`, `federation_blocklist`, `local_image`, and `image_details`, plus new `*_site` and `media_*` tables.
 - Server: middleware order, federation configuration, and startup site setup in `crates/server`; tenant filters in `crates/api` and `crates/db_views`; actor URLs, inbox and outbox handling, sending, and receiving in `crates/apub`; WebFinger, feeds, nodeinfo, images, and scheduled work in `crates/routes`.
 - Authentication and security: JWT claims, session middleware, login, registration, password reset, email verification, OAuth, site administrator boundaries, and installation administrator boundaries.
+- Frontend: `lemmyms-frontend` login, logout, and session boot read the JWT cookie instead of storing a token in JavaScript.
 - Media: shared pict-rs storage, media aliases and URLs, upload deduplication, reference-counted deletion, and remote image proxying.
 - Operations: site creation and removal, per-site SMTP sender, per-site rate limits, cache invalidation, migration, and rollback.

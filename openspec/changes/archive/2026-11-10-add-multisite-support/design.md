@@ -83,6 +83,8 @@ Host -> TenantResolver -> RateLimit(site) -> Session/JWT(site) -> Handler
 
 `SessionMiddleware` currently runs with the global context before tenant resolution. It has to move behind tenant resolution, or it has to resolve the tenant itself before validating the token.
 
+Browser login also sets the site JWT in a host-scoped HttpOnly cookie with Path=/, SameSite=Lax, and Secure when the tenant scheme is HTTPS. Session authentication reads the cookie before falling back to the Authorization header. Logout clears the cookie with the same attributes. CSRF remains protected by the existing token. The Elm frontend in `lemmyms-frontend` reads its session through this cookie and does not persist the JWT in JavaScript storage.
+
 ### 7. Content-addressed media
 
 Add two tables:
@@ -118,7 +120,7 @@ The alternative, changing the domain inside one global config per request, is un
 
 Add `local_site_id` to `sent_activity`. Replace `federation_queue_state(instance_id)` with `federation_queue_state(local_site_id, instance_id)`. The worker reads the next activity for its site instead of assuming a contiguous global ID. `get_latest_activity_id`, retry state, and cached activity info are keyed by site.
 
-`SendActivityData` carries `local_site_id` explicitly. The origin of an activity can differ from the origin of the object, for example when site A's administrator removes a remote post. The site that initiated the activity signs it and owns its retry state.
+`sent_activity` stores `local_site_id`. `SendActivityData` does not need a duplicate field on every variant. The queue writer derives the site from the initiating local actor's `origin_local_site_id` or AP ID, then from the local object, with `context.tenant()` as fallback. Variants without a local actor resolve it from the referenced community or person. The activity `ap_id` hostname is a consistency check and fallback, not the primary source. The site that initiated the activity signs it and owns its retry state.
 
 ### 10. Per-site received activity log
 
@@ -160,22 +162,35 @@ Using a `local_user` on a special site would confuse Fediverse identity and site
 - The `activitypub_federation` crate may not allow per-request federation configuration. Mitigation: run a spike before the queue work and patch the dependency if needed.
 - Internal delivery can drift from HTTP delivery. Mitigation: share the inbound handler and add contract tests that run the same activity through both paths.
 - Media deduplication adds hashing cost and refcount races. Mitigation: stream hashing, bounded upload size, transactions, unique constraints, and row locks on the media object.
-- The migration touches most tables and query paths. Mitigation: expand, backfill, dual-write, switch reads, then contract. Keep a backup and a feature flag that keeps the old single-site path until the switch is verified.
+- The migration touches most tables and query paths. Mitigation: expand, backfill, dual-write, switch reads, then contract. Keep a backup, and keep the single-site fallback only until the switch is verified; the contract phase removes it.
 - Combined aggregates can expose site-local votes. Mitigation: keep installation-wide aggregates only for content that is already federated globally, and keep site-local moderation and presence separate.
 - Host header spoofing can select the wrong tenant. Mitigation: accept only configured hostnames, canonicalize the header, and configure trusted proxies.
 - Site removal can delete data too early. Mitigation: soft disable first, retain data for a configurable window, and remove shared objects only when no reference remains.
 
 ## Migration Plan
 
-1. Expand the schema: add `local_site.hostname`, `origin_local_site_id`, presence tables, media tables, site columns on queues and policy tables, and composite keys. Backfill the existing single site as the origin for local rows. Leave remote rows NULL.
-2. Add tenant resolution and the per-site federation registry. Keep the current `Settings.hostname` as the bootstrap hostname until the new path is verified.
-3. Move authentication, sessions, rate limits, and caches to the tenant context. Add the JWT site claim and cross-site rejection tests.
-4. Switch object reads to canonical plus presence joins. Dual-write the old columns during the transition. Move local moderation and derived media to site rows.
-5. Backfill `local_image` into `media_object` and `media_reference`. Dual-write uploads and deletions, then switch reads.
-6. Add `local_site_id` to outgoing activities and switch queue state to `(local_site_id, instance_id)`. Implement internal delivery and run A to B and B to A integration tests.
-7. Contract the schema: remove `Settings.hostname`, singleton helpers, old queue keys, alias-keyed media rows, and compatibility columns that no longer have readers.
+The migrations are ordered in five phases. `crates/diesel_utils/src/schema_setup/mod.rs`
+`test_schema_setup` exercises the whole sequence from a single-site database; every migration from
+000000 onward is applied, reverted, and applied again by the diff check.
 
-Rollback before the contract phase uses the feature flag and the old columns. The migration down scripts should restore the single-site schema. After the contract phase, rollback requires a database backup.
+1. **Expand** (000000-000005, 000007, 000010-000014): add `local_site.hostname`, the origin site
+   columns, the presence and media tables, site columns on queues and policy tables, internal
+   delivery, installation administration, lifecycle fields, and per-site SMTP settings.
+2. **Backfill** (same migrations, plus 000006 and 000013): copy the existing site into every new
+   tenant column, create presence rows for every canonical object, backfill legacy `local_image`
+   rows into `media_object` and `media_reference`, and add the removed-site tombstones.
+3. **Dual-write** (runtime): local object creation writes its origin site and presence row; uploads
+   write `media_object`, `media_reference`, and the compatibility `local_image` row; moderation
+   writes the site row and, for origin content, the canonical row and federation activity.
+4. **Switch** (runtime): reads use canonical objects joined with the active site's presence row;
+   media lists and the image endpoint use `media_reference`; queues use `(local_site_id, instance_id)`
+   and `(local_site_id, id)`; inbound deduplication uses `(local_site_id, ap_id)`.
+5. **Contract** (000015 and later cleanup): drop `local_image` after backfilling any remaining rows,
+   then remove the compatibility column and singleton-helper readers listed in task 9.5.
+
+Rollback before the contract phase uses the feature flag and the old columns. The migration down
+scripts restore the single-site schema. After the contract phase, rollback requires a database
+backup.
 
 ## Testing Strategy
 

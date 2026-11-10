@@ -8,6 +8,7 @@ use lemmy_api_utils::{
   utils::{check_community_mod_action, is_admin},
 };
 use lemmy_db_schema::{
+  impls::presence::set_community_site_removed,
   source::{
     community::{Community, CommunityUpdateForm},
     community_report::CommunityReport,
@@ -35,15 +36,22 @@ pub async fn remove_community(
   // Do the remove
   let community_id = data.community_id;
   let removed = data.removed;
-  let community = Community::update(
-    &mut context.pool(),
-    community_id,
-    &CommunityUpdateForm {
-      removed: Some(removed),
-      ..Default::default()
-    },
-  )
-  .await?;
+  let active_site_id = local_user_view.local_user.local_site_id;
+  let is_origin = community.origin_local_site_id == Some(active_site_id);
+  let community = if is_origin {
+    Community::update(
+      &mut context.pool(),
+      community_id,
+      &CommunityUpdateForm {
+        removed: Some(removed),
+        ..Default::default()
+      },
+    )
+    .await?
+  } else {
+    set_community_site_removed(&mut context.pool(), active_site_id, community_id, removed).await?;
+    community
+  };
 
   CommunityReport::resolve_all_for_object(
     &mut context.pool(),
@@ -65,15 +73,17 @@ pub async fn remove_community(
   let action = Modlog::create(&mut context.pool(), &[form]).await?;
   notify_mod_action(action.clone(), context.app_data());
 
-  ActivityChannel::submit_activity(
-    SendActivityData::RemoveCommunity {
-      moderator: local_user_view.person.clone(),
-      community,
-      reason: data.reason.clone(),
-      removed: data.removed,
-    },
-    &context,
-  )?;
+  if is_origin {
+    ActivityChannel::submit_activity(
+      SendActivityData::RemoveCommunity {
+        moderator: local_user_view.person.clone(),
+        community,
+        reason: data.reason.clone(),
+        removed: data.removed,
+      },
+      &context,
+    )?;
+  }
 
   build_community_response(&context, local_user_view, community_id).await
 }

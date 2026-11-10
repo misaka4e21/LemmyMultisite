@@ -2,6 +2,7 @@ use activitypub_federation::config::Data;
 use actix_web::web::Json;
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{check_local_user_banned_or_deleted, get_url_blocklist, process_markdown, slur_regex},
 };
 use lemmy_db_schema::source::person::{PersonActions, PersonNoteForm};
@@ -10,7 +11,6 @@ use lemmy_db_views_person::{
   PersonView,
   api::{NotePerson, PersonResponse},
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
   utils::{slurs::check_slurs, validation::is_valid_body_field},
@@ -20,6 +20,7 @@ pub async fn user_note_person(
   Json(data): Json<NotePerson>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PersonResponse>> {
   check_local_user_banned_or_deleted(&local_user_view)?;
 
@@ -42,13 +43,13 @@ pub async fn user_note_person(
     check_slurs(&data.note, &slur_regex)?;
     is_valid_body_field(&data.note, false)?;
 
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = tenant.local_site();
 
     let note = process_markdown(
       &data.note,
       &slur_regex,
       &url_blocklist,
-      &local_site,
+      local_site,
       &context,
     )
     .await?;

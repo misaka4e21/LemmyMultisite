@@ -28,11 +28,11 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_schema::{
+  impls::presence::ensure_person_site,
   source::person::{Person as DbPerson, PersonInsertForm, PersonUpdateForm},
   traits::ApubActor,
 };
 use lemmy_db_schema_file::enums::ActorType;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{sensitive::SensitiveString, traits::Crud};
 use lemmy_utils::{
   error::{LemmyError, LemmyResult},
@@ -146,7 +146,7 @@ impl Object for ApubPerson {
 
     let slur_regex = slur_regex(context).await?;
     let url_blocklist = get_url_blocklist(context).await?;
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = context.site_view()?.local_site.clone();
 
     let bio = read_from_string_or_source_opt(&person.summary, &None, &person.source);
     let bio = process_markdown_opt(&bio, &slur_regex, &url_blocklist, &local_site, context).await?;
@@ -184,8 +184,15 @@ impl Object for ApubPerson {
       ),
       matrix_user_id: person.matrix_user_id,
       instance_id,
+      origin_local_site_id: None,
     };
     let person = DbPerson::upsert(&mut context.pool(), &person_form).await?;
+    ensure_person_site(
+      &mut context.pool(),
+      context.site_view()?.local_site.id,
+      person.id,
+    )
+    .await?;
 
     Ok(person.into())
   }
@@ -212,6 +219,10 @@ impl Actor for ApubPerson {
 impl GetActorType for ApubPerson {
   fn actor_type(&self) -> ActorType {
     ActorType::Person
+  }
+
+  fn local_site_id(&self) -> Option<lemmy_db_schema_file::newtypes::LocalSiteId> {
+    self.0.origin_local_site_id
   }
 }
 

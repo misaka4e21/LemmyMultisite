@@ -33,6 +33,7 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_schema::{
+  impls::presence::ensure_community_site,
   source::{
     actor_language::CommunityLanguage,
     community::{Community, CommunityUpdateForm, CommunityUpsertForm},
@@ -41,7 +42,6 @@ use lemmy_db_schema::{
   traits::ApubActor,
 };
 use lemmy_db_schema_file::enums::{ActorType, CommunityVisibility};
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{sensitive::SensitiveString, traits::Crud};
 use lemmy_utils::{
   error::{LemmyError, LemmyResult},
@@ -177,7 +177,7 @@ impl Object for ApubCommunity {
 
   /// Converts a `Group` to `Community`, inserts it into the database and updates moderators.
   async fn from_json(group: Group, context: &Data<Self::DataType>) -> LemmyResult<ApubCommunity> {
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = context.site_view()?.local_site.clone();
     let instance_id = fetch_instance_actor_for_object(&group.id, context).await?;
 
     let slur_regex = slur_regex(context).await?;
@@ -262,6 +262,12 @@ impl Object for ApubCommunity {
 
     let timestamp = group.updated.or(group.published).unwrap_or_else(Utc::now);
     let community = Community::upsert_apub(&mut context.pool(), timestamp, &form).await?;
+    ensure_community_site(
+      &mut context.pool(),
+      context.site_view()?.local_site.id,
+      community.id,
+    )
+    .await?;
     CommunityLanguage::update(&mut context.pool(), languages, community.id).await?;
 
     let new_tags = group
@@ -309,6 +315,10 @@ impl Actor for ApubCommunity {
 impl GetActorType for ApubCommunity {
   fn actor_type(&self) -> ActorType {
     ActorType::Community
+  }
+
+  fn local_site_id(&self) -> Option<lemmy_db_schema_file::newtypes::LocalSiteId> {
+    self.0.origin_local_site_id
   }
 }
 

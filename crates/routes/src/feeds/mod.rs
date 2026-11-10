@@ -11,6 +11,7 @@ use actix_web::{
 use chrono::{DateTime, Utc};
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{check_private_instance, local_user_view_from_jwt},
 };
 use lemmy_db_schema::{
@@ -46,6 +47,25 @@ use rss::{
   Item,
   extension::{ExtensionBuilder, ExtensionMap, dublincore::DublinCoreExtension},
 };
+use url::Url;
+
+fn actor_url_for_site(
+  ap_id: &Url,
+  name: &str,
+  prefix: char,
+  base_url: &str,
+  local_hostname: &str,
+) -> LemmyResult<Url> {
+  let domain = ap_id
+    .domain()
+    .ok_or(lemmy_utils::error::LemmyErrorType::NotFound)?;
+  let path = if domain.eq_ignore_ascii_case(local_hostname) {
+    format!("{prefix}/{name}")
+  } else {
+    format!("{prefix}/{name}@{domain}")
+  };
+  Ok(Url::parse(&format!("{base_url}/{path}"))?)
+}
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::LazyLock};
 
@@ -109,11 +129,13 @@ async fn get_all_feed(
   req: HttpRequest,
   web::Query(info): web::Query<Params>,
   context: web::Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> Result<HttpResponse, Error> {
   let lang = get_lang_or_negotiate(&req, &context).await?;
 
   get_feed_data(
     &context,
+    &tenant,
     ListingType::All,
     info.sort_type(),
     info.get_limit(),
@@ -126,11 +148,13 @@ async fn get_local_feed(
   req: HttpRequest,
   web::Query(info): web::Query<Params>,
   context: web::Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> Result<HttpResponse, Error> {
   let lang = get_lang_or_negotiate(&req, &context).await?;
 
   get_feed_data(
     &context,
+    &tenant,
     ListingType::Local,
     info.sort_type(),
     info.get_limit(),
@@ -141,12 +165,13 @@ async fn get_local_feed(
 
 async fn get_feed_data(
   context: &LemmyContext,
+  tenant: &TenantContext,
   listing_type: ListingType,
   sort_type: PostSortType,
   limit: i64,
   lang: Lang,
 ) -> Result<HttpResponse, Error> {
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = tenant.site_view.clone();
   check_private_instance(&None, &site_view.local_site)?;
 
   let posts = PostQuery {
@@ -169,8 +194,13 @@ async fn get_feed_data(
     }
   );
 
-  let link = context.settings().get_protocol_and_hostname();
-  let items = create_post_items(posts, context.settings(), lang)?;
+  let link = format!("{}://{}", tenant.scheme, tenant.hostname);
+  let items = create_post_items(
+    posts,
+    &format!("{}://{}", tenant.scheme, tenant.hostname),
+    &tenant.hostname,
+    lang,
+  )?;
   Ok(send_feed_response(
     title, link, None, items, site_view, false,
   ))
@@ -181,14 +211,21 @@ async fn get_feed_user(
   web::Query(info): web::Query<Params>,
   name: web::Path<String>,
   context: web::Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> Result<HttpResponse, Error> {
   let (name, domain) = split_name(&name);
 
-  let person = Person::read_from_name(&mut context.pool(), name, domain, false)
-    .await?
-    .ok_or(ErrorBadRequest("not_found"))?;
+  let person = Person::read_from_name(
+    &mut context.pool(),
+    name,
+    domain,
+    Some(tenant.local_site().id),
+    false,
+  )
+  .await?
+  .ok_or(ErrorBadRequest("not_found"))?;
 
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = tenant.site_view.clone();
   check_private_instance(&None, &site_view.local_site)?;
   let lang = get_lang_or_negotiate(&req, &context).await?;
 
@@ -213,7 +250,12 @@ async fn get_feed_user(
 
   let title = format!("{} - {}", site_view.site.name, person.name);
   let link = person.ap_id.to_string();
-  let items = create_post_items(posts, context.settings(), lang)?;
+  let items = create_post_items(
+    posts,
+    &format!("{}://{}", tenant.scheme, tenant.hostname),
+    &tenant.hostname,
+    lang,
+  )?;
   Ok(send_feed_response(
     title, link, person.bio, items, site_view, false,
   ))
@@ -234,17 +276,24 @@ async fn get_feed_community(
   web::Query(info): web::Query<Params>,
   name: web::Path<String>,
   context: web::Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> Result<HttpResponse, Error> {
   let (name, domain) = split_name(&name);
-  let community = Community::read_from_name(&mut context.pool(), name, domain, false)
-    .await?
-    .ok_or(ErrorBadRequest("not_found"))?;
+  let community = Community::read_from_name(
+    &mut context.pool(),
+    name,
+    domain,
+    Some(tenant.local_site().id),
+    false,
+  )
+  .await?
+  .ok_or(ErrorBadRequest("not_found"))?;
 
   if !community.visibility.can_view_without_login() {
     return Err(ErrorBadRequest("not_found"));
   }
 
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = tenant.site_view.clone();
   check_private_instance(&None, &site_view.local_site)?;
   let lang = get_lang_or_negotiate(&req, &context).await?;
 
@@ -260,7 +309,12 @@ async fn get_feed_community(
 
   let title = format!("{} - {}", site_view.site.name, community.name);
   let link = community.ap_id.to_string();
-  let items = create_post_items(posts, context.settings(), lang)?;
+  let items = create_post_items(
+    posts,
+    &format!("{}://{}", tenant.scheme, tenant.hostname),
+    &tenant.hostname,
+    lang,
+  )?;
   Ok(send_feed_response(
     title,
     link,
@@ -276,13 +330,20 @@ async fn get_feed_multi_community(
   web::Query(info): web::Query<Params>,
   name: web::Path<String>,
   context: web::Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> Result<HttpResponse, Error> {
   let (name, domain) = split_name(&name);
-  let multi_community = MultiCommunity::read_from_name(&mut context.pool(), name, domain, false)
-    .await?
-    .ok_or(ErrorBadRequest("not_found"))?;
+  let multi_community = MultiCommunity::read_from_name(
+    &mut context.pool(),
+    name,
+    domain,
+    Some(tenant.local_site().id),
+    false,
+  )
+  .await?
+  .ok_or(ErrorBadRequest("not_found"))?;
 
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = tenant.site_view.clone();
   check_private_instance(&None, &site_view.local_site)?;
   let lang = get_lang_or_negotiate(&req, &context).await?;
 
@@ -298,7 +359,12 @@ async fn get_feed_multi_community(
 
   let title = format!("{} - {}", site_view.site.name, multi_community.name);
   let link = multi_community.ap_id.to_string();
-  let items = create_post_items(posts, context.settings(), lang)?;
+  let items = create_post_items(
+    posts,
+    &format!("{}://{}", tenant.scheme, tenant.hostname),
+    &tenant.hostname,
+    lang,
+  )?;
   Ok(send_feed_response(
     title,
     link,
@@ -313,10 +379,12 @@ async fn get_feed_front(
   req: HttpRequest,
   web::Query(info): web::Query<Params>,
   context: web::Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> Result<HttpResponse, Error> {
   let jwt: String = req.match_info().get("jwt").unwrap_or("none").parse()?;
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
-  let local_user = local_user_view_from_jwt(&jwt, &context, true).await?;
+  let site_view = tenant.site_view.clone();
+  let local_user =
+    local_user_view_from_jwt(&jwt, &context, true, Some(tenant.local_site().id)).await?;
   let lang = user_language(&local_user.local_user);
 
   check_private_instance(&Some(local_user.clone()), &site_view.local_site)?;
@@ -333,8 +401,13 @@ async fn get_feed_front(
   .items;
 
   let title = format!("{} - {}", site_view.site.name, lang.subscribed());
-  let link = context.settings().get_protocol_and_hostname();
-  let items = create_post_items(posts, context.settings(), lang)?;
+  let link = format!("{}://{}", tenant.scheme, tenant.hostname);
+  let items = create_post_items(
+    posts,
+    &format!("{}://{}", tenant.scheme, tenant.hostname),
+    &tenant.hostname,
+    lang,
+  )?;
   Ok(send_feed_response(
     title, link, None, items, site_view, true,
   ))
@@ -376,10 +449,12 @@ async fn get_feed_notifs(
   req: HttpRequest,
   _info: web::Query<Params>,
   context: web::Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> Result<HttpResponse, Error> {
   let jwt: String = req.match_info().get("jwt").unwrap_or("none").parse()?;
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
-  let local_user = local_user_view_from_jwt(&jwt, &context, true).await?;
+  let site_view = tenant.site_view.clone();
+  let local_user =
+    local_user_view_from_jwt(&jwt, &context, true, Some(tenant.local_site().id)).await?;
   let show_bot_accounts = Some(local_user.local_user.show_bot_accounts);
   let lang = user_language(&local_user.local_user);
 
@@ -393,10 +468,16 @@ async fn get_feed_notifs(
   .await?
   .items;
 
-  let protocol_and_hostname = context.settings().get_protocol_and_hostname();
+  let protocol_and_hostname = format!("{}://{}", tenant.scheme, tenant.hostname);
   let title = format!("{} - {}", site_view.site.name, lang.notifications());
   let link = format!("{protocol_and_hostname}/notifications");
-  let items = create_reply_and_mention_items(notifications, &context, lang)?;
+  let items = create_reply_and_mention_items(
+    notifications,
+    &protocol_and_hostname,
+    &tenant.hostname,
+    &context,
+    lang,
+  )?;
   Ok(send_feed_response(
     title, link, None, items, site_view, true,
   ))
@@ -407,10 +488,12 @@ async fn get_feed_modlog(
   req: HttpRequest,
   _info: web::Query<Params>,
   context: web::Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> Result<HttpResponse, Error> {
   let jwt: String = req.match_info().get("jwt").unwrap_or("none").parse()?;
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
-  let local_user = local_user_view_from_jwt(&jwt, &context, true).await?;
+  let site_view = tenant.site_view.clone();
+  let local_user =
+    local_user_view_from_jwt(&jwt, &context, true, Some(tenant.local_site().id)).await?;
   let lang = user_language(&local_user.local_user);
   check_private_instance(&Some(local_user.clone()), &site_view.local_site)?;
 
@@ -424,10 +507,10 @@ async fn get_feed_modlog(
   .await?
   .items;
 
-  let protocol_and_hostname = context.settings().get_protocol_and_hostname();
+  let protocol_and_hostname = format!("{}://{}", tenant.scheme, tenant.hostname);
   let title = format!("{} - {}", local_user.person.name, lang.modlog());
   let link = format!("{protocol_and_hostname}/modlog");
-  let items = create_modlog_items(modlog, context.settings(), lang)?;
+  let items = create_modlog_items(modlog, &protocol_and_hostname, context.settings(), lang)?;
   Ok(send_feed_response(
     title, link, None, items, site_view, true,
   ))
@@ -435,7 +518,9 @@ async fn get_feed_modlog(
 
 fn create_reply_and_mention_items(
   notifs: Vec<NotificationView>,
-  context: &LemmyContext,
+  base_url: &str,
+  local_hostname: &str,
+  _context: &LemmyContext,
   lang: Lang,
 ) -> LemmyResult<Vec<Item>> {
   let reply_items: Vec<Item> = notifs
@@ -443,41 +528,41 @@ fn create_reply_and_mention_items(
     .flat_map(|v| {
       match &v.data {
         NotificationData::Post(post) => {
-          let mention_url = post.post.local_url(context.settings()).ok()?;
+          let mention_url = format!("{base_url}/post/{}", post.post.id.0);
           Some(build_item(
             &post.creator,
             &post.post.published_at,
-            mention_url.as_str(),
+            &mention_url,
             &post.post.body.clone().unwrap_or_default(),
             &v.notification,
-            context.settings(),
+            base_url,
+            local_hostname,
             lang,
           ))
         }
         NotificationData::Comment(comment) => {
-          let reply_url = comment.comment.local_url(context.settings()).ok()?;
+          let reply_url = format!("{base_url}/comment/{}", comment.comment.id.0);
           Some(build_item(
             &comment.creator,
             &comment.comment.published_at,
-            reply_url.as_str(),
+            &reply_url,
             &comment.comment.content,
             &v.notification,
-            context.settings(),
+            base_url,
+            local_hostname,
             lang,
           ))
         }
         NotificationData::PrivateMessage(pm) => {
-          let notifs_url = format!(
-            "{}/notifications",
-            context.settings().get_protocol_and_hostname()
-          );
+          let notifs_url = format!("{base_url}/notifications");
           Some(build_item(
             &pm.creator,
             &pm.private_message.published_at,
             &notifs_url,
             &pm.private_message.content,
             &v.notification,
-            context.settings(),
+            base_url,
+            local_hostname,
             lang,
           ))
         }
@@ -492,14 +577,12 @@ fn create_reply_and_mention_items(
 
 fn create_modlog_items(
   modlog: Vec<ModlogView>,
+  base_url: &str,
   settings: &Settings,
   lang: Lang,
 ) -> LemmyResult<Vec<Item>> {
   // All of these go to your modlog url
-  let modlog_url = format!(
-    "{}/modlog?listing_type=ModeratorView",
-    settings.get_protocol_and_hostname()
-  );
+  let modlog_url = format!("{base_url}/modlog?listing_type=ModeratorView");
 
   let modlog_items: Vec<Item> = modlog
     .iter()
@@ -694,8 +777,13 @@ fn build_modlog_item<T: Into<String>>(
   view: &ModlogView,
   url: &str,
   action: T,
-  settings: &Settings,
+  _settings: &Settings,
 ) -> LemmyResult<Item> {
+  let parsed = Url::parse(url)?;
+  let local_hostname = parsed
+    .host_str()
+    .ok_or(lemmy_utils::error::LemmyErrorType::NotFound)?;
+  let base_url = format!("{}://{}", parsed.scheme(), local_hostname);
   let guid = Some(Guid {
     permalink: true,
     value: view.modlog.id.0.to_string(),
@@ -704,7 +792,13 @@ fn build_modlog_item<T: Into<String>>(
     Some(format!(
       "/u/{} <a href=\"{}\">(link)</a>",
       mod_.name,
-      mod_.actor_url(settings)?
+      actor_url_for_site(
+        mod_.ap_id.inner(),
+        &mod_.name,
+        'u',
+        &base_url,
+        local_hostname,
+      )?
     ))
   } else {
     None
@@ -727,7 +821,8 @@ fn build_item(
   url: &str,
   content: &str,
   notification: &Notification,
-  settings: &Settings,
+  base_url: &str,
+  local_hostname: &str,
   lang: Lang,
 ) -> LemmyResult<Item> {
   let guid = Some(Guid {
@@ -748,7 +843,13 @@ fn build_item(
     author: Some(format!(
       "/u/{} <a href=\"{}\">(link)</a>",
       creator.name,
-      creator.actor_url(settings)?
+      actor_url_for_site(
+        creator.ap_id.inner(),
+        &creator.name,
+        'u',
+        base_url,
+        local_hostname,
+      )?
     )),
     pub_date: Some(published.to_rfc2822()),
     comments: Some(url.to_owned()),
@@ -761,26 +862,39 @@ fn build_item(
 
 fn create_post_items(
   posts: Vec<PostView>,
-  settings: &Settings,
+  base_url: &str,
+  local_hostname: &str,
   lang: Lang,
 ) -> LemmyResult<Vec<Item>> {
   let mut items: Vec<Item> = Vec::new();
 
   for p in posts {
-    let post_url = p.post.local_url(settings)?;
-    let community_url = &p.community.actor_url(settings)?;
+    let post_url = format!("{base_url}/post/{}", p.post.id.0);
+    let community_url = actor_url_for_site(
+      p.community.ap_id.inner(),
+      &p.community.name,
+      'c',
+      base_url,
+      local_hostname,
+    )?;
     let dublin_core_ext = Some(DublinCoreExtension {
       creators: vec![p.creator.ap_id.to_string()],
       ..DublinCoreExtension::default()
     });
     let guid = Some(Guid {
       permalink: true,
-      value: post_url.to_string(),
+      value: post_url.clone(),
     });
     let mut description = lang.submitted_post_with_meta_info(
-      p.creator.actor_url(settings)?,
+      actor_url_for_site(
+        p.creator.ap_id.inner(),
+        &p.creator.name,
+        'u',
+        base_url,
+        local_hostname,
+      )?,
       &p.community.name,
-      community_url,
+      &community_url,
       &p.creator.name,
       p.post.comments,
       p.post.score,

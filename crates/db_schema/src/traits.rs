@@ -1,5 +1,8 @@
 use diesel_uplete::UpleteCount;
-use lemmy_db_schema_file::{PersonId, newtypes::CommunityId};
+use lemmy_db_schema_file::{
+  PersonId,
+  newtypes::{CommunityId, LocalSiteId},
+};
 use lemmy_diesel_utils::{connection::DbPool, dburl::DbUrl};
 use lemmy_utils::{error::LemmyResult, settings::structs::Settings};
 use std::future::Future;
@@ -132,10 +135,11 @@ pub trait ApubActor: Sized {
     pool: &mut DbPool<'_>,
     actor_name: &str,
     domain: Option<&str>,
+    local_site_id: Option<LocalSiteId>,
     include_deleted: bool,
   ) -> impl Future<Output = LemmyResult<Option<Self>>> + Send;
 
-  fn generate_local_actor_url(name: &str, settings: &Settings) -> LemmyResult<DbUrl>;
+  fn generate_local_actor_url(name: &str, protocol_and_hostname: &str) -> LemmyResult<DbUrl>;
   fn actor_url(&self, settings: &Settings) -> LemmyResult<Url>;
 }
 

@@ -9,6 +9,7 @@ use lemmy_api_utils::{
   plugins::{plugin_hook_after, plugin_hook_before},
   request::generate_post_link_metadata,
   send_activity::SendActivityData,
+  tenant::TenantContext,
   utils::{
     check_community_user_action,
     check_nsfw_allowed,
@@ -27,7 +28,6 @@ use lemmy_db_views_post::{
   PostView,
   api::{EditPost, PostResponse},
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{
   traits::Crud,
   utils::{diesel_string_update, diesel_url_update},
@@ -51,8 +51,9 @@ pub async fn edit_post(
   Json(data): Json<EditPost>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PostResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
   let local_instance_id = local_user_view.person.instance_id;
   let url = diesel_url_update(data.url.as_deref())?;
 

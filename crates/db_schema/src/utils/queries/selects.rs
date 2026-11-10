@@ -245,6 +245,7 @@ pub fn comment_select_remove_deletes() -> _ {
     comment::federation_pending,
     comment::locked,
     comment::community_id,
+    comment::origin_local_site_id,
   )
 }
 
@@ -303,6 +304,7 @@ pub fn post_select_remove_deletes() -> _ {
     post::federation_pending,
     post::embed_video_width,
     post::embed_video_height,
+    post::origin_local_site_id,
   )
 }
 

@@ -19,7 +19,7 @@ impl Crud for Site {
   type UpdateForm = SiteUpdateForm;
   type IdType = SiteId;
 
-  /// Use SiteView::read_local, or Site::read_from_apub_id instead
+  /// Use `SiteView::read_by_id`, `SiteView::read_by_hostname`, or `Site::read_from_apub_id`.
   async fn read(_pool: &mut DbPool<'_>, _site_id: SiteId) -> LemmyResult<Self> {
     Err(LemmyErrorType::NotFound.into())
   }

@@ -1,10 +1,11 @@
-use super::not_zero;
+use super::{not_zero, read::invalidate_site_response};
 use crate::site::{application_question_check, site_default_post_listing_type_check};
 use activitypub_federation::{config::Data, http_signatures::generate_actor_keypair};
 use actix_web::web::Json;
 use chrono::Utc;
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{
     generate_inbox_url,
     get_url_blocklist,
@@ -48,16 +49,17 @@ pub async fn create_site(
   Json(data): Json<CreateSite>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SiteResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   // Make sure user is an admin; other types of users should not create site data...
   is_admin(&local_user_view)?;
 
   validate_create_payload(&local_site, &data)?;
 
-  let ap_id: DbUrl = Url::parse(&context.settings().get_protocol_and_hostname())?.into();
-  let inbox_url = Some(generate_inbox_url()?);
+  let ap_id: DbUrl = Url::parse(&context.protocol_and_hostname())?.into();
+  let inbox_url = Some(generate_inbox_url(&context.protocol_and_hostname())?);
   let keypair = generate_actor_keypair()?;
 
   let slur_regex = slur_regex(&context).await?;
@@ -118,6 +120,8 @@ pub async fn create_site(
     default_comment_downvotes: data.default_comment_downvotes,
     nsfw_content_disallowed: data.nsfw_content_disallowed,
     email_notifications_disabled: data.email_notifications_disabled,
+    smtp_connection: diesel_string_update(data.smtp_connection.as_deref()),
+    smtp_from_address: diesel_string_update(data.smtp_from_address.as_deref()),
     suggested_multi_community_id,
     federation_signed_fetch: data.federation_signed_fetch,
     oauth_registration: data.oauth_registration,
@@ -158,11 +162,15 @@ pub async fn create_site(
 
   LocalSiteRateLimit::update(&mut context.pool(), &local_site_rate_limit_form).await?;
 
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = SiteView::read_by_hostname(&mut context.pool(), &tenant.hostname).await?;
 
   let rate_limit_config =
     local_site_rate_limit_to_rate_limit_config(&site_view.local_site_rate_limit);
-  context.rate_limit_cell().set_config(rate_limit_config);
+  context
+    .rate_limit_cell()
+    .set_config_for_site(site_view.local_site.id, rate_limit_config);
+  TenantContext::invalidate_all();
+  invalidate_site_response(site_view.local_site.id).await;
 
   Ok(Json(SiteResponse { site_view }))
 }

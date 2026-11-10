@@ -1,15 +1,18 @@
 use super::utils::{adapt_request, delete_old_image, make_send};
 use UploadType::*;
 use actix_web::{self, HttpRequest, web::*};
+use futures::StreamExt;
 use lemmy_api_utils::{
   context::LemmyContext,
-  request::PictrsResponse,
+  request::{PictrsResponse, delete_image_alias},
+  tenant::TenantContext,
   utils::{is_admin, is_mod_or_admin},
 };
 use lemmy_db_schema::source::{
   community::{Community, CommunityUpdateForm},
-  images::{LocalImage, LocalImageForm},
+  images::ImageDetails,
   local_site::LocalSite,
+  media::{MediaObject, MediaObjectInsertForm, MediaReference, MediaReferenceInsertForm},
   person::{Person, PersonUpdateForm},
   site::{Site, SiteUpdateForm},
 };
@@ -20,12 +23,28 @@ use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 use reqwest::Body;
-use std::time::Duration;
+use sha2::{Digest, Sha256};
+use std::{
+  sync::{Arc, Mutex},
+  time::Duration,
+};
+use url::Url;
 
+#[derive(Clone, Copy)]
 pub enum UploadType {
   Avatar,
   Banner,
   Other,
+}
+
+impl UploadType {
+  fn purpose(&self) -> &'static str {
+    match self {
+      Avatar => "avatar",
+      Banner => "banner",
+      Other => "other",
+    }
+  }
 }
 
 pub async fn upload_image(
@@ -33,8 +52,9 @@ pub async fn upload_image(
   body: Payload,
   local_user_view: LocalUserView,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<UploadImageResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   if local_site.image_upload_disabled {
     return Err(LemmyErrorType::ImageUploadDisabled.into());
@@ -50,8 +70,9 @@ pub async fn upload_user_avatar(
   body: Payload,
   local_user_view: LocalUserView,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<UploadImageResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let image = do_upload_image(req, body, Avatar, &local_user_view, &local_site, &context).await?;
   delete_old_image(&local_user_view.person.avatar, &context).await?;
@@ -70,8 +91,9 @@ pub async fn upload_user_banner(
   body: Payload,
   local_user_view: LocalUserView,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<UploadImageResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let image = do_upload_image(req, body, Banner, &local_user_view, &local_site, &context).await?;
   delete_old_image(&local_user_view.person.banner, &context).await?;
@@ -91,8 +113,9 @@ pub async fn upload_community_icon(
   body: Payload,
   local_user_view: LocalUserView,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<UploadImageResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let community: Community = Community::read(&mut context.pool(), query.id).await?;
   is_mod_or_admin(&mut context.pool(), &local_user_view, community.id).await?;
@@ -115,8 +138,9 @@ pub async fn upload_community_banner(
   body: Payload,
   local_user_view: LocalUserView,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<UploadImageResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let community: Community = Community::read(&mut context.pool(), query.id).await?;
   is_mod_or_admin(&mut context.pool(), &local_user_view, community.id).await?;
@@ -138,12 +162,13 @@ pub async fn upload_site_icon(
   body: Payload,
   local_user_view: LocalUserView,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<UploadImageResponse>> {
   is_admin(&local_user_view)?;
 
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
 
   let image = do_upload_image(req, body, Avatar, &local_user_view, &local_site, &context).await?;
   delete_old_image(&site.icon, &context).await?;
@@ -162,12 +187,13 @@ pub async fn upload_site_banner(
   body: Payload,
   local_user_view: LocalUserView,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<UploadImageResponse>> {
   is_admin(&local_user_view)?;
 
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
 
   let image = do_upload_image(req, body, Banner, &local_user_view, &local_site, &context).await?;
   delete_old_image(&site.banner, &context).await?;
@@ -226,6 +252,29 @@ async fn do_upload_image(
   if let Some(addr) = req.head().peer_addr {
     client_req = client_req.header("X-Forwarded-For", addr.to_string())
   };
+
+  let hash_prefix = match upload_type {
+    Avatar => format!("avatar:{}", local_site.image_max_avatar_size),
+    Banner => format!("banner:{}", local_site.image_max_banner_size),
+    Other => format!(
+      "other:{}:{}",
+      local_site.image_max_upload_size, local_site.image_allow_video_uploads
+    ),
+  };
+  let mut hasher = Sha256::new();
+  hasher.update(hash_prefix.as_bytes());
+  let hash_state = Arc::new(Mutex::new((hasher, 0_u64)));
+  let hash_state_for_stream = Arc::clone(&hash_state);
+  let body = body.map(move |chunk| {
+    if let Ok(bytes) = &chunk {
+      if let Ok(mut state) = hash_state_for_stream.lock() {
+        state.0.update(bytes.as_ref());
+        state.1 += bytes.len() as u64;
+      }
+    }
+    chunk
+  });
+
   // Make HTTP request to pict-rs with the user provided image data.
   let res = client_req
     .timeout(Duration::from_secs(
@@ -240,32 +289,74 @@ async fn do_upload_image(
       "HTTP request to pict-rs failed".to_string(),
     ))?;
 
-  let mut images = res.json::<PictrsResponse>().await?;
-  for image in &images.files {
+  let (content_hash, size_bytes) = {
+    let state = hash_state
+      .lock()
+      .map_err(|_| LemmyErrorType::CouldntCreate)?;
+    let digest = state.0.clone().finalize();
+    let hash = digest
+      .iter()
+      .map(|byte| format!("{byte:02x}"))
+      .collect::<String>();
+    (hash, state.1 as i64)
+  };
+
+  let images = res.json::<PictrsResponse>().await?;
+  let pictrs_msg = images.msg.clone();
+  let protocol_and_hostname = context.protocol_and_hostname();
+  let mut uploaded = None;
+  let multiple_files = images.files.len() > 1;
+  for (index, image) in images.files.iter().enumerate() {
     // Pictrs allows uploading multiple images in a single request. Lemmy doesnt need this,
     // but still a user may upload multiple and so we need to store all links in db for
     // to allow deletion via web ui.
-    let form = LocalImageForm {
-      pictrs_alias: image.file.clone(),
-      person_id: local_user_view.person.id,
-      thumbnail_for_post_id: None,
+    let media_form = MediaObjectInsertForm {
+      content_hash: if multiple_files {
+        format!("{content_hash}:{index}")
+      } else {
+        content_hash.clone()
+      },
+      canonical_pictrs_alias: image.file.clone(),
+      size_bytes,
+      width: image.details.width.into(),
+      height: image.details.height.into(),
+      content_type: image.details.content_type.clone(),
+      blurhash: image.details.blurhash.clone(),
     };
+    let (media, created) = MediaObject::create_or_read(&mut context.pool(), &media_form).await?;
+    if !created && media.canonical_pictrs_alias != image.file {
+      // The uploaded bytes already exist. Drop the duplicate pict-rs alias and keep using the
+      // canonical one.
+      delete_image_alias(&image.file, context).await.ok();
+    }
 
-    let protocol_and_hostname = context.settings().get_protocol_and_hostname();
-    let thumbnail_url = image.image_url(&protocol_and_hostname)?;
+    let alias = media.canonical_pictrs_alias.clone();
+    let thumbnail_url = Url::parse(&format!("{protocol_and_hostname}/api/v4/image/{alias}"))?;
 
-    // Also store the details for the image
-    let details_form = image.details.build_image_details_form(&thumbnail_url);
-    LocalImage::create(&mut context.pool(), &form, &details_form).await?;
+    MediaReference::ensure(
+      &mut context.pool(),
+      &MediaReferenceInsertForm {
+        local_site_id: local_site.id,
+        media_id: media.id,
+        owner_person_id: Some(local_user_view.person.id),
+        post_id: None,
+        purpose: upload_type.purpose().to_string(),
+      },
+    )
+    .await?;
+
+    if created {
+      let details_form = image
+        .details
+        .build_image_details_form(&thumbnail_url, Some(media.content_hash.clone()));
+      ImageDetails::create(&mut context.pool(), &details_form).await?;
+    }
+    uploaded = Some((media.canonical_pictrs_alias, thumbnail_url));
   }
-  let image = images
-    .files
-    .pop()
-    .ok_or(LemmyErrorType::PictrsInvalidImageUpload(images.msg))?;
-
-  let url = image.image_url(&context.settings().get_protocol_and_hostname())?;
+  let (filename, image_url) =
+    uploaded.ok_or(LemmyErrorType::PictrsInvalidImageUpload(pictrs_msg))?;
   Ok(UploadImageResponse {
-    image_url: url,
-    filename: image.file,
+    image_url,
+    filename,
   })
 }

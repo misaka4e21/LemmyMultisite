@@ -1,5 +1,5 @@
 use super::link_rule::Link;
-use crate::{settings::SETTINGS, utils::markdown::link_rule};
+use crate::utils::markdown::link_rule;
 use markdown_it::{
   MarkdownIt,
   NodeValue,
@@ -17,7 +17,11 @@ use url::Url;
 use urlencoding::encode;
 
 /// Rewrites all links to remote domains in markdown, so they go through `/api/v4/image_proxy`.
-pub fn markdown_rewrite_image_links(mut src: String) -> (String, Vec<Url>) {
+pub fn markdown_rewrite_image_links(
+  mut src: String,
+  local_hostname: &str,
+  protocol_and_hostname: &str,
+) -> (String, Vec<Url>) {
   let links_offsets = find_urls::<Image>(&src);
 
   let mut links = vec![];
@@ -28,10 +32,10 @@ pub fn markdown_rewrite_image_links(mut src: String) -> (String, Vec<Url>) {
       Ok(parsed) => {
         links.push(parsed.clone());
         // If link points to remote domain, replace with proxied link
-        if parsed.domain() != Some(&SETTINGS.hostname) {
+        if parsed.domain() != Some(local_hostname) {
           let mut proxied = format!(
             "{}/api/v4/image/proxy?url={}",
-            SETTINGS.get_protocol_and_hostname(),
+            protocol_and_hostname,
             encode(url),
           );
           // restore custom emoji format
@@ -222,7 +226,8 @@ mod tests {
     ];
 
     tests.iter().for_each(|&(msg, input, expected)| {
-      let result = markdown_rewrite_image_links(input.to_string());
+      let result =
+        markdown_rewrite_image_links(input.to_string(), "lemmy-alpha", "https://lemmy-alpha");
 
       assert_eq!(
         result.0, expected,

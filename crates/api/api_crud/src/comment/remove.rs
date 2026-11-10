@@ -8,6 +8,7 @@ use lemmy_api_utils::{
   utils::check_community_mod_action,
 };
 use lemmy_db_schema::{
+  impls::presence::set_comment_site_removed,
   source::{
     comment::{Comment, CommentUpdateForm},
     comment_report::CommentReport,
@@ -31,6 +32,7 @@ pub async fn remove_comment(
 ) -> LemmyResult<Json<CommentResponse>> {
   let comment_id = data.comment_id;
   let local_instance_id = local_user_view.person.instance_id;
+  let active_site_id = local_user_view.local_user.local_site_id;
   let orig_comment = CommentView::read(
     &mut context.pool(),
     comment_id,
@@ -60,11 +62,13 @@ pub async fn remove_comment(
   if orig_comment.comment.deleted {
     return Err(LemmyErrorType::CouldntUpdate.into());
   }
+  let is_origin = orig_comment.comment.origin_local_site_id == Some(active_site_id);
 
   let (updated_comment, forms) = if let Some(remove_children) = data.remove_children {
-    let updated_comments: Vec<Comment> = Comment::update_removed_for_comment_and_children(
+    let updated_comments: Vec<Comment> = Comment::update_removed_for_comment_and_children_split(
       &mut context.pool(),
       &orig_comment.comment.path,
+      active_site_id,
       remove_children,
     )
     .await?;
@@ -102,15 +106,20 @@ pub async fn remove_comment(
   } else {
     // Do the remove
     let removed = data.removed;
-    let updated_comment = Comment::update(
-      &mut context.pool(),
-      comment_id,
-      &CommentUpdateForm {
-        removed: Some(removed),
-        ..Default::default()
-      },
-    )
-    .await?;
+    let updated_comment = if is_origin {
+      Comment::update(
+        &mut context.pool(),
+        comment_id,
+        &CommentUpdateForm {
+          removed: Some(removed),
+          ..Default::default()
+        },
+      )
+      .await?
+    } else {
+      set_comment_site_removed(&mut context.pool(), active_site_id, comment_id, removed).await?;
+      orig_comment.comment.clone()
+    };
 
     CommentReport::resolve_all_for_object(
       &mut context.pool(),
@@ -137,16 +146,18 @@ pub async fn remove_comment(
 
   let updated_comment_id = updated_comment.id;
 
-  ActivityChannel::submit_activity(
-    SendActivityData::RemoveComment {
-      comment: updated_comment,
-      moderator: local_user_view.person.clone(),
-      community: orig_comment.community,
-      reason: data.reason.clone(),
-      with_replies: data.remove_children.unwrap_or_default(),
-    },
-    &context,
-  )?;
+  if is_origin {
+    ActivityChannel::submit_activity(
+      SendActivityData::RemoveComment {
+        comment: updated_comment,
+        moderator: local_user_view.person.clone(),
+        community: orig_comment.community,
+        reason: data.reason.clone(),
+        with_replies: data.remove_children.unwrap_or_default(),
+      },
+      &context,
+    )?;
+  }
 
   Ok(Json(
     build_comment_response(

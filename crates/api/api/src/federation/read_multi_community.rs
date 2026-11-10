@@ -1,7 +1,11 @@
 use crate::federation::fetcher::resolve_multi_community_identifier;
 use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_db_views_community::{
   MultiCommunityView,
   api::{GetMultiCommunity, GetMultiCommunityResponse},
@@ -15,10 +19,11 @@ pub async fn read_multi_community(
   Query(data): Query<GetMultiCommunity>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetMultiCommunityResponse>> {
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
 
   check_private_instance(&local_user_view, &local_site)?;
 
@@ -28,7 +33,7 @@ pub async fn read_multi_community(
     .ok_or(LemmyErrorType::NoIdGiven)?;
 
   let multi_community_view =
-    MultiCommunityView::read(&mut context.pool(), id, my_person_id).await?;
+    MultiCommunityView::read(&mut context.pool(), id, my_person_id, local_site.id).await?;
 
   let communities = CommunityQuery {
     multi_community_id: Some(id),

@@ -55,7 +55,7 @@ pub async fn get_my_user(
       no_limit: Some(true),
       ..Default::default()
     }
-    .list(pool),
+    .list(pool, local_user.local_site_id),
     |pool| LocalUserKeywordBlock::read(pool, local_user_id),
     |pool| LocalUserLanguage::read(pool, local_user_id)
   ))?;

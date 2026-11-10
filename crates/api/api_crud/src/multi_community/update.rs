@@ -4,6 +4,7 @@ use actix_web::web::Json;
 use chrono::Utc;
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{
     check_local_user_banned_or_deleted,
     get_url_blocklist,
@@ -17,7 +18,6 @@ use lemmy_db_views_community::{
   api::{EditMultiCommunity, MultiCommunityResponse},
 };
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{traits::Crud, utils::diesel_string_update};
 use lemmy_utils::{
   error::LemmyResult,
@@ -31,6 +31,7 @@ pub async fn edit_multi_community(
   Json(data): Json<EditMultiCommunity>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<MultiCommunityResponse>> {
   let multi_community_id = data.id;
   let my_person_id = local_user_view.person.id;
@@ -38,7 +39,7 @@ pub async fn edit_multi_community(
 
   let slur_regex = slur_regex(&context).await?;
   let url_blocklist = get_url_blocklist(&context).await?;
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let orig_multi = MultiCommunity::read(&mut context.pool(), data.id).await?;
   check_multi_community_creator(&orig_multi, &local_user_view)?;
@@ -83,8 +84,13 @@ pub async fn edit_multi_community(
 
   send_federation_update(multi, local_user_view.person, &context)?;
 
-  let multi_community_view =
-    MultiCommunityView::read(&mut context.pool(), multi_community_id, Some(my_person_id)).await?;
+  let multi_community_view = MultiCommunityView::read(
+    &mut context.pool(),
+    multi_community_id,
+    Some(my_person_id),
+    local_site.id,
+  )
+  .await?;
 
   Ok(Json(MultiCommunityResponse {
     multi_community_view,

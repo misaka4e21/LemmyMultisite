@@ -2,9 +2,11 @@ use crate::PersonView;
 use diesel::{
   BoolExpressionMethods,
   ExpressionMethods,
+  JoinOnDsl,
   PgTextExpressionMethods,
   QueryDsl,
   SelectableHelper,
+  dsl::exists,
 };
 use diesel_async::RunQueryDsl;
 use i_love_jesus::asc_if;
@@ -29,7 +31,7 @@ use lemmy_db_schema_file::{
     person_community_actions_join,
   },
   newtypes::CommunityId,
-  schema::{community_actions, local_user, person},
+  schema::{community_actions, local_site, local_user, person, person_site, site},
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
@@ -89,6 +91,13 @@ impl PersonView {
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     let mut query = Self::joins(my_person_id, local_instance_id, None)
+      .filter(exists(
+        person_site::table
+          .inner_join(local_site::table.on(local_site::id.eq(person_site::local_site_id)))
+          .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+          .filter(person_site::person_id.eq(person::id))
+          .filter(site::instance_id.eq(local_instance_id)),
+      ))
       .filter(person::id.eq(person_id))
       .select(Self::as_select())
       .into_boxed();
@@ -111,6 +120,13 @@ impl PersonView {
     let conn = &mut get_conn(pool).await?;
 
     Self::joins(my_person_id, local_instance_id, None)
+      .filter(exists(
+        person_site::table
+          .inner_join(local_site::table.on(local_site::id.eq(person_site::local_site_id)))
+          .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+          .filter(person_site::person_id.eq(person::id))
+          .filter(site::instance_id.eq(local_instance_id)),
+      ))
       .filter(person::deleted.eq(false))
       .filter(local_user::admin)
       // Order by admin created date (ie old)
@@ -150,6 +166,13 @@ impl PersonQuery<'_> {
       site.instance_id,
       self.community_id,
     )
+    .filter(exists(
+      person_site::table
+        .inner_join(local_site::table.on(local_site::id.eq(person_site::local_site_id)))
+        .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+        .filter(person_site::person_id.eq(person::id))
+        .filter(site::instance_id.eq(site.instance_id)),
+    ))
     .select(PersonView::as_select())
     .limit(limit)
     .filter(person::deleted.eq(false))
@@ -214,6 +237,7 @@ mod tests {
   use super::*;
   use lemmy_db_schema::{
     assert_length,
+    impls::presence::ensure_person_site,
     source::{
       community::{
         Community,
@@ -223,6 +247,7 @@ mod tests {
         CommunityPersonBanForm,
       },
       instance::Instance,
+      local_site::{LocalSite, LocalSiteInsertForm},
       local_user::{LocalUser, LocalUserInsertForm, LocalUserUpdateForm},
       person::{Person, PersonActions, PersonInsertForm, PersonNoteForm, PersonUpdateForm},
       post::{Post, PostActions, PostInsertForm, PostLikeForm},
@@ -251,6 +276,11 @@ mod tests {
     let instance = Instance::read_or_create(pool, "my_domain.tld").await?;
     let site_form = SiteUpsertForm::new("test_site".to_string(), instance.id);
     let site = Site::create(pool, &site_form).await?;
+    let system_acct =
+      Person::create(pool, &PersonInsertForm::test_form(instance.id, "langs")).await?;
+    let local_site_form =
+      LocalSiteInsertForm::new(site.id, system_acct.id, instance.domain.clone());
+    let local_site = LocalSite::create(pool, &local_site_form).await?;
 
     let alice_form = PersonInsertForm {
       local: Some(true),
@@ -266,6 +296,7 @@ mod tests {
       ..PersonInsertForm::test_form(instance.id, "bob")
     };
     let bob = Person::create(pool, &bob_form).await?;
+    ensure_person_site(pool, local_site.id, bob.id).await?;
 
     // Create a post like to give bob a higher post score for sorting tests
     let community_form = CommunityInsertForm {

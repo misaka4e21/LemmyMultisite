@@ -6,6 +6,7 @@ use bcrypt::verify;
 use lemmy_api_utils::{
   claims::Claims,
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{
     check_email_verified,
     check_local_user_deleted,
@@ -14,10 +15,7 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::{
-  SiteView,
-  api::{Login, LoginResponse},
-};
+use lemmy_db_views_site::api::{Login, LoginResponse};
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 use tokio::task::spawn_blocking;
 
@@ -25,27 +23,33 @@ pub async fn login(
   Json(data): Json<Login>,
   req: HttpRequest,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<LoginResponse>> {
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = tenant.site_view.clone();
   let password = data.password.clone();
 
   // Fetch that username / email
   let username_or_email = data.username_or_email.clone();
-  let local_user_view =
-    match LocalUserView::find_by_email_or_name(&mut context.pool(), &username_or_email).await {
-      Ok(o) => o,
-      Err(e) => {
-        spawn_blocking(move || {
-          // Dummy bcrypt verify for constant timing
-          let _ = verify(
-            &data.password,
-            "$2b$12$dt1Xr.ZGO8W1YtWoJRtpauM1.bkBt2C1Tck3XgZTSoBQRdGuYCTTy",
-          );
-        })
-        .await?;
-        return Err(e);
-      }
-    };
+  let local_user_view = match LocalUserView::find_by_email_or_name(
+    &mut context.pool(),
+    tenant.local_site().id,
+    &username_or_email,
+  )
+  .await
+  {
+    Ok(o) => o,
+    Err(e) => {
+      spawn_blocking(move || {
+        // Dummy bcrypt verify for constant timing
+        let _ = verify(
+          &data.password,
+          "$2b$12$dt1Xr.ZGO8W1YtWoJRtpauM1.bkBt2C1Tck3XgZTSoBQRdGuYCTTy",
+        );
+      })
+      .await?;
+      return Err(e);
+    }
+  };
 
   let Some(password_encrypted) = local_user_view.local_user.password_encrypted.clone() else {
     // user registered via oauth and has no password (but dont reveal this to potential attacker)
@@ -67,11 +71,7 @@ pub async fn login(
 
   // Check the totp if enabled
   if local_user_view.local_user.totp_2fa_enabled {
-    check_totp_2fa_valid(
-      &local_user_view,
-      &data.totp_2fa_token,
-      &context.settings().hostname,
-    )?;
+    check_totp_2fa_valid(&local_user_view, &data.totp_2fa_token, context.hostname())?;
   }
 
   let jwt = Claims::generate(

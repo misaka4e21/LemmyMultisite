@@ -8,8 +8,12 @@ use activitypub_federation::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use lemmy_api_utils::context::LemmyContext;
-use lemmy_db_schema::source::activity::SentActivity;
+use lemmy_db_schema::source::{
+  activity::SentActivity,
+  internal_activity_delivery::{InternalActivityDelivery, InternalActivityDeliveryForm},
+};
 use lemmy_db_schema_file::newtypes::ActivityId;
+use lemmy_db_views_site::SiteView;
 use lemmy_utils::{
   FEDERATION_CONTEXT,
   error::{LemmyError, LemmyResult},
@@ -111,6 +115,28 @@ impl SendRetryTask<'_> {
     debug_assert!(!inbox_urls.is_empty());
 
     let pool = &mut context.pool();
+    if let Some(host) = inbox_urls.first().and_then(|url| url.host_str())
+      && let Ok(destination) = SiteView::read_by_hostname(pool, host).await
+      && let Ok(origin) = context.site_view()
+    {
+      InternalActivityDelivery::create(
+        pool,
+        &InternalActivityDeliveryForm {
+          origin_site_id: origin.local_site.id,
+          destination_site_id: destination.local_site.id,
+          activity_id: activity.id,
+        },
+      )
+      .await
+      .map_err(|e| anyhow::anyhow!("failed creating internal delivery: {e}"))?;
+      report.send(SendActivityResult::Success(SendSuccessInfo {
+        activity_id: activity.id,
+        published_at: Some(activity.published_at),
+        was_skipped: false,
+      }))?;
+      return Ok(());
+    }
+
     let Some(actor_apub_id) = &activity.actor_apub_id else {
       return Err(anyhow::anyhow!("activity is from before lemmy 0.19"));
     };

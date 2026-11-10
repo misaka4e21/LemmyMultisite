@@ -1,4 +1,5 @@
 use crate::rate_limit::ActionType;
+use lemmy_db_schema_file::newtypes::LocalSiteId;
 use std::{
   future::Ready,
   net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -6,7 +7,11 @@ use std::{
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct LemmyInput(pub(crate) RateLimitIpAddr, pub(crate) ActionType);
+pub struct LemmyInput(
+  pub(crate) RateLimitIpAddr,
+  pub(crate) LocalSiteId,
+  pub(crate) ActionType,
+);
 
 pub(crate) type LemmyInputFuture = Ready<Result<LemmyInput, actix_web::Error>>;
 

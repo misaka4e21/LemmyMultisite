@@ -342,6 +342,21 @@ mod tests {
 
   const INITIAL_MIGRATIONS_COUNT: u64 = 40;
 
+  // Migrations after the initial set until the table needed to seed the site registry exists.
+  // The last migration in this range predates `local_site` but already added `site.actor_id`.
+  const MIGRATIONS_UNTIL_SITE_ACTOR: u64 = 86;
+
+  // Migrations from after `local_site` creation until the migration that starts site-scoped
+  // federation. The scoped tables must contain test rows before that migration runs.
+  const MIGRATIONS_UNTIL_SITE_SCOPED_FEDERATION: u64 = 222;
+
+  const TEST_SITE_NAME: &str = "test_site";
+  const TEST_SITE_ACTOR_ID: &str = "https://test.example/site";
+  const TEST_SITE_INBOX_URL: &str = "https://test.example/site/inbox";
+  const TEST_SITE_HOSTNAME: &str = "test.example";
+  const REMOTE_INSTANCE_DOMAIN: &str = "remote.example";
+  const LEGACY_PICTRS_ALIAS: &str = "legacy_upload_alias";
+
   // Test data IDs
   const TEST_USER_ID_1: i32 = 101;
   const USER1_NAME: &str = "test_user_1";
@@ -385,7 +400,9 @@ mod tests {
   #[serial]
   fn test_schema_setup() -> LemmyResult<()> {
     let o = Options::default();
-    let db_url = SETTINGS.get_database_url();
+    // Migrations use session variables such as `lemmy.protocol_and_hostname`, so connect with the
+    // same options that `lemmy_server` injects.
+    let db_url = SETTINGS.get_database_url_with_options()?;
     let conn = &mut PgConnection::establish(&db_url)?;
 
     // Start with consistent state by dropping everything
@@ -400,6 +417,32 @@ mod tests {
     // Insert the test data
     insert_test_data(conn)?;
 
+    // The site registry predates `local_site`. Insert the site once the actor columns exist; the
+    // migration that creates `local_site` copies the site row into it. Inserting the site any
+    // earlier would make the per-migration down scripts drop the seeded row again.
+    assert_eq!(
+      run(o.run().limit(MIGRATIONS_UNTIL_SITE_ACTOR), &db_url)?,
+      ReplaceableSchemaNotRebuilt
+    );
+    conn.batch_execute(&format!(
+      "INSERT INTO site (name, actor_id, inbox_url) VALUES ('{}', '{}', '{}')",
+      TEST_SITE_NAME, TEST_SITE_ACTOR_ID, TEST_SITE_INBOX_URL
+    ))?;
+    assert_eq!(
+      run(o.run().limit(1).enable_diff_check(), &db_url)?,
+      ReplaceableSchemaNotRebuilt
+    );
+    assert_eq!(
+      run(
+        o.run()
+          .limit(MIGRATIONS_UNTIL_SITE_SCOPED_FEDERATION)
+          .enable_diff_check(),
+        &db_url
+      )?,
+      ReplaceableSchemaNotRebuilt
+    );
+    insert_site_scoped_test_data(conn)?;
+
     // Run all migrations, and make sure that changes can be correctly reverted
     assert_eq!(
       run(o.run().enable_diff_check(), &db_url)?,
@@ -408,6 +451,7 @@ mod tests {
 
     // Check the test data we inserted before after running migrations
     check_test_data(conn)?;
+    check_multisite_backfill(conn)?;
 
     // Check the current schema
     assert_eq!(
@@ -536,11 +580,140 @@ mod tests {
     Ok(())
   }
 
+  /// Rows that exist before the site-scoped federation migration, so the test can check that the
+  /// migration backfills their tenant columns instead of only accepting empty tables.
+  fn insert_site_scoped_test_data(conn: &mut PgConnection) -> LemmyResult<()> {
+    conn.batch_execute(&format!(
+      "INSERT INTO instance (domain) VALUES ('{REMOTE_INSTANCE_DOMAIN}') ON CONFLICT (domain) DO NOTHING;
+       INSERT INTO federation_queue_state (instance_id, fail_count)
+       SELECT id, 0 FROM instance WHERE domain = '{REMOTE_INSTANCE_DOMAIN}';
+       INSERT INTO federation_allowlist (instance_id)
+       SELECT id FROM instance WHERE domain = '{REMOTE_INSTANCE_DOMAIN}';
+       INSERT INTO sent_activity (ap_id, data, sensitive, send_inboxes, send_all_instances, actor_type)
+       VALUES ('https://{TEST_SITE_HOSTNAME}/activities/1', '{{}}'::json, false, '{{}}', false, 'site');
+       INSERT INTO received_activity (ap_id)
+       VALUES ('https://{REMOTE_INSTANCE_DOMAIN}/activities/1');
+       INSERT INTO local_image (pictrs_alias, person_id, thumbnail_for_post_id)
+       VALUES ('{LEGACY_PICTRS_ALIAS}', {TEST_USER_ID_1}, {TEST_POST_ID_1});"
+    ))?;
+    Ok(())
+  }
+
+  fn check_multisite_backfill(conn: &mut PgConnection) -> LemmyResult<()> {
+    use lemmy_db_schema_file::schema::{
+      comment,
+      comment_site,
+      community,
+      community_site,
+      federation_allowlist,
+      federation_queue_state,
+      local_site,
+      local_user,
+      media_object,
+      media_reference,
+      person,
+      person_site,
+      post,
+      post_site,
+      received_activity,
+      sent_activity,
+    };
+
+    let (site_id, hostname): (i32, String) = local_site::table
+      .select((local_site::id, local_site::hostname))
+      .first(conn)?;
+    assert_eq!(hostname, TEST_SITE_HOSTNAME);
+
+    let person_origins: Vec<(i32, Option<i32>)> = person::table
+      .select((person::id, person::origin_local_site_id))
+      .order_by(person::id)
+      .load(conn)?;
+    assert!(person_origins.len() >= 2);
+    assert!(
+      person_origins
+        .iter()
+        .all(|(_, origin)| *origin == Some(site_id))
+    );
+
+    let community_origins: Vec<Option<i32>> = community::table
+      .select(community::origin_local_site_id)
+      .load(conn)?;
+    assert_eq!(community_origins, vec![Some(site_id)]);
+
+    let post_origins: Vec<Option<i32>> =
+      post::table.select(post::origin_local_site_id).load(conn)?;
+    assert_eq!(post_origins, vec![Some(site_id)]);
+
+    let comment_origins: Vec<Option<i32>> = comment::table
+      .select(comment::origin_local_site_id)
+      .load(conn)?;
+    assert_eq!(comment_origins, vec![Some(site_id), Some(site_id)]);
+
+    let local_user_sites: Vec<i32> = local_user::table
+      .select(local_user::local_site_id)
+      .order_by(local_user::local_site_id)
+      .load(conn)?;
+    assert_eq!(local_user_sites, vec![site_id, site_id]);
+
+    let person_count: i64 = person::table.count().get_result(conn)?;
+    let community_count: i64 = community::table.count().get_result(conn)?;
+    let post_count: i64 = post::table.count().get_result(conn)?;
+    let comment_count: i64 = comment::table.count().get_result(conn)?;
+    let person_presence: i64 = person_site::table.count().get_result(conn)?;
+    let community_presence: i64 = community_site::table.count().get_result(conn)?;
+    let post_presence: i64 = post_site::table.count().get_result(conn)?;
+    let comment_presence: i64 = comment_site::table.count().get_result(conn)?;
+    assert_eq!(person_presence, person_count);
+    assert_eq!(community_presence, community_count);
+    assert_eq!(post_presence, post_count);
+    assert_eq!(comment_presence, comment_count);
+
+    let sent_sites: Vec<i32> = sent_activity::table
+      .select(sent_activity::local_site_id)
+      .load(conn)?;
+    assert_eq!(sent_sites, vec![site_id]);
+
+    let received_sites: Vec<i32> = received_activity::table
+      .select(received_activity::local_site_id)
+      .load(conn)?;
+    assert_eq!(received_sites, vec![site_id]);
+
+    let queue_sites: Vec<i32> = federation_queue_state::table
+      .select(federation_queue_state::local_site_id)
+      .load(conn)?;
+    assert_eq!(queue_sites, vec![site_id]);
+
+    let allowlist_sites: Vec<i32> = federation_allowlist::table
+      .select(federation_allowlist::local_site_id)
+      .load(conn)?;
+    assert_eq!(allowlist_sites, vec![site_id]);
+
+    let media_aliases: Vec<String> = media_object::table
+      .select(media_object::canonical_pictrs_alias)
+      .load(conn)?;
+    assert_eq!(media_aliases, vec![LEGACY_PICTRS_ALIAS.to_string()]);
+
+    let media_references: Vec<(i32, Option<i32>, Option<i32>)> = media_reference::table
+      .select((
+        media_reference::local_site_id,
+        media_reference::owner_person_id,
+        media_reference::post_id,
+      ))
+      .load(conn)?;
+    assert_eq!(
+      media_references,
+      vec![(site_id, Some(TEST_USER_ID_1), Some(TEST_POST_ID_1))]
+    );
+
+    Ok(())
+  }
+
   fn check_test_data(conn: &mut PgConnection) -> LemmyResult<()> {
     use lemmy_db_schema_file::schema::{comment, community, notification, person, post};
 
     // Check users
     let users: Vec<(i32, String, Option<String>, String, String)> = person::table
+      .filter(person::bot_account.eq(false))
       .select((
         person::id,
         person::name,

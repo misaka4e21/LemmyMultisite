@@ -9,6 +9,7 @@ use lemmy_api_utils::{
   claims::Claims,
   context::LemmyContext,
   plugins::{LemmyPlugins, plugin_hook_after, plugin_hook_before, plugin_validate_captcha},
+  tenant::TenantContext,
   utils::{
     check_email_verified,
     check_local_user_banned_or_deleted,
@@ -25,6 +26,7 @@ use lemmy_api_utils::{
 };
 use lemmy_apub_objects::objects::community::ApubCommunity;
 use lemmy_db_schema::{
+  impls::presence::ensure_person_site,
   source::{
     actor_language::SiteLanguage,
     community::{Community, CommunityActions, CommunityInsertForm, CommunityModeratorForm},
@@ -84,9 +86,10 @@ pub async fn register(
   Json(data): Json<Register>,
   req: HttpRequest,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<LoginResponse>> {
   let pool = &mut context.pool();
-  let site_view = SiteView::read_local(pool).await?;
+  let site_view = tenant.site_view.clone();
   let local_site = site_view.local_site.clone();
   let require_registration_application =
     local_site.registration_mode == RegistrationMode::RequireApplication;
@@ -136,10 +139,10 @@ pub async fn register(
   check_slurs(&data.username, &slur_regex)?;
   check_slurs_opt(&data.answer, &slur_regex)?;
 
-  Person::check_username_taken(pool, &data.username).await?;
+  Person::check_username_taken(pool, local_site.id, &data.username).await?;
 
   if let Some(email) = &data.email {
-    LocalUser::check_is_email_taken(pool, email).await?;
+    LocalUser::check_is_email_taken(pool, local_site.id, email).await?;
   }
 
   // Automatically set their application as accepted, if they created this with open registration.
@@ -177,7 +180,11 @@ pub async fn register(
         show_nsfw: Some(show_nsfw),
         accepted_application,
         invited_by_local_user_id: local_user_invite.as_ref().map(|inv| inv.local_user_id),
-        ..LocalUserInsertForm::new(person.id, Some(tx_data.password.to_string()))
+        ..LocalUserInsertForm::new(
+          person.id,
+          site_view.local_site.id,
+          Some(tx_data.password.to_string()),
+        )
       };
 
       let local_user = create_local_user(
@@ -185,6 +192,7 @@ pub async fn register(
         language_tags,
         local_user_form,
         &site_view.local_site,
+        &site_view,
         &tx_context,
       )
       .await?;
@@ -231,7 +239,8 @@ pub async fn register(
 
   // Email the admins, only if email verification is not required
   if local_site.application_email_admins && !local_site.email_verification_required {
-    send_new_applicant_email_to_admins(&data.username, pool, context.settings()).await?;
+    send_new_applicant_email_to_admins(&data.username, pool, &local_site, context.settings())
+      .await?;
   }
 
   let mut login_response = LoginResponse {
@@ -268,9 +277,10 @@ pub async fn authenticate_with_oauth(
   Json(data): Json<AuthenticateWithOauth>,
   req: HttpRequest,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<LoginResponse>> {
   let pool = &mut context.pool();
-  let site_view = SiteView::read_local(pool).await?;
+  let site_view = tenant.site_view.clone();
   let local_site = site_view.local_site.clone();
 
   // Show nsfw content if param is true, or if content_warning exists
@@ -286,10 +296,7 @@ pub async fn authenticate_with_oauth(
   }
 
   // redirect_uri must point exactly at this instance's oauth callback
-  let expected_redirect_uri = format!(
-    "{}/oauth/callback",
-    context.settings().get_protocol_and_hostname()
-  );
+  let expected_redirect_uri = format!("{}/oauth/callback", context.protocol_and_hostname());
   if data.redirect_uri.as_str() != expected_redirect_uri {
     return Err(LemmyErrorType::OauthAuthorizationInvalid.into());
   }
@@ -344,7 +351,7 @@ pub async fn authenticate_with_oauth(
 
   // Lookup user by oauth_user_id
   let mut local_user_view =
-    LocalUserView::find_by_oauth_id(pool, oauth_provider.id, &oauth_user_id)
+    LocalUserView::find_by_oauth_id(pool, local_site.id, oauth_provider.id, &oauth_user_id)
       .await
       .ok();
 
@@ -381,7 +388,9 @@ pub async fn authenticate_with_oauth(
     local_user_view = if let Some(email) = &email
       && email_verified
     {
-      LocalUserView::find_by_email(pool, email).await.ok()
+      LocalUserView::find_by_email(pool, local_site.id, email)
+        .await
+        .ok()
     } else {
       None
     };
@@ -452,7 +461,7 @@ pub async fn authenticate_with_oauth(
           check_slurs(username, &slur_regex)?;
           check_slurs_opt(&tx_data.answer, &slur_regex)?;
 
-          Person::check_username_taken(&mut conn.into(), username).await?;
+          Person::check_username_taken(&mut conn.into(), local_site.id, username).await?;
 
           // We have to create a person, a local_user, and an oauth_account
           let person = create_person(username.clone(), &site_view, &tx_context, conn).await?;
@@ -465,7 +474,7 @@ pub async fn authenticate_with_oauth(
             // Only mark the email as verified if the provider attests it and the admin
             // opted into auto verification. Otherwise send a verification email instead.
             email_verified: Some(oauth_provider.auto_verify_email && email_verified),
-            ..LocalUserInsertForm::new(person.id, None)
+            ..LocalUserInsertForm::new(person.id, site_view.local_site.id, None)
           };
 
           let local_user = create_local_user(
@@ -473,6 +482,7 @@ pub async fn authenticate_with_oauth(
             language_tags,
             local_user_form,
             &site_view.local_site,
+            &site_view,
             &tx_context,
           )
           .await?;
@@ -538,12 +548,13 @@ async fn create_person(
 ) -> Result<Person, LemmyError> {
   let actor_keypair = generate_actor_keypair()?;
   is_valid_actor_name(&username)?;
-  let ap_id = Person::generate_local_actor_url(&username, context.settings())?;
+  let ap_id = Person::generate_local_actor_url(&username, &context.protocol_and_hostname())?;
 
   // Register the new person
   let person_form = PersonInsertForm {
+    origin_local_site_id: Some(site_view.local_site.id),
     ap_id: Some(ap_id.clone()),
-    inbox_url: Some(generate_inbox_url()?),
+    inbox_url: Some(generate_inbox_url(&context.protocol_and_hostname())?),
     private_key: Some(actor_keypair.private_key),
     ..PersonInsertForm::new(
       username.clone(),
@@ -553,7 +564,9 @@ async fn create_person(
   };
 
   // insert the person
-  let inserted_person = Person::create(&mut conn.into(), &person_form).await?;
+  let pool = &mut conn.into();
+  let inserted_person = Person::create(pool, &person_form).await?;
+  ensure_person_site(pool, site_view.local_site.id, inserted_person.id).await?;
 
   Ok(inserted_person)
 }
@@ -575,6 +588,7 @@ async fn create_local_user(
   language_tags: Vec<String>,
   mut local_user_form: LocalUserInsertForm,
   local_site: &LocalSite,
+  site_view: &SiteView,
   context: &Data<LemmyContext>,
 ) -> Result<LocalUser, LemmyError> {
   let conn_ = &mut conn.into();
@@ -609,7 +623,7 @@ async fn create_local_user(
   // If we are setting up a new site, fetch initial communities and create welcome post.
   if !local_site.site_setup {
     local_user_form.admin = Some(true);
-    create_welcome_post(inserted_local_user.clone(), context);
+    create_welcome_post(inserted_local_user.clone(), site_view.clone(), context);
     fetch_community_list(context.clone());
   }
 
@@ -707,7 +721,7 @@ fn check_totp_2fa_if_enabled(
   context: &Data<LemmyContext>,
 ) -> LemmyResult<()> {
   if user_view.local_user.totp_2fa_enabled {
-    check_totp_2fa_valid(user_view, totp_token, &context.settings().hostname)?;
+    check_totp_2fa_valid(user_view, totp_token, context.hostname())?;
   }
   Ok(())
 }
@@ -787,27 +801,32 @@ fn fetch_community_list(context: Data<LemmyContext>) {
   })
 }
 
-fn create_welcome_post(local_user: LocalUser, context: &LemmyContext) {
+fn create_welcome_post(local_user: LocalUser, site: SiteView, context: &LemmyContext) {
   let context = context.clone();
 
   spawn_try_task(async move {
     let pool = &mut context.pool();
-    let site = SiteView::read_local(pool).await?;
     let admins = PersonView::list_admins(None, site.instance.id, &mut context.pool()).await?;
     let initial_user = admins.first();
 
-    let person = SiteView::read_system_account(&mut context.pool()).await?;
+    let person = SiteView::read_system_account(&mut context.pool(), &site.local_site).await?;
 
     // Create main community
     let community_name = "main".to_string();
-    let community_ap_id = Community::generate_local_actor_url(&community_name, context.settings())?;
+    let protocol_and_hostname = format!(
+      "{}://{}",
+      site.site.ap_id.scheme(),
+      site.local_site.hostname
+    );
+    let community_ap_id =
+      Community::generate_local_actor_url(&community_name, &protocol_and_hostname)?;
     let keypair = generate_actor_keypair()?;
     let community_form = CommunityInsertForm {
       ap_id: Some(community_ap_id.clone()),
       title: Some("Main".to_string()),
       private_key: Some(keypair.private_key),
       followers_url: Some(generate_followers_url(&community_ap_id)?),
-      inbox_url: Some(generate_inbox_url()?),
+      inbox_url: Some(generate_inbox_url(&context.protocol_and_hostname())?),
       moderators_url: Some(generate_moderators_url(&community_ap_id)?),
       featured_url: Some(generate_featured_url(&community_ap_id)?),
       ..CommunityInsertForm::new(site.site.instance_id, community_name, keypair.public_key)

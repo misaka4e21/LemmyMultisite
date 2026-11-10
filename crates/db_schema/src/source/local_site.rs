@@ -123,6 +123,16 @@ pub struct LocalSite {
   pub banned_users_percent: i16,
   /// How many active invite links a user can have
   pub max_invites_per_user_allowed: i32,
+  /// The site hostname used for tenant resolution and ActivityPub identifiers.
+  pub hostname: String,
+  /// Whether the site has been disabled by the installation administrator.
+  pub disabled: bool,
+  /// When the site was removed or archived.
+  pub removed_at: Option<DateTime<Utc>>,
+  /// Site-specific SMTP connection string. Falls back to the installation setting.
+  pub smtp_connection: Option<String>,
+  /// Site-specific sender address. Falls back to the installation setting.
+  pub smtp_from_address: Option<String>,
 }
 
 #[derive(Clone, derive_new::new)]
@@ -131,6 +141,11 @@ pub struct LocalSite {
 pub struct LocalSiteInsertForm {
   pub site_id: SiteId,
   pub system_account: PersonId,
+  pub hostname: String,
+  #[new(default)]
+  pub smtp_connection: Option<String>,
+  #[new(default)]
+  pub smtp_from_address: Option<String>,
   #[new(default)]
   pub site_setup: Option<bool>,
   #[new(default)]
@@ -247,4 +262,6 @@ pub struct LocalSiteUpdateForm {
   pub image_allow_video_uploads: Option<bool>,
   pub image_upload_disabled: Option<bool>,
   pub max_invites_per_user_allowed: Option<i32>,
+  pub smtp_connection: Option<Option<String>>,
+  pub smtp_from_address: Option<Option<String>>,
 }

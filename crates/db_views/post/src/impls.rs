@@ -5,12 +5,13 @@ use diesel::{
   ExpressionMethods,
   JoinOnDsl,
   NullableExpressionMethods,
+  OptionalExtension,
   PgTextExpressionMethods,
   QueryDsl,
   SelectableHelper,
   TextExpressionMethods,
   debug_query,
-  dsl::not,
+  dsl::{exists, not},
   pg::Pg,
   query_builder::AsQuery,
 };
@@ -36,7 +37,7 @@ use lemmy_db_schema::{
 use lemmy_db_schema_file::{
   InstanceId,
   PersonId,
-  enums::{CommunityVisibility, ListingType, PostSortType},
+  enums::{CommunityVisibility, ImageMode, ListingType, PostSortType},
   joins::{
     creator_community_actions_join,
     creator_community_instance_actions_join,
@@ -52,10 +53,21 @@ use lemmy_db_schema_file::{
     my_post_actions_join,
   },
   newtypes::{CommunityId, CommunityTagId, MultiCommunityId, PostId},
-  schema::{community, person, post, post_actions, post_community_tag},
+  schema::{
+    community,
+    local_site,
+    person,
+    post,
+    post_actions,
+    post_community_tag,
+    post_site,
+    post_thumbnail_source,
+    site,
+  },
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
+  dburl::DbUrl,
   pagination::{
     CursorData,
     PagedResponse,
@@ -72,6 +84,62 @@ use lemmy_utils::{
 };
 use tracing::debug;
 use url::Url;
+
+fn rewrite_image_url(url: &mut Option<DbUrl>, hostname: &str) {
+  if let Some(db_url) = url {
+    let mut parsed = db_url.inner().clone();
+    if parsed.path().starts_with("/api/v4/image/") && parsed.set_host(Some(hostname)).is_ok() {
+      *db_url = parsed.into();
+    }
+  }
+}
+
+fn site_image_url(hostname: &str, alias: &str) -> Option<DbUrl> {
+  Url::parse(&format!("https://{hostname}/api/v4/image/{alias}"))
+    .ok()
+    .map(Into::into)
+}
+
+fn site_proxy_url(hostname: &str, source: &Url) -> Option<DbUrl> {
+  let mut proxy = Url::parse(&format!("https://{hostname}/api/v4/image/proxy")).ok()?;
+  proxy.query_pairs_mut().append_pair("url", source.as_str());
+  Some(proxy.into())
+}
+
+fn rewrite_post_view_for_site(
+  view: &mut PostView,
+  hostname: &str,
+  image_mode: ImageMode,
+  pictrs_alias: Option<&str>,
+) {
+  let replacement = if let Some(alias) = pictrs_alias {
+    site_image_url(hostname, alias)
+  } else if image_mode == ImageMode::ProxyAllImages {
+    view
+      .post
+      .thumbnail_url
+      .as_ref()
+      .and_then(|url| site_proxy_url(hostname, url.inner()))
+  } else {
+    None
+  };
+  if let Some(replacement) = replacement {
+    view.post.thumbnail_url = Some(replacement.clone());
+    if let Some(details) = &mut view.image_details {
+      details.link = replacement;
+    }
+    return;
+  }
+
+  rewrite_image_url(&mut view.post.thumbnail_url, hostname);
+  if let Some(details) = &mut view.image_details {
+    let mut link = Some(details.link.clone());
+    rewrite_image_url(&mut link, hostname);
+    if let Some(link) = link {
+      details.link = link;
+    }
+  }
+}
 
 impl PaginationCursorConversion for PostView {
   type PaginatedType = Post;
@@ -183,6 +251,13 @@ impl PostView {
     let my_person_id = my_local_user.person_id();
 
     let mut query = Self::joins(my_person_id, local_instance_id)
+      .filter(exists(
+        post_site::table
+          .inner_join(local_site::table.on(local_site::id.eq(post_site::local_site_id)))
+          .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+          .filter(post_site::post_id.eq(post::id))
+          .filter(site::instance_id.eq(local_instance_id)),
+      ))
       .filter(post::id.eq(post_id))
       .select(Self::as_select())
       .into_boxed();
@@ -201,6 +276,14 @@ impl PostView {
     // Hide deleted and removed for non-admins or mods
     if !is_mod_or_admin {
       query = query
+        .filter(not(exists(
+          post_site::table
+            .inner_join(local_site::table.on(local_site::id.eq(post_site::local_site_id)))
+            .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+            .filter(post_site::post_id.eq(post::id))
+            .filter(site::instance_id.eq(local_instance_id))
+            .filter(post_site::removed.eq(true)),
+        )))
         .filter(
           community::removed
             .eq(false)
@@ -228,11 +311,37 @@ impl PostView {
         .filter(filter_private_or_followed());
     }
 
-    Commented::new(query)
+    let mut view = Commented::new(query)
       .text("PostView::read")
       .first(conn)
       .await
-      .with_lemmy_type(LemmyErrorType::NotFound)
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    let (site_removed, site_locked, site_featured) = post_site::table
+      .inner_join(local_site::table.on(local_site::id.eq(post_site::local_site_id)))
+      .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+      .filter(post_site::post_id.eq(post_id))
+      .filter(site::instance_id.eq(local_instance_id))
+      .select((post_site::removed, post_site::locked, post_site::featured))
+      .first::<(bool, bool, bool)>(conn)
+      .await?;
+    view.post.removed |= site_removed;
+    view.post.locked |= site_locked;
+    view.post.featured_local = site_featured;
+    let (hostname, image_mode): (String, ImageMode) = local_site::table
+      .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+      .filter(site::instance_id.eq(local_instance_id))
+      .select((local_site::hostname, local_site::image_mode))
+      .first(conn)
+      .await?;
+    let pictrs_alias: Option<String> = post_thumbnail_source::table
+      .filter(post_thumbnail_source::post_id.eq(post_id))
+      .select(post_thumbnail_source::pictrs_alias)
+      .first::<Option<String>>(conn)
+      .await
+      .optional()?
+      .flatten();
+    rewrite_post_view_for_site(&mut view, &hostname, image_mode, pictrs_alias.as_deref());
+    Ok(view)
   }
 
   /// List all the read posts for your person, ordered by the read date.
@@ -261,10 +370,33 @@ impl PostView {
       .then_order_by(pa_key::post_id);
 
     let conn = &mut get_conn(pool).await?;
-    let res = paginated_query
+    let (hostname, image_mode): (String, ImageMode) = local_site::table
+      .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+      .filter(site::instance_id.eq(my_person.instance_id))
+      .select((local_site::hostname, local_site::image_mode))
+      .first(conn)
+      .await?;
+    let mut res = paginated_query
       .load::<Self>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)?;
+    let post_ids: Vec<PostId> = res.iter().map(|view| view.post.id).collect();
+    let pictrs_aliases: Vec<(PostId, Option<String>)> = post_thumbnail_source::table
+      .filter(post_thumbnail_source::post_id.eq_any(post_ids))
+      .select((
+        post_thumbnail_source::post_id,
+        post_thumbnail_source::pictrs_alias,
+      ))
+      .load(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    for view in &mut res {
+      let alias = pictrs_aliases
+        .iter()
+        .find(|(post_id, _)| *post_id == view.post.id)
+        .and_then(|(_, alias)| alias.as_deref());
+      rewrite_post_view_for_site(view, &hostname, image_mode, alias);
+    }
     paginate_response(res, limit, page_cursor)
   }
 
@@ -294,10 +426,33 @@ impl PostView {
       .then_order_by(pa_key::post_id);
 
     let conn = &mut get_conn(pool).await?;
-    let res = paginated_query
+    let (hostname, image_mode): (String, ImageMode) = local_site::table
+      .inner_join(site::table.on(site::id.eq(local_site::site_id)))
+      .filter(site::instance_id.eq(my_person.instance_id))
+      .select((local_site::hostname, local_site::image_mode))
+      .first(conn)
+      .await?;
+    let mut res = paginated_query
       .load::<Self>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)?;
+    let post_ids: Vec<PostId> = res.iter().map(|view| view.post.id).collect();
+    let pictrs_aliases: Vec<(PostId, Option<String>)> = post_thumbnail_source::table
+      .filter(post_thumbnail_source::post_id.eq_any(post_ids))
+      .select((
+        post_thumbnail_source::post_id,
+        post_thumbnail_source::pictrs_alias,
+      ))
+      .load(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    for view in &mut res {
+      let alias = pictrs_aliases
+        .iter()
+        .find(|(post_id, _)| *post_id == view.post.id)
+        .and_then(|(_, alias)| alias.as_deref());
+      rewrite_post_view_for_site(view, &hostname, image_mode, alias);
+    }
     paginate_response(res, limit, page_cursor)
   }
 }
@@ -400,6 +555,11 @@ impl PostQuery<'_> {
     let my_person_id = self.local_user.person_id();
 
     let mut query = PostView::joins(my_person_id, site.instance_id)
+      .filter(exists(
+        post_site::table
+          .filter(post_site::post_id.eq(post::id))
+          .filter(post_site::local_site_id.eq(local_site.id)),
+      ))
       .select(PostView::as_select())
       .limit(limit)
       .into_boxed();
@@ -451,6 +611,12 @@ impl PostQuery<'_> {
     }
     if !self.local_user.is_admin() {
       query = query
+        .filter(not(exists(
+          post_site::table
+            .filter(post_site::post_id.eq(post::id))
+            .filter(post_site::local_site_id.eq(local_site.id))
+            .filter(post_site::removed.eq(true)),
+        )))
         .filter(filter_private_or_followed())
         // only show removed posts to admin
         .filter(community::removed.eq(false))
@@ -572,22 +738,26 @@ impl PostQuery<'_> {
     let sort = self.sort.unwrap_or(PostSortType::Hot);
     let sort_direction = asc_if(sort == PostSortType::Old);
 
+    // Featured local posts are site-scoped, so this order must be part of the base query.
+    if sort != PostSortType::New && sort != PostSortType::Old && community_ids.is_none() {
+      let featured = post_site::table
+        .filter(post_site::post_id.eq(post::id))
+        .filter(post_site::local_site_id.eq(local_site.id))
+        .select(post_site::featured)
+        .single_value();
+      query = query.order_by(featured.desc());
+    }
     let mut pq = PostView::paginate(query, &self.page_cursor, sort_direction, pool).await?;
 
     // featured posts first
     // Don't do for new / old sorts
-    if sort != PostSortType::New && sort != PostSortType::Old {
-      // Only sort by featured local if there are no communities given
-      pq = if community_ids.is_none() {
-        pq.then_order_by(key::featured_local)
-      }
-      // Only sort by featured_community if there's a single community.
-      // Multi-communities / subscribed views should not show featured communities on the top.
-      else if community_ids.as_ref().map(std::vec::Vec::len) == Some(1) {
-        pq.then_order_by(key::featured_community)
-      } else {
-        pq
-      }
+    // Only sort by featured_community if there's a single community.
+    // Multi-communities / subscribed views should not show featured communities on the top.
+    if sort != PostSortType::New
+      && sort != PostSortType::Old
+      && community_ids.as_ref().map(std::vec::Vec::len) == Some(1)
+    {
+      pq = pq.then_order_by(key::featured_community);
     }
 
     // then use the main sort
@@ -620,11 +790,52 @@ impl PostQuery<'_> {
 
     debug!("Post View Query: {:?}", debug_query::<Pg, _>(&query));
     let conn = &mut get_conn(pool).await?;
-    let res = Commented::new(query)
+    let mut res = Commented::new(query)
       .text("PostQuery::list")
       .load::<PostView>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)?;
+    let site_state: Vec<(PostId, bool, bool, bool)> = post_site::table
+      .filter(post_site::local_site_id.eq(local_site.id))
+      .select((
+        post_site::post_id,
+        post_site::removed,
+        post_site::locked,
+        post_site::featured,
+      ))
+      .load(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    let post_ids: Vec<PostId> = res.iter().map(|view| view.post.id).collect();
+    let pictrs_aliases: Vec<(PostId, Option<String>)> = post_thumbnail_source::table
+      .filter(post_thumbnail_source::post_id.eq_any(post_ids))
+      .select((
+        post_thumbnail_source::post_id,
+        post_thumbnail_source::pictrs_alias,
+      ))
+      .load(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    for post_view in &mut res {
+      if let Some((_, removed, locked, featured)) = site_state
+        .iter()
+        .find(|(post_id, _, _, _)| *post_id == post_view.post.id)
+      {
+        post_view.post.removed |= *removed;
+        post_view.post.locked |= *locked;
+        post_view.post.featured_local = *featured;
+      }
+      let alias = pictrs_aliases
+        .iter()
+        .find(|(post_id, _)| *post_id == post_view.post.id)
+        .and_then(|(_, alias)| alias.as_deref());
+      rewrite_post_view_for_site(
+        post_view,
+        &local_site.hostname,
+        local_site.image_mode,
+        alias,
+      );
+    }
     paginate_response(res, limit, self.page_cursor)
   }
 }

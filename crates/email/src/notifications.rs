@@ -1,5 +1,11 @@
 use crate::{inbox_link, send::send_email, user_language};
-use lemmy_db_schema::source::{comment::Comment, community::Community, person::Person, post::Post};
+use lemmy_db_schema::source::{
+  comment::Comment,
+  community::Community,
+  local_site::LocalSite,
+  person::Person,
+  post::Post,
+};
 use lemmy_db_schema_file::enums::ModlogKind;
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_diesel_utils::dburl::DbUrl;
@@ -39,13 +45,14 @@ pub fn send_notification_email(
   local_user_view: LocalUserView,
   link: DbUrl,
   data: NotificationEmailData,
+  local_site: &LocalSite,
   settings: &'static Settings,
 ) {
   if local_user_view.banned || !local_user_view.local_user.send_notifications_to_email {
     return;
   }
 
-  let inbox_link = inbox_link(settings);
+  let inbox_link = inbox_link(settings, local_site);
   let lang = user_language(&local_user_view.local_user);
   let (subject, body) = match data {
     NotificationEmailData::Mention { content, person } => {
@@ -147,6 +154,7 @@ pub fn send_notification_email(
       user_email,
       local_user_view.person.name,
       body,
+      local_site.clone(),
       settings,
     );
   }

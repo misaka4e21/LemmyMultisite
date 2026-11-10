@@ -29,6 +29,8 @@
   }
   # Parameters for automatic configuration of new instance (only used at first start)
   setup: {
+    # the domain name of your instance (mandatory on first start)
+    hostname: "unset"
     # Username for the admin user
     admin_username: "admin"
     # Password for the admin user. It must be between 10 and 60 characters.
@@ -50,8 +52,6 @@
       /* ... */
     ]
   }
-  # the domain name of your instance (mandatory)
-  hostname: "unset"
   # Address where lemmy should listen for incoming requests
   bind: "0.0.0.0"
   # Port where lemmy should listen for incoming requests

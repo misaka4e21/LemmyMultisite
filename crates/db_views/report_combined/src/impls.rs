@@ -29,15 +29,17 @@ use lemmy_db_schema::{
   utils::limit_fetch,
 };
 use lemmy_db_schema_file::{
+  PersonId,
   newtypes::{
     CommentReportId,
     CommunityId,
     CommunityReportId,
+    LocalSiteId,
     PostId,
     PostReportId,
     PrivateMessageReportId,
   },
-  schema::{comment_report, community_actions, post_report, report_combined},
+  schema::{comment_report, community_actions, local_user, post_report, report_combined},
 };
 use lemmy_db_views_report_combined_sql::report_combined_joins;
 use lemmy_diesel_utils::{
@@ -192,6 +194,7 @@ impl PaginationCursorConversion for ReportCombinedView {
 
 #[derive(Default)]
 pub struct ReportCombinedQuery {
+  pub local_site_id: LocalSiteId,
   pub type_: Option<ReportType>,
   pub post_id: Option<PostId>,
   pub community_id: Option<CommunityId>,
@@ -212,7 +215,17 @@ impl ReportCombinedQuery {
   ) -> LemmyResult<PagedResponse<ReportCombinedView>> {
     let limit = limit_fetch(self.limit, None)?;
 
+    let site_user_ids: Vec<PersonId> = {
+      let conn = &mut get_conn(pool).await?;
+      local_user::table
+        .filter(local_user::local_site_id.eq(self.local_site_id))
+        .select(local_user::person_id)
+        .load(conn)
+        .await?
+    };
+
     let mut query = report_combined_joins(user.person.id, user.person.instance_id)
+      .filter(report_combined::report_creator_id.eq_any(site_user_ids))
       .select(ReportCombinedViewInternal::as_select())
       .limit(limit)
       .into_boxed();

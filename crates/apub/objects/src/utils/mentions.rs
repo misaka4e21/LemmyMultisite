@@ -56,7 +56,7 @@ pub(crate) async fn collect_non_local_mentions(
     .into_iter()
     .flatten()
     // Filter only the non-local ones
-    .filter(|m| !m.is_local(&context.settings().hostname));
+    .filter(|m| !m.is_local(context.hostname()));
 
   for mention in scraped {
     let identifier = format!("{}@{}", mention.name, mention.domain);

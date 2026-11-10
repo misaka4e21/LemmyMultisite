@@ -6,6 +6,7 @@ use lemmy_api_utils::{
   context::LemmyContext,
   plugins::{plugin_hook_after, plugin_hook_before},
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::{check_community_user_action, check_nsfw_allowed, is_mod_or_admin, update_post_tags},
 };
 use lemmy_db_schema::source::post::{Post, PostUpdateForm};
@@ -14,7 +15,6 @@ use lemmy_db_views_post::{
   PostView,
   api::{ModEditPost, PostResponse},
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::LemmyResult;
 use std::ops::Deref;
@@ -23,8 +23,9 @@ pub async fn mod_edit_post(
   Json(data): Json<ModEditPost>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PostResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
   let local_instance_id = local_user_view.person.instance_id;
 
   check_nsfw_allowed(data.nsfw, Some(&local_site))?;

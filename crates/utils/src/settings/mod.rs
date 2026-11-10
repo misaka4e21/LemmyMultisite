@@ -39,7 +39,7 @@ impl Settings {
       env::var("LEMMY_CONFIG_LOCATION").unwrap_or_else(|_| DEFAULT_CONFIG_FILE.to_string());
     let plain = fs::read_to_string(path)?;
     let config = from_str::<Settings>(&plain)?;
-    if config.hostname == "unset" {
+    if config.bootstrap_hostname().is_none() {
       Err(anyhow!("Hostname variable is not set!").into())
     } else {
       Ok(config)
@@ -55,14 +55,27 @@ impl Settings {
   }
 
   /// Returns either "http" or "https", depending on tls_enabled setting
-  fn get_protocol_string(&self) -> &'static str {
+  pub fn get_protocol_string(&self) -> &'static str {
     if self.tls_enabled { "https" } else { "http" }
+  }
+
+  /// Hostname used to create the first site. Request handling uses the tenant hostname instead.
+  pub fn bootstrap_hostname(&self) -> Option<&str> {
+    self
+      .setup
+      .as_ref()
+      .map(|s| s.hostname.as_str())
+      .filter(|h| !h.is_empty() && *h != "unset")
   }
 
   /// Returns something like `http://localhost` or `https://lemmy.ml`,
   /// with the correct protocol and hostname.
   pub fn get_protocol_and_hostname(&self) -> String {
-    format!("{}://{}", self.get_protocol_string(), self.hostname)
+    format!(
+      "{}://{}",
+      self.get_protocol_string(),
+      self.bootstrap_hostname().unwrap_or("unset")
+    )
   }
 
   /// When running the federation test setup in `api_tests/` or `docker/federation`, the `hostname`
@@ -71,7 +84,8 @@ impl Settings {
   pub fn get_hostname_without_port(&self) -> Result<String, anyhow::Error> {
     Ok(
       (*self
-        .hostname
+        .bootstrap_hostname()
+        .ok_or_else(|| anyhow!("Hostname variable is not set!"))?
         .split(':')
         .collect::<Vec<&str>>()
         .first()

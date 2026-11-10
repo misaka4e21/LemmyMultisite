@@ -3299,6 +3299,7 @@ dependencies = [
  "lemmy_diesel_utils",
  "lemmy_email",
  "lemmy_utils 1.0.0-beta.3",
+ "moka",
  "rand 0.10.3",
  "regex",
  "serde",
@@ -3315,8 +3316,14 @@ dependencies = [
  "actix-web",
  "lemmy_api",
  "lemmy_api_crud",
+ "lemmy_api_utils",
+ "lemmy_db_schema 1.0.0-beta.3",
+ "lemmy_db_schema_file",
+ "lemmy_db_views_site",
  "lemmy_routes",
  "lemmy_utils 1.0.0-beta.3",
+ "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -3528,6 +3535,7 @@ dependencies = [
  "lemmy_db_schema 1.0.0-beta.3",
  "lemmy_db_schema_file",
  "lemmy_db_views_community_follower",
+ "lemmy_db_views_site",
  "lemmy_diesel_utils",
  "lemmy_utils 1.0.0-beta.3",
  "mockall",
@@ -3745,6 +3753,7 @@ dependencies = [
 name = "lemmy_db_views_local_image"
 version = "1.0.0-beta.3"
 dependencies = [
+ "chrono",
  "diesel",
  "diesel-async",
  "i-love-jesus",
@@ -3754,6 +3763,8 @@ dependencies = [
  "lemmy_utils 1.0.0-beta.3",
  "serde",
  "serde_with",
+ "serial_test",
+ "tokio",
  "ts-rs",
  "url",
 ]
@@ -4075,6 +4086,7 @@ dependencies = [
  "lemmy_db_views_post",
  "lemmy_diesel_utils",
  "lemmy_utils 1.0.0-beta.3",
+ "moka",
  "serde",
  "serde_with",
  "serial_test",
@@ -4195,6 +4207,7 @@ dependencies = [
  "rss",
  "serde",
  "serial_test",
+ "sha2 0.11.1",
  "strum 0.28.0",
  "tokio",
  "tracing",
@@ -4210,6 +4223,7 @@ dependencies = [
  "activitypub_federation",
  "actix-web",
  "clap",
+ "futures-util",
  "lemmy_api",
  "lemmy_api_routes",
  "lemmy_api_routes_v3",
@@ -4219,6 +4233,7 @@ dependencies = [
  "lemmy_apub_objects",
  "lemmy_apub_send",
  "lemmy_db_schema 1.0.0-beta.3",
+ "lemmy_db_schema_file",
  "lemmy_db_views_site",
  "lemmy_diesel_utils",
  "lemmy_routes",
@@ -4266,6 +4281,7 @@ dependencies = [
  "http 1.5.0",
  "invisible-characters",
  "itertools 0.15.0",
+ "lemmy_db_schema_file",
  "markdown-it",
  "markdown-it-block-spoiler",
  "markdown-it-footnote",

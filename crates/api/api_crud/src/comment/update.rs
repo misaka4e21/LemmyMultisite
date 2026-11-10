@@ -7,6 +7,7 @@ use lemmy_api_utils::{
   notify::NotifyData,
   plugins::{plugin_hook_after, plugin_hook_before},
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::{check_community_user_action, get_url_blocklist, process_markdown_opt, slur_regex},
 };
 use lemmy_db_schema::{
@@ -18,7 +19,6 @@ use lemmy_db_views_comment::{
   api::{CommentResponse, EditComment},
 };
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
@@ -29,8 +29,9 @@ pub async fn edit_comment(
   Json(data): Json<EditComment>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommentResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let comment_id = data.comment_id;
   let local_instance_id = local_user_view.person.instance_id;

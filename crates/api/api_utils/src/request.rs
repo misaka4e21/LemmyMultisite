@@ -1,16 +1,17 @@
 use crate::{
   context::LemmyContext,
   send_activity::{ActivityChannel, SendActivityData},
-  utils::proxy_image_link,
 };
 use activitypub_federation::{config::Data, resolver::ValidatingDnsResolver};
 use chrono::{DateTime, Utc};
 use encoding_rs::{Encoding, UTF_8};
 use futures::StreamExt;
 use lemmy_db_schema::source::{
-  images::{ImageDetailsInsertForm, LocalImage, LocalImageForm},
+  images::{ImageDetails, ImageDetailsInsertForm},
   local_site::LocalSite,
+  media::{MediaObject, MediaObjectInsertForm, MediaReference, MediaReferenceInsertForm},
   post::{Post, PostUpdateForm},
+  post_thumbnail::{PostThumbnailSource, PostThumbnailSourceForm},
 };
 use lemmy_db_schema_file::enums::ImageMode;
 use lemmy_db_views_post::api::{LinkMetadata, OpenGraphData};
@@ -206,56 +207,63 @@ pub async fn generate_post_link_metadata(
   // Decide if we are allowed to generate local thumbnail
   let SiteView {
     site, local_site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = match context.tenant() {
+    Some(tenant) => tenant.site_view.clone(),
+    None => SiteView::read_by_hostname(&mut context.pool(), context.hostname()).await?,
+  };
   let allow_sensitive = site.content_warning.is_some();
   let allow_generate_thumbnail = allow_sensitive || !post.nsfw;
-
-  // Proxy the post url itself if it is an image
-  let url = if let (true, Some(url)) = (is_image_post, post.url.clone()) {
-    Some(Some(
-      proxy_image_link(url.into(), &local_site, false, &context).await?,
-    ))
-  } else {
-    None
-  };
 
   let image_url = if is_image_post {
     post.url.clone()
   } else {
     metadata.opengraph_data.image.clone()
   };
+  let thumbnail_source_hash = custom_thumbnail
+    .as_ref()
+    .map(ToString::to_string)
+    .or_else(|| image_url.as_ref().map(ToString::to_string));
 
-  // Attempt to generate a thumbnail depending on the instance settings. Either by proxying,
-  // storing image persistently in pict-rs or returning the remote url directly as thumbnail.
-  let thumbnail_url = if let (false, Some(url)) = (is_image_post, custom_thumbnail) {
-    proxy_image_link(url.clone(), &local_site, true, &context)
-      .await
-      .map_err(|e| warn!("Failed to proxy thumbnail: {e}"))
-      .ok()
-      .or(Some(url.into()))
-  } else if let (true, Some(url)) = (allow_generate_thumbnail, image_url.clone()) {
+  // Canonical rows keep the source URL. Views build the per-site proxy or pict-rs URL.
+  let thumbnail_alias = if custom_thumbnail.is_none()
+    && allow_generate_thumbnail
+    && let Some(url) = image_url.clone()
+  {
     generate_pictrs_thumbnail(&post, &url, &local_site, &context)
       .await
       .map_err(|e| warn!("Failed to generate thumbnail: {e}"))
       .ok()
-      .map(Into::into)
-      .or(image_url)
+      .flatten()
   } else {
-    image_url.clone()
+    None
   };
 
   let form = PostUpdateForm {
-    url,
+    url: None,
     embed_title: Some(metadata.opengraph_data.title),
     embed_description: Some(metadata.opengraph_data.description),
     embed_video_url: Some(metadata.opengraph_data.embed_video_url),
     embed_video_width: Some(metadata.opengraph_data.video_width.map(i32::from)),
     embed_video_height: Some(metadata.opengraph_data.video_height.map(i32::from)),
-    thumbnail_url: Some(thumbnail_url),
+    thumbnail_url: Some(match &thumbnail_source_hash {
+      Some(source) => Some(Url::parse(source)?.into()),
+      None => None,
+    }),
     url_content_type: Some(metadata.content_type),
     ..Default::default()
   };
   let updated_post = Post::update(&mut context.pool(), post.id, &form).await?;
+  if let Some(source_hash) = thumbnail_source_hash {
+    PostThumbnailSource::upsert(
+      &mut context.pool(),
+      &PostThumbnailSourceForm {
+        post_id: updated_post.id,
+        source_hash,
+        pictrs_alias: thumbnail_alias,
+      },
+    )
+    .await?;
+  }
   if let Some(send_activity) = send_activity(updated_post) {
     ActivityChannel::submit_activity(send_activity, &context)?;
   }
@@ -375,9 +383,14 @@ pub struct PictrsFileDetails {
 impl PictrsFileDetails {
   /// Builds the image form. This should always use the thumbnail_url,
   /// Because the post_view joins to it
-  pub fn build_image_details_form(&self, thumbnail_url: &Url) -> ImageDetailsInsertForm {
+  pub fn build_image_details_form(
+    &self,
+    thumbnail_url: &Url,
+    source_hash: Option<String>,
+  ) -> ImageDetailsInsertForm {
     ImageDetailsInsertForm {
       link: thumbnail_url.clone().into(),
+      source_hash,
       width: self.width.into(),
       height: self.height.into(),
       content_type: self.content_type.clone(),
@@ -435,7 +448,7 @@ pub async fn purge_image_from_pictrs(alias: &str, context: &LemmyContext) -> Lem
   let aliases = response.aliases;
 
   // Delete db rows of aliases.
-  LocalImage::delete_by_aliases(&mut context.pool(), &aliases)
+  MediaObject::delete_by_aliases(&mut context.pool(), &aliases)
     .await
     .ok();
 
@@ -467,7 +480,7 @@ pub async fn delete_image_alias(alias: &str, context: &LemmyContext) -> LemmyRes
     .error_for_status()?;
 
   // Delete db row if any (old Lemmy versions didn't generate this).
-  LocalImage::delete_by_alias(&mut context.pool(), alias)
+  MediaObject::delete_by_alias(&mut context.pool(), alias)
     .await
     .ok();
   Ok(())
@@ -479,17 +492,10 @@ async fn generate_pictrs_thumbnail(
   image_url: &Url,
   local_site: &LocalSite,
   context: &Data<LemmyContext>,
-) -> LemmyResult<Url> {
+) -> LemmyResult<Option<String>> {
   context.is_valid_ip(image_url).await?;
   match local_site.image_mode {
-    ImageMode::None => return Ok(image_url.clone()),
-    ImageMode::ProxyAllImages => {
-      return Ok(
-        proxy_image_link(image_url.clone(), local_site, true, context)
-          .await?
-          .into(),
-      );
-    }
+    ImageMode::None | ImageMode::ProxyAllImages => return Ok(None),
     _ => {}
   };
 
@@ -516,20 +522,48 @@ async fn generate_pictrs_thumbnail(
     .first()
     .ok_or(LemmyErrorType::PictrsResponseError(res.msg))?;
 
-  let form = LocalImageForm {
-    pictrs_alias: image.file.clone(),
-    // For thumbnails, the person_id is the post creator
-    person_id: post.creator_id,
-    thumbnail_for_post_id: Some(Some(post.id)),
+  // Thumbnails share the same content-addressed media store as uploads, so every site that can
+  // see the post can fetch the thumbnail from its own hostname.
+  let source_hash = image_url.to_string();
+  let media_form = MediaObjectInsertForm {
+    content_hash: format!("thumbnail:{source_hash}"),
+    canonical_pictrs_alias: image.file.clone(),
+    size_bytes: 0,
+    width: image.details.width.into(),
+    height: image.details.height.into(),
+    content_type: image.details.content_type.clone(),
+    blurhash: image.details.blurhash.clone(),
   };
-  let protocol_and_hostname = context.settings().get_protocol_and_hostname();
-  let thumbnail_url = image.image_url(&protocol_and_hostname)?;
+  let (media, created) = MediaObject::create_or_read(&mut context.pool(), &media_form).await?;
+  if !created && media.canonical_pictrs_alias != image.file {
+    delete_image_alias(&image.file, context).await.ok();
+  }
+  MediaReference::ensure(
+    &mut context.pool(),
+    &MediaReferenceInsertForm {
+      local_site_id: local_site.id,
+      media_id: media.id,
+      owner_person_id: Some(post.creator_id),
+      post_id: Some(post.id),
+      purpose: "post_thumbnail".to_string(),
+    },
+  )
+  .await?;
+  let details_form = image
+    .details
+    .build_image_details_form(image_url, Some(source_hash.clone()));
+  ImageDetails::create(&mut context.pool(), &details_form).await?;
+  PostThumbnailSource::upsert(
+    &mut context.pool(),
+    &PostThumbnailSourceForm {
+      post_id: post.id,
+      source_hash,
+      pictrs_alias: Some(media.canonical_pictrs_alias.clone()),
+    },
+  )
+  .await?;
 
-  // Also store the details for the image
-  let details_form = image.details.build_image_details_form(&thumbnail_url);
-  LocalImage::create(&mut context.pool(), &form, &details_form).await?;
-
-  Ok(thumbnail_url)
+  Ok(Some(media.canonical_pictrs_alias))
 }
 
 /// Fetches the image details for pictrs proxied images

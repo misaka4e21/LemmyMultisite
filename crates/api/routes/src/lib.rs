@@ -190,6 +190,8 @@ use lemmy_routes::images::{
 };
 use lemmy_utils::rate_limit::RateLimit;
 
+mod installation;
+
 pub fn config(cfg: &mut ServiceConfig, rate_limit: &RateLimit) {
   cfg.service(
     scope("/api/v4")
@@ -206,6 +208,24 @@ pub fn config(cfg: &mut ServiceConfig, rate_limit: &RateLimit) {
           .route("/banner", delete().to(delete_site_banner)),
       )
       .route("/modlog", get().to(get_mod_log))
+      .service(
+        scope("/installation")
+          .route("/login", post().to(installation::installation_admin_login))
+          .route("/sites", get().to(installation::installation_list_sites))
+          .route("/sites", post().to(installation::installation_create_site))
+          .route(
+            "/sites/{id}/disable",
+            put().to(installation::installation_disable_site),
+          )
+          .route(
+            "/sites/{id}",
+            delete().to(installation::installation_remove_site),
+          )
+          .route(
+            "/sites/{id}/hostname",
+            put().to(installation::installation_change_hostname),
+          ),
+      )
       .service(
         resource("/search")
           .wrap(rate_limit.search())

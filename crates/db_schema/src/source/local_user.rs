@@ -4,7 +4,7 @@ use lemmy_db_schema_file::schema::local_user;
 use lemmy_db_schema_file::{
   PersonId,
   enums::{CommentSortType, ListingType, PostListingMode, PostSortType, VoteShow},
-  newtypes::LocalUserId,
+  newtypes::{LocalSiteId, LocalUserId},
 };
 use lemmy_diesel_utils::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,8 @@ pub struct LocalUser {
   pub invited_by_local_user_id: Option<LocalUserId>,
   /// Whether to show media in the UI.
   pub show_media: bool,
+  /// The site that owns this account.
+  pub local_site_id: LocalSiteId,
 }
 
 #[derive(Clone, derive_new::new)]
@@ -88,6 +90,7 @@ pub struct LocalUser {
 #[cfg_attr(feature = "full", diesel(table_name = local_user))]
 pub struct LocalUserInsertForm {
   pub person_id: PersonId,
+  pub local_site_id: LocalSiteId,
   pub password_encrypted: Option<String>,
   #[new(default)]
   pub email: Option<String>,

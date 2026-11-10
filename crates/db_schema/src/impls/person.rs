@@ -1,5 +1,6 @@
 use crate::{
   diesel::{BoolExpressionMethods, NullableExpressionMethods, OptionalExtension},
+  impls::presence::{default_local_site_id, ensure_person_site},
   source::person::{
     Person,
     PersonActions,
@@ -25,7 +26,7 @@ use diesel_uplete::{UpleteCount, uplete};
 use lemmy_db_schema_file::{
   InstanceId,
   PersonId,
-  newtypes::{CommunityId, LocalUserId},
+  newtypes::{CommunityId, LocalSiteId, LocalUserId},
   schema::{instance, instance_actions, local_user, person, person_actions},
 };
 use lemmy_diesel_utils::{
@@ -58,11 +59,21 @@ impl Crud for Person {
 
   async fn create(pool: &mut DbPool<'_>, form: &PersonInsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(person::table)
+    let person = insert_into(person::table)
       .values(form)
       .get_result::<Self>(conn)
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
+      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+    if form.local.unwrap_or(true) {
+      let local_site_id = match form.origin_local_site_id {
+        Some(local_site_id) => Some(local_site_id),
+        None => default_local_site_id(&mut conn.into()).await?,
+      };
+      if let Some(local_site_id) = local_site_id {
+        ensure_person_site(&mut conn.into(), local_site_id, person.id).await?;
+      }
+    }
+    Ok(person)
   }
   async fn update(
     pool: &mut DbPool<'_>,
@@ -140,12 +151,16 @@ impl Person {
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
-  pub async fn check_username_taken(pool: &mut DbPool<'_>, username: &str) -> LemmyResult<()> {
+  pub async fn check_username_taken(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    username: &str,
+  ) -> LemmyResult<()> {
     let conn = &mut get_conn(pool).await?;
     select(not(exists(
       person::table
         .filter(lower(person::name).eq(username.to_lowercase()))
-        .filter(person::local.eq(true)),
+        .filter(person::origin_local_site_id.eq(local_site_id)),
     )))
     .get_result::<bool>(conn)
     .await?
@@ -178,6 +193,7 @@ impl ApubActor for Person {
     pool: &mut DbPool<'_>,
     from_name: &str,
     domain: Option<&str>,
+    local_site_id: Option<LocalSiteId>,
     include_deleted: bool,
   ) -> LemmyResult<Option<Self>> {
     let conn = &mut get_conn(pool).await?;
@@ -191,6 +207,8 @@ impl ApubActor for Person {
     }
     if let Some(domain) = domain {
       q = q.filter(lower(instance::domain).eq(domain.to_lowercase()))
+    } else if let Some(local_site_id) = local_site_id {
+      q = q.filter(person::origin_local_site_id.eq(local_site_id))
     } else {
       q = q.filter(person::local.eq(true))
     }
@@ -210,9 +228,8 @@ impl ApubActor for Person {
     format_actor_url(&self.name, domain, 'u', settings)
   }
 
-  fn generate_local_actor_url(name: &str, settings: &Settings) -> LemmyResult<DbUrl> {
-    let domain = settings.get_protocol_and_hostname();
-    Ok(Url::parse(&format!("{domain}/u/{name}"))?.into())
+  fn generate_local_actor_url(name: &str, protocol_and_hostname: &str) -> LemmyResult<DbUrl> {
+    Ok(Url::parse(&format!("{protocol_and_hostname}/u/{name}"))?.into())
   }
 }
 
@@ -449,6 +466,7 @@ mod tests {
       bio: None,
       local: true,
       bot_account: false,
+      origin_local_site_id: None,
       private_key: None,
       public_key: "pubkey".to_owned(),
       last_refreshed_at: data.person.published_at,

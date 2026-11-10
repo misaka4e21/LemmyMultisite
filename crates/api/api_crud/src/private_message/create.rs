@@ -5,6 +5,7 @@ use lemmy_api_utils::{
   notify::notify_private_message,
   plugins::{plugin_hook_after, plugin_hook_before},
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::{
     check_local_user_banned_or_deleted,
     check_private_messages_enabled,
@@ -14,6 +15,7 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_schema::{
+  impls::presence::ensure_private_message_site,
   source::{
     person::PersonActions,
     private_message::{PrivateMessage, PrivateMessageInsertForm},
@@ -25,7 +27,6 @@ use lemmy_db_views_private_message::{
   PrivateMessageView,
   api::{CreatePrivateMessage, PrivateMessageResponse},
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::{error::LemmyResult, utils::validation::is_valid_body_field};
 
@@ -33,12 +34,13 @@ pub async fn create_private_message(
   Json(data): Json<CreatePrivateMessage>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PrivateMessageResponse>> {
   check_local_user_banned_or_deleted(&local_user_view)?;
 
   let slur_regex = slur_regex(&context).await?;
   let url_blocklist = get_url_blocklist(&context).await?;
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
   let content = process_markdown(
     &data.content,
     &slur_regex,
@@ -71,9 +73,17 @@ pub async fn create_private_message(
     data.recipient_id,
     content.clone(),
   );
+  form.origin_local_site_id = Some(local_site.id);
 
   form = plugin_hook_before("local_private_message_before_create", form).await?;
   let inserted_private_message = PrivateMessage::create(&mut context.pool(), &form).await?;
+  ensure_private_message_site(
+    &mut context.pool(),
+    local_site.id,
+    inserted_private_message.id,
+    "sender",
+  )
+  .await?;
   plugin_hook_after(
     "local_private_message_after_create",
     &inserted_private_message,
@@ -83,6 +93,7 @@ pub async fn create_private_message(
     &mut context.pool(),
     inserted_private_message.id,
     Some(&local_user_view.person),
+    local_site.id,
   )
   .await?;
 

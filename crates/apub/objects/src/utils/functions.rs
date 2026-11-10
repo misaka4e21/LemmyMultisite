@@ -17,14 +17,16 @@ use lemmy_db_schema::source::{
   instance::{Instance, InstanceActions},
   local_site::LocalSite,
 };
-use lemmy_db_schema_file::enums::{ActorType, CommunityVisibility};
+use lemmy_db_schema_file::{
+  enums::{ActorType, CommunityVisibility},
+  newtypes::LocalSiteId,
+};
 use lemmy_db_views_community_moderator::CommunityPersonBanView;
 use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::connection::DbPool;
 use lemmy_utils::{
   CACHE_DURATION_FEDERATION,
-  CacheLock,
-  error::{LemmyError, LemmyResult, UntranslatedError},
+  error::{LemmyResult, UntranslatedError},
 };
 use moka::future::Cache;
 use std::sync::{Arc, LazyLock};
@@ -67,38 +69,40 @@ pub struct LocalSiteData {
   blocked_instances: Vec<Instance>,
 }
 
-pub async fn local_site_data_cached(pool: &mut DbPool<'_>) -> LemmyResult<Arc<LocalSiteData>> {
+pub async fn local_site_data_cached(
+  pool: &mut DbPool<'_>,
+  local_site_id: LocalSiteId,
+) -> LemmyResult<Arc<LocalSiteData>> {
   // All incoming and outgoing federation actions read the blocklist/allowlist and slur filters
   // multiple times. This causes a huge number of database reads if we hit the db directly. So we
   // cache these values for a short time, which will already make a huge difference and ensures that
   // changes take effect quickly.
-  static CACHE: CacheLock<Arc<LocalSiteData>> = LazyLock::new(|| {
+  static CACHE: LazyLock<Cache<LocalSiteId, Arc<LocalSiteData>>> = LazyLock::new(|| {
     Cache::builder()
-      .max_capacity(1)
+      .max_capacity(100)
       .time_to_live(CACHE_DURATION_FEDERATION)
       .build()
   });
-  Ok(
-    Box::pin(CACHE
-      .try_get_with((), async {
-        let (local_site, allowed_instances, blocked_instances) =
-          lemmy_diesel_utils::try_join_with_pool!(pool => (
-            // LocalSite may be missing
-            |pool| async {
-              Ok(SiteView::read_local(pool).await.ok().map(|s| s.local_site))
-            },
-            Instance::allowlist,
-            Instance::blocklist
-          ))?;
+  if let Some(data) = CACHE.get(&local_site_id).await {
+    return Ok(data);
+  }
 
-        Ok::<_, LemmyError>(Arc::new(LocalSiteData {
-          local_site,
-          allowed_instances,
-          blocked_instances,
-        }))
-      }))
-      .await.map_err(|e| anyhow::anyhow!("err getting activity: {e:?}"))?
-  )
+  let (local_site, allowed_instances, blocked_instances) = lemmy_diesel_utils::try_join_with_pool!(pool => (
+    // LocalSite may be missing
+    |pool| async move {
+      Ok(SiteView::read_by_id(pool, local_site_id).await.ok().map(|s| s.local_site))
+    },
+    |pool| Instance::allowlist_for_site(pool, local_site_id),
+    |pool| Instance::blocklist_for_site(pool, local_site_id)
+  ))?;
+
+  let data = Arc::new(LocalSiteData {
+    local_site,
+    allowed_instances,
+    blocked_instances,
+  });
+  CACHE.insert(local_site_id, data.clone()).await;
+  Ok(data)
 }
 
 pub async fn check_apub_id_valid_with_strictness(
@@ -110,12 +114,13 @@ pub async fn check_apub_id_valid_with_strictness(
     .domain()
     .ok_or(UntranslatedError::UrlWithoutDomain)?
     .to_string();
-  let local_instance = context.settings().get_hostname_without_port()?;
-  if domain == local_instance {
+  let local_instance = context.hostname().split(':').next().unwrap_or_default();
+  if domain.eq_ignore_ascii_case(local_instance) {
     return Ok(());
   }
 
-  let local_site_data = local_site_data_cached(&mut context.pool()).await?;
+  let local_site_data =
+    local_site_data_cached(&mut context.pool(), context.site_view()?.local_site.id).await?;
   check_apub_id_valid(apub_id, &local_site_data)?;
 
   // Only check allowlist if this is a community, and there are instances in the allowlist
@@ -126,7 +131,7 @@ pub async fn check_apub_id_valid_with_strictness(
       .allowed_instances
       .iter()
       .map(|i| i.domain.clone())
-      .chain([local_instance])
+      .chain([local_instance.to_string()])
       .any(|x| x == domain);
 
     if !is_allowed_or_local {
@@ -193,6 +198,9 @@ pub fn check_apub_id_valid(apub_id: &Url, local_site_data: &LocalSiteData) -> Le
 
 pub trait GetActorType {
   fn actor_type(&self) -> ActorType;
+  fn local_site_id(&self) -> Option<LocalSiteId> {
+    None
+  }
 }
 
 impl<L: GetActorType, R: GetActorType> GetActorType for either::Either<L, R> {
@@ -200,6 +208,13 @@ impl<L: GetActorType, R: GetActorType> GetActorType for either::Either<L, R> {
     match self {
       Either::Right(r) => r.actor_type(),
       Either::Left(l) => l.actor_type(),
+    }
+  }
+
+  fn local_site_id(&self) -> Option<LocalSiteId> {
+    match self {
+      Either::Right(r) => r.local_site_id(),
+      Either::Left(l) => l.local_site_id(),
     }
   }
 }

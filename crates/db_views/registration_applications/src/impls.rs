@@ -19,7 +19,7 @@ use lemmy_db_schema::{
 use lemmy_db_schema_file::{
   PersonId,
   aliases,
-  newtypes::RegistrationApplicationId,
+  newtypes::{LocalSiteId, RegistrationApplicationId},
   schema::{local_user, person, registration_application},
 };
 use lemmy_diesel_utils::{
@@ -62,9 +62,14 @@ impl RegistrationApplicationView {
       .left_join(admin_join)
   }
 
-  pub async fn read(pool: &mut DbPool<'_>, id: RegistrationApplicationId) -> LemmyResult<Self> {
+  pub async fn read(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    id: RegistrationApplicationId,
+  ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     Self::joins()
+      .filter(local_user::local_site_id.eq(local_site_id))
       .filter(registration_application::id.eq(id))
       .select(Self::as_select())
       .first(conn)
@@ -72,9 +77,14 @@ impl RegistrationApplicationView {
       .with_lemmy_type(LemmyErrorType::NotFound)
   }
 
-  pub async fn read_by_person(pool: &mut DbPool<'_>, person_id: PersonId) -> LemmyResult<Self> {
+  pub async fn read_by_person(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    person_id: PersonId,
+  ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     Self::joins()
+      .filter(local_user::local_site_id.eq(local_site_id))
       .filter(person::id.eq(person_id))
       .select(Self::as_select())
       .first(conn)
@@ -85,11 +95,13 @@ impl RegistrationApplicationView {
   /// Returns the current unread registration_application count
   pub async fn get_unread_count(
     pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
     verified_email_only: bool,
   ) -> LemmyResult<i64> {
     let conn = &mut get_conn(pool).await?;
 
     let mut query = Self::joins()
+      .filter(local_user::local_site_id.eq(local_site_id))
       .filter(RegistrationApplication::is_unread())
       .select(count(registration_application::id))
       .into_boxed();
@@ -107,6 +119,7 @@ impl RegistrationApplicationView {
 
 #[derive(Default)]
 pub struct RegistrationApplicationQuery {
+  pub local_site_id: LocalSiteId,
   pub unread_only: Option<bool>,
   pub verified_email_only: Option<bool>,
   pub page_cursor: Option<PaginationCursor>,
@@ -121,6 +134,7 @@ impl RegistrationApplicationQuery {
     let limit = limit_fetch(self.limit, None)?;
 
     let mut query = RegistrationApplicationView::joins()
+      .filter(local_user::local_site_id.eq(self.local_site_id))
       .select(RegistrationApplicationView::as_select())
       .limit(limit)
       .into_boxed();
@@ -160,6 +174,7 @@ mod tests {
   use crate::{RegistrationApplicationView, impls::RegistrationApplicationQuery};
   use lemmy_db_schema::source::{
     instance::Instance,
+    local_site::{LocalSite, LocalSiteInsertForm},
     local_user::{LocalUser, LocalUserInsertForm, LocalUserUpdateForm},
     person::{Person, PersonInsertForm},
     registration_application::{
@@ -167,6 +182,7 @@ mod tests {
       RegistrationApplicationInsertForm,
       RegistrationApplicationUpdateForm,
     },
+    site::{Site, SiteUpsertForm},
   };
   use lemmy_diesel_utils::{connection::build_db_pool_for_tests, traits::Crud};
   use lemmy_utils::error::LemmyResult;
@@ -179,22 +195,42 @@ mod tests {
     let pool = &build_db_pool_for_tests();
     let pool = &mut pool.into();
 
-    let instance = Instance::read_or_create(pool, "my_domain.tld").await?;
+    let instance = Instance::read_or_create(pool, "registration-applications.example").await?;
+    let site = Site::create(pool, &SiteUpsertForm::new("ra site".into(), instance.id)).await?;
+    let system =
+      Person::create(pool, &PersonInsertForm::test_form(instance.id, "ra_system")).await?;
+    let local_site = LocalSite::create(
+      pool,
+      &LocalSiteInsertForm::new(site.id, system.id, instance.domain.clone()),
+    )
+    .await?;
 
-    let timmy_person_form = PersonInsertForm::test_form(instance.id, "timmy_rav");
+    let timmy_person_form = PersonInsertForm {
+      origin_local_site_id: Some(local_site.id),
+      ..PersonInsertForm::test_form(instance.id, "timmy_rav")
+    };
 
     let timmy_person = Person::create(pool, &timmy_person_form).await?;
 
-    let timmy_local_user_form = LocalUserInsertForm::test_form_admin(timmy_person.id);
+    let timmy_local_user_form = LocalUserInsertForm {
+      local_site_id: local_site.id,
+      ..LocalUserInsertForm::test_form_admin(timmy_person.id)
+    };
 
     let _inserted_timmy_local_user =
       LocalUser::create(pool, &timmy_local_user_form, vec![]).await?;
 
-    let sara_person_form = PersonInsertForm::test_form(instance.id, "sara_rav");
+    let sara_person_form = PersonInsertForm {
+      origin_local_site_id: Some(local_site.id),
+      ..PersonInsertForm::test_form(instance.id, "sara_rav")
+    };
 
     let sara_person = Person::create(pool, &sara_person_form).await?;
 
-    let sara_local_user_form = LocalUserInsertForm::test_form(sara_person.id);
+    let sara_local_user_form = LocalUserInsertForm {
+      local_site_id: local_site.id,
+      ..LocalUserInsertForm::test_form(sara_person.id)
+    };
 
     let sara_local_user = LocalUser::create(pool, &sara_local_user_form, vec![]).await?;
 
@@ -206,13 +242,20 @@ mod tests {
 
     let sara_app = RegistrationApplication::create(pool, &sara_app_form).await?;
 
-    let read_sara_app_view = RegistrationApplicationView::read(pool, sara_app.id).await?;
+    let read_sara_app_view =
+      RegistrationApplicationView::read(pool, local_site.id, sara_app.id).await?;
 
-    let jess_person_form = PersonInsertForm::test_form(instance.id, "jess_rav");
+    let jess_person_form = PersonInsertForm {
+      origin_local_site_id: Some(local_site.id),
+      ..PersonInsertForm::test_form(instance.id, "jess_rav")
+    };
 
     let inserted_jess_person = Person::create(pool, &jess_person_form).await?;
 
-    let jess_local_user_form = LocalUserInsertForm::test_form(inserted_jess_person.id);
+    let jess_local_user_form = LocalUserInsertForm {
+      local_site_id: local_site.id,
+      ..LocalUserInsertForm::test_form(inserted_jess_person.id)
+    };
 
     let jess_local_user = LocalUser::create(pool, &jess_local_user_form, vec![]).await?;
 
@@ -224,7 +267,8 @@ mod tests {
 
     let jess_app = RegistrationApplication::create(pool, &jess_app_form).await?;
 
-    let read_jess_app_view = RegistrationApplicationView::read(pool, jess_app.id).await?;
+    let read_jess_app_view =
+      RegistrationApplicationView::read(pool, local_site.id, jess_app.id).await?;
 
     let mut expected_sara_app_view = RegistrationApplicationView {
       registration_application: sara_app.clone(),
@@ -267,6 +311,7 @@ mod tests {
         show_upvote_percentage: sara_local_user.show_upvote_percentage,
         show_person_votes: sara_local_user.show_person_votes,
         invited_by_local_user_id: sara_local_user.invited_by_local_user_id,
+        local_site_id: sara_local_user.local_site_id,
       },
       creator: Person {
         id: sara_person.id,
@@ -291,6 +336,7 @@ mod tests {
         post_score: 0,
         comment_count: 0,
         comment_score: 0,
+        origin_local_site_id: Some(local_site.id),
       },
       admin: None,
     };
@@ -299,6 +345,7 @@ mod tests {
 
     // Do a batch read of the applications
     let apps = RegistrationApplicationQuery {
+      local_site_id: local_site.id,
       unread_only: Some(true),
       ..Default::default()
     }
@@ -312,7 +359,8 @@ mod tests {
     );
 
     // Make sure the counts are correct
-    let unread_count = RegistrationApplicationView::get_unread_count(pool, false).await?;
+    let unread_count =
+      RegistrationApplicationView::get_unread_count(pool, local_site.id, false).await?;
     assert_eq!(unread_count, 2);
 
     // Approve the application
@@ -334,7 +382,7 @@ mod tests {
     LocalUser::update(pool, sara_local_user.id, &approve_local_user_form).await?;
 
     let read_sara_app_view_after_approve =
-      RegistrationApplicationView::read(pool, sara_app.id).await?;
+      RegistrationApplicationView::read(pool, local_site.id, sara_app.id).await?;
 
     // Make sure the columns changed
     expected_sara_app_view
@@ -365,12 +413,14 @@ mod tests {
       post_score: 0,
       comment_count: 0,
       comment_score: 0,
+      origin_local_site_id: Some(local_site.id),
     });
     assert_eq!(read_sara_app_view_after_approve, expected_sara_app_view);
 
     // Do a batch read of apps again
     // It should show only jessicas which is unresolved
     let apps_after_resolve = RegistrationApplicationQuery {
+      local_site_id: local_site.id,
       unread_only: Some(true),
       ..Default::default()
     }
@@ -381,11 +431,16 @@ mod tests {
 
     // Make sure the counts are correct
     let unread_count_after_approve =
-      RegistrationApplicationView::get_unread_count(pool, false).await?;
+      RegistrationApplicationView::get_unread_count(pool, local_site.id, false).await?;
     assert_eq!(unread_count_after_approve, 1);
 
     // Make sure the not undenied_only has all the apps
-    let all_apps = RegistrationApplicationQuery::default().list(pool).await?;
+    let all_apps = RegistrationApplicationQuery {
+      local_site_id: local_site.id,
+      ..Default::default()
+    }
+    .list(pool)
+    .await?;
     assert_eq!(all_apps.len(), 2);
 
     Person::delete(pool, timmy_person.id).await?;

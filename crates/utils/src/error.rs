@@ -34,6 +34,7 @@ pub enum LemmyErrorType {
   NotAModOrAdmin,
   NotTopMod,
   NotLoggedIn,
+  SiteMismatch,
   NotHigherMod,
   NotHigherAdmin,
   SiteBan,
@@ -230,6 +231,7 @@ cfg_select! {
       fn status_code(&self) -> actix_web::http::StatusCode {
         match self.error_type {
           LemmyErrorType::IncorrectLogin => actix_web::http::StatusCode::UNAUTHORIZED,
+          LemmyErrorType::SiteMismatch => actix_web::http::StatusCode::FORBIDDEN,
           LemmyErrorType::NotFound => actix_web::http::StatusCode::NOT_FOUND,
           _ => actix_web::http::StatusCode::BAD_REQUEST,
         }

@@ -3,8 +3,9 @@ use crate::rate_limit::{
   input::{LemmyInput, LemmyInputFuture, raw_ip_key},
 };
 use actix_extensible_rate_limit::{RateLimiter, backend::SimpleOutput};
-use actix_web::dev::ServiceRequest;
+use actix_web::{HttpMessage, dev::ServiceRequest};
 use enum_map::{EnumMap, enum_map};
+use lemmy_db_schema_file::newtypes::LocalSiteId;
 use std::future::ready;
 use strum::{AsRefStr, Display};
 
@@ -75,7 +76,21 @@ impl RateLimit {
 
   #[expect(clippy::expect_used)]
   pub fn set_config(&self, configs: EnumMap<ActionType, BucketConfig>) {
-    *self.backend.configs.write().expect("write rwlock") = configs;
+    self.set_config_for_site(LocalSiteId(1), configs);
+  }
+
+  #[expect(clippy::expect_used)]
+  pub fn set_config_for_site(
+    &self,
+    local_site_id: LocalSiteId,
+    configs: EnumMap<ActionType, BucketConfig>,
+  ) {
+    self
+      .backend
+      .configs
+      .write()
+      .expect("write rwlock")
+      .insert(local_site_id, configs);
   }
 
   fn build_rate_limiter(
@@ -142,8 +157,13 @@ fn new_input(action_type: ActionType) -> impl Fn(&ServiceRequest) -> LemmyInputF
     ready({
       let info = req.connection_info();
       let key = raw_ip_key(info.realip_remote_addr());
+      let local_site_id = req
+        .extensions()
+        .get::<LocalSiteId>()
+        .copied()
+        .unwrap_or(LocalSiteId(1));
 
-      Ok(LemmyInput(key, action_type))
+      Ok(LemmyInput(key, local_site_id, action_type))
     })
   }
 }

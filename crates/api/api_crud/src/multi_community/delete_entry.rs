@@ -4,6 +4,7 @@ use actix_web::web::Json;
 use lemmy_api_utils::{
   context::LemmyContext,
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::check_local_user_banned_or_deleted,
 };
 use lemmy_db_schema::{
@@ -23,6 +24,7 @@ pub async fn delete_multi_community_entry(
   Json(data): Json<CreateOrDeleteMultiCommunityEntry>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SuccessResponse>> {
   check_local_user_banned_or_deleted(&local_user_view)?;
 
@@ -42,7 +44,8 @@ pub async fn delete_multi_community_entry(
       MultiCommunityEntry::community_used_in_multiple(&mut context.pool(), &form).await?;
     // unfollow the community only if its not used in another multi-community
     if !used_in_multiple {
-      let multicomm_follower = SiteView::read_system_account(&mut context.pool()).await?;
+      let multicomm_follower =
+        SiteView::read_system_account(&mut context.pool(), tenant.local_site()).await?;
       CommunityActions::unfollow(&mut context.pool(), multicomm_follower.id, community.id).await?;
       ActivityChannel::submit_activity(
         SendActivityData::FollowCommunity(community, local_user_view.person.clone(), false),

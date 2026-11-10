@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 #[cfg(feature = "full")]
 use diesel::prelude::*;
-use lemmy_db_schema_file::{InstanceId, newtypes::ActivityId};
+use lemmy_db_schema_file::{
+  InstanceId,
+  newtypes::{ActivityId, LocalSiteId},
+};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 
@@ -24,4 +27,5 @@ pub struct FederationQueueState {
   pub fail_count: i32,
   /// timestamp of the last retry attempt (when the last failing activity was resent)
   pub last_retry_at: Option<DateTime<Utc>>,
+  pub local_site_id: LocalSiteId,
 }

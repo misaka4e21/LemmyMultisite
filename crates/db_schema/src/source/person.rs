@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use i_love_jesus::CursorKeysModule;
 #[cfg(feature = "full")]
 use lemmy_db_schema_file::schema::{person, person_actions};
-use lemmy_db_schema_file::{InstanceId, PersonId};
+use lemmy_db_schema_file::{InstanceId, PersonId, newtypes::LocalSiteId};
 use lemmy_diesel_utils::{dburl::DbUrl, sensitive::SensitiveString};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
@@ -59,6 +59,8 @@ pub struct Person {
   pub comment_count: i32,
   #[serde(skip)]
   pub comment_score: i32,
+  /// The site that created this local person. NULL for remote persons.
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Clone, derive_new::new)]
@@ -96,6 +98,8 @@ pub struct PersonInsertForm {
   pub matrix_user_id: Option<String>,
   #[new(default)]
   pub bot_account: Option<bool>,
+  #[new(default)]
+  pub origin_local_site_id: Option<LocalSiteId>,
 }
 
 #[derive(Clone, Default)]

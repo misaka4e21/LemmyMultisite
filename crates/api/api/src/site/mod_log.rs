@@ -1,9 +1,12 @@
 use crate::hide_modlog_names;
 use actix_web::web::{Data, Json, Query};
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_modlog::{ModlogView, api::GetModlog, impls::ModlogQuery};
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::pagination::PagedResponse;
 use lemmy_utils::error::LemmyResult;
 
@@ -11,8 +14,9 @@ pub async fn get_mod_log(
   Query(data): Query<GetModlog>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PagedResponse<ModlogView>>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   check_private_instance(&local_user_view, &local_site)?;
 
@@ -85,7 +89,8 @@ mod tests {
       Person::create(pool, &PersonInsertForm::test_form(instance.id, "langs")).await?;
     let site_form = SiteUpsertForm::new("test site".to_string(), instance.id);
     let site = Site::create(pool, &site_form).await?;
-    let local_site_form = LocalSiteInsertForm::new(site.id, system_acct.id);
+    let local_site_form =
+      LocalSiteInsertForm::new(site.id, system_acct.id, instance.domain.clone());
     let local_site = LocalSite::create(pool, &local_site_form).await?;
 
     Ok(Data {

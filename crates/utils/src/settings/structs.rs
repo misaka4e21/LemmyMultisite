@@ -23,10 +23,6 @@ pub struct Settings {
   /// Parameters for automatic configuration of new instance (only used at first start)
   #[doku(example = "Some(Default::default())")]
   pub setup: Option<SetupConfig>,
-  /// the domain name of your instance (mandatory)
-  #[default("unset")]
-  #[doku(example = "example.com")]
-  pub hostname: String,
   /// Address where lemmy should listen for incoming requests
   #[default(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))]
   #[doku(as = "String")]
@@ -112,6 +108,10 @@ pub struct EmailConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, SmartDefault, Document)]
 #[serde(default, deny_unknown_fields)]
 pub struct SetupConfig {
+  /// Hostname used to create the first site (mandatory on first start)
+  #[default("unset")]
+  #[doku(example = "example.com")]
+  pub hostname: String,
   /// Username for the admin user
   #[doku(example = "admin")]
   pub admin_username: Option<String>,

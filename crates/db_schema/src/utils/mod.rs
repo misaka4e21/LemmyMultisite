@@ -39,12 +39,7 @@ pub(crate) fn format_actor_url(
   prefix: char,
   settings: &Settings,
 ) -> LemmyResult<Url> {
-  let local_protocol_and_hostname = settings.get_protocol_and_hostname();
-  let local_hostname = &settings.hostname;
-  let url = if domain != local_hostname {
-    format!("{local_protocol_and_hostname}/{prefix}/{name}@{domain}",)
-  } else {
-    format!("{local_protocol_and_hostname}/{prefix}/{name}")
-  };
+  let protocol = settings.get_protocol_string();
+  let url = format!("{protocol}://{domain}/{prefix}/{name}");
   Ok(Url::parse(&url)?)
 }

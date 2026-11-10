@@ -11,7 +11,9 @@ use actix_extensible_rate_limit::backend::{
 use actix_web::rt::{task::JoinHandle, time::Instant};
 use dashmap::DashMap;
 use enum_map::EnumMap;
+use lemmy_db_schema_file::newtypes::LocalSiteId;
 use std::{
+  collections::HashMap,
   convert::Infallible,
   sync::{Arc, RwLock},
   time::Duration,
@@ -23,7 +25,7 @@ use std::{
 pub struct LemmyBackend {
   map: Arc<DashMap<LemmyInput, Value>>,
   gc_handle: Option<Arc<JoinHandle<()>>>,
-  pub(super) configs: Arc<RwLock<EnumMap<ActionType, BucketConfig>>>,
+  pub(super) configs: Arc<RwLock<HashMap<LocalSiteId, EnumMap<ActionType, BucketConfig>>>>,
 }
 
 struct Value {
@@ -40,10 +42,12 @@ impl LemmyBackend {
         Duration::from_secs(DEFAULT_GC_INTERVAL_SECONDS),
       ))
     });
+    let mut configs_map = HashMap::new();
+    configs_map.insert(LocalSiteId(1), configs);
     LemmyBackend {
       map,
       gc_handle,
-      configs: Arc::new(RwLock::new(configs)),
+      configs: Arc::new(RwLock::new(configs_map)),
     }
   }
 
@@ -73,7 +77,17 @@ impl Backend<LemmyInput> for LemmyBackend {
     input: LemmyInput,
   ) -> Result<(Decision, Self::Output, Self::RollbackToken), Self::Error> {
     #[expect(clippy::expect_used)]
-    let config = self.configs.read().expect("read rwlock")[input.1];
+    let config = self
+      .configs
+      .read()
+      .expect("read rwlock")
+      .get(&input.1)
+      .copied()
+      .map(|configs| configs[input.2])
+      .unwrap_or(BucketConfig {
+        max_requests: 0,
+        interval: 0,
+      });
 
     let max_requests: u64 = config.max_requests.into();
     let interval = Duration::from_secs(config.interval.into());
@@ -178,7 +192,7 @@ mod tests {
     tokio::time::pause();
     let backend = LemmyBackend::new(test_config(MINUTE_SECS, 5), true);
     let key = raw_ip_key(Some("127.0.0.2"));
-    let input = LemmyInput(key, ActionType::Message);
+    let input = LemmyInput(key, LocalSiteId(1), ActionType::Message);
     for _ in 0..5 {
       // First 5 should be allowed
       let (allow, _, _) = backend.request(input).await?;
@@ -191,10 +205,42 @@ mod tests {
   }
 
   #[actix_web::test]
+  async fn test_site_isolation() -> LemmyResult<()> {
+    tokio::time::pause();
+    let backend = LemmyBackend::new(test_config(MINUTE_SECS, 1), false);
+    backend
+      .configs
+      .write()
+      .expect("write rwlock")
+      .insert(LocalSiteId(2), test_config(MINUTE_SECS, 2));
+
+    let key = raw_ip_key(Some("127.0.0.8"));
+    let site_1 = LemmyInput(key, LocalSiteId(1), ActionType::Message);
+    let site_2 = LemmyInput(key, LocalSiteId(2), ActionType::Message);
+
+    let (decision, _, _) = backend.request(site_1).await?;
+    assert!(decision.is_allowed());
+    let (decision, _, _) = backend.request(site_1).await?;
+    assert!(decision.is_denied());
+
+    for _ in 0..2 {
+      let (decision, _, _) = backend.request(site_2).await?;
+      assert!(decision.is_allowed());
+    }
+    let (decision, _, _) = backend.request(site_2).await?;
+    assert!(decision.is_denied());
+    Ok(())
+  }
+
+  #[actix_web::test]
   async fn test_reset() -> LemmyResult<()> {
     tokio::time::pause();
     let backend = LemmyBackend::new(test_config(MINUTE_SECS, 1), false);
-    let input = LemmyInput(raw_ip_key(Some("127.0.0.3")), ActionType::Message);
+    let input = LemmyInput(
+      raw_ip_key(Some("127.0.0.3")),
+      LocalSiteId(1),
+      ActionType::Message,
+    );
     // Make first request, should be allowed
     let (decision, _, _) = backend.request(input).await?;
     assert!(decision.is_allowed());
@@ -214,8 +260,16 @@ mod tests {
   async fn test_garbage_collection() -> LemmyResult<()> {
     tokio::time::pause();
     let backend = LemmyBackend::new(test_config(MINUTE_SECS, 1), true);
-    let key1 = LemmyInput(raw_ip_key(Some("127.0.0.4")), ActionType::Message);
-    let key2 = LemmyInput(raw_ip_key(Some("127.0.0.5")), ActionType::Post);
+    let key1 = LemmyInput(
+      raw_ip_key(Some("127.0.0.4")),
+      LocalSiteId(1),
+      ActionType::Message,
+    );
+    let key2 = LemmyInput(
+      raw_ip_key(Some("127.0.0.5")),
+      LocalSiteId(1),
+      ActionType::Post,
+    );
     backend.request(key1).await?;
     backend.request(key2).await?;
     assert!(backend.map.contains_key(&key1));
@@ -233,7 +287,7 @@ mod tests {
     tokio::time::pause();
     let backend = LemmyBackend::new(test_config(MINUTE_SECS, 2), true);
     let key = raw_ip_key(Some("127.0.0.6"));
-    let input = LemmyInput(key, ActionType::Message);
+    let input = LemmyInput(key, LocalSiteId(1), ActionType::Message);
     // First of 2 should be allowed.
     let (decision, output, _) = backend.request(input).await?;
     assert!(decision.is_allowed());
@@ -260,7 +314,7 @@ mod tests {
     tokio::time::pause();
     let backend = LemmyBackend::new(test_config(MINUTE_SECS, 5), true);
     let key = raw_ip_key(Some("127.0.0.7"));
-    let input = LemmyInput(key, ActionType::Message);
+    let input = LemmyInput(key, LocalSiteId(1), ActionType::Message);
     let (_, output, rollback) = backend.request(input).await?;
     assert_eq!(output.remaining, 4);
     backend.rollback(rollback).await?;

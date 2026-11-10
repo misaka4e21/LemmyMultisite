@@ -1,8 +1,8 @@
 use activitypub_federation::config::Data;
-use actix_web::{HttpRequest, HttpResponse, cookie::Cookie};
+use actix_web::{HttpRequest, HttpResponse};
 use lemmy_api_utils::{
   context::LemmyContext,
-  utils::{AUTH_COOKIE_NAME, read_auth_token},
+  utils::{read_auth_token, remove_auth_cookie},
 };
 use lemmy_db_schema::source::login_token::LoginToken;
 use lemmy_db_views_local_user::LocalUserView;
@@ -19,7 +19,9 @@ pub async fn logout(
   LoginToken::invalidate(&mut context.pool(), &jwt).await?;
 
   let mut res = HttpResponse::Ok().json(SuccessResponse::default());
-  let cookie = Cookie::new(AUTH_COOKIE_NAME, "");
-  res.add_removal_cookie(&cookie)?;
+  let secure = context
+    .tenant()
+    .is_some_and(|tenant| tenant.scheme == "https");
+  res.add_removal_cookie(&remove_auth_cookie(secure))?;
   Ok(res)
 }

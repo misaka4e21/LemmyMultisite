@@ -3,6 +3,7 @@ use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{check_private_instance, is_admin, read_site_for_actor},
 };
 use lemmy_db_schema::MultiCommunitySortType;
@@ -13,15 +14,15 @@ use lemmy_db_views_person::{
   PersonView,
   api::{GetPersonDetails, GetPersonDetailsResponse},
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 
 pub async fn read_person(
   Query(data): Query<GetPersonDetails>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetPersonDetailsResponse>> {
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = tenant.site_view.clone();
   let local_site = site_view.local_site;
   let local_instance_id = site_view.site.instance_id;
   let my_person_id = local_user_view.as_ref().map(|l| l.person.id);
@@ -59,7 +60,7 @@ pub async fn read_person(
     no_limit: Some(true),
     ..Default::default()
   }
-  .list(&mut context.pool())
+  .list(&mut context.pool(), local_site.id)
   .await?
   .items;
 

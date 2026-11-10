@@ -100,6 +100,7 @@ diesel::table! {
         federation_pending -> Bool,
         locked -> Bool,
         community_id -> Int4,
+        origin_local_site_id -> Nullable<Int4>,
     }
 }
 
@@ -185,6 +186,7 @@ diesel::table! {
         post_downvotes -> VoteSettingsEnum,
         comment_upvotes -> VoteSettingsEnum,
         comment_downvotes -> VoteSettingsEnum,
+        origin_local_site_id -> Nullable<Int4>,
     }
 }
 
@@ -296,40 +298,76 @@ diesel::table! {
 }
 
 diesel::table! {
-    federation_allowlist (instance_id) {
+    federation_allowlist (local_site_id, instance_id) {
         instance_id -> Int4,
         published_at -> Timestamptz,
         updated_at -> Nullable<Timestamptz>,
+        local_site_id -> Int4,
     }
 }
 
 diesel::table! {
-    federation_blocklist (instance_id) {
+    federation_blocklist (local_site_id, instance_id) {
         instance_id -> Int4,
         published_at -> Timestamptz,
         updated_at -> Nullable<Timestamptz>,
         expires_at -> Nullable<Timestamptz>,
+        local_site_id -> Int4,
     }
 }
 
 diesel::table! {
-    federation_queue_state (instance_id) {
+    federation_queue_state (local_site_id, instance_id) {
         instance_id -> Int4,
         last_successful_id -> Nullable<Int8>,
         fail_count -> Int4,
         last_retry_at -> Nullable<Timestamptz>,
         last_successful_published_time_at -> Nullable<Timestamptz>,
+        local_site_id -> Int4,
     }
 }
 
 diesel::table! {
     image_details (link) {
         link -> Text,
+        source_hash -> Nullable<Text>,
         width -> Int4,
         height -> Int4,
         content_type -> Text,
         #[max_length = 50]
         blurhash -> Nullable<Varchar>,
+    }
+}
+
+diesel::table! {
+    post_thumbnail_source (post_id) {
+        post_id -> Int4,
+        source_hash -> Text,
+        pictrs_alias -> Nullable<Text>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    internal_activity_delivery (id) {
+        id -> Int8,
+        origin_site_id -> Int4,
+        destination_site_id -> Int4,
+        activity_id -> Int8,
+        state -> Text,
+        attempts -> Int4,
+        created_at -> Timestamptz,
+        updated_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    installation_admin (id) {
+        id -> Int8,
+        username -> Text,
+        password_encrypted -> Text,
+        created_at -> Timestamptz,
+        updated_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -366,15 +404,6 @@ diesel::table! {
         name -> Text,
         usage_in_local_posts_percent -> Int2,
         usage_in_local_comments_percent -> Int2,
-    }
-}
-
-diesel::table! {
-    local_image (pictrs_alias) {
-        pictrs_alias -> Text,
-        published_at -> Timestamptz,
-        person_id -> Nullable<Int4>,
-        thumbnail_for_post_id -> Nullable<Int4>,
     }
 }
 
@@ -447,6 +476,12 @@ diesel::table! {
         user_retention_half_year_percent -> Int2,
         banned_users_percent -> Int2,
         max_invites_per_user_allowed -> Int4,
+        #[max_length = 255]
+        hostname -> Varchar,
+        disabled -> Bool,
+        removed_at -> Nullable<Timestamptz>,
+        smtp_connection -> Nullable<Text>,
+        smtp_from_address -> Nullable<Text>,
     }
 }
 
@@ -478,6 +513,7 @@ diesel::table! {
         url -> Text,
         published_at -> Timestamptz,
         updated_at -> Nullable<Timestamptz>,
+        local_site_id -> Int4,
     }
 }
 
@@ -529,6 +565,7 @@ diesel::table! {
         default_items_per_page -> Int4,
         invited_by_local_user_id -> Nullable<Int4>,
         show_media -> Bool,
+        local_site_id -> Int4,
     }
 }
 
@@ -617,6 +654,7 @@ diesel::table! {
         subscribers_local -> Int4,
         communities -> Int4,
         sidebar -> Nullable<Text>,
+        origin_local_site_id -> Nullable<Int4>,
     }
 }
 
@@ -726,6 +764,7 @@ diesel::table! {
         post_score -> Int4,
         comment_count -> Int4,
         comment_score -> Int4,
+        origin_local_site_id -> Nullable<Int4>,
     }
 }
 
@@ -824,6 +863,7 @@ diesel::table! {
         federation_pending -> Bool,
         embed_video_width -> Nullable<Int4>,
         embed_video_height -> Nullable<Int4>,
+        origin_local_site_id -> Nullable<Int4>,
     }
 }
 
@@ -886,6 +926,7 @@ diesel::table! {
         local -> Bool,
         removed -> Bool,
         deleted_by_recipient -> Bool,
+        origin_local_site_id -> Nullable<Int4>,
     }
 }
 
@@ -905,9 +946,10 @@ diesel::table! {
 }
 
 diesel::table! {
-    received_activity (ap_id) {
+    received_activity (local_site_id, ap_id) {
         ap_id -> Text,
         published_at -> Timestamptz,
+        local_site_id -> Int4,
     }
 }
 
@@ -927,6 +969,14 @@ diesel::table! {
     remote_image (link) {
         link -> Text,
         published_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    removed_site (hostname) {
+        #[max_length = 255]
+        hostname -> Varchar,
+        removed_at -> Timestamptz,
     }
 }
 
@@ -971,6 +1021,7 @@ diesel::table! {
         send_all_instances -> Bool,
         actor_type -> ActorTypeEnum,
         actor_apub_id -> Nullable<Text>,
+        local_site_id -> Int4,
     }
 }
 
@@ -1014,14 +1065,102 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    person_site (local_site_id, person_id) {
+        local_site_id -> Int4,
+        person_id -> Int4,
+        known_at -> Timestamptz,
+        last_refreshed_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    community_site (local_site_id, community_id) {
+        local_site_id -> Int4,
+        community_id -> Int4,
+        known_at -> Timestamptz,
+        last_refreshed_at -> Nullable<Timestamptz>,
+        removed -> Bool,
+    }
+}
+
+diesel::table! {
+    post_site (local_site_id, post_id) {
+        local_site_id -> Int4,
+        post_id -> Int4,
+        known_at -> Timestamptz,
+        last_refreshed_at -> Nullable<Timestamptz>,
+        removed -> Bool,
+        locked -> Bool,
+        featured -> Bool,
+    }
+}
+
+diesel::table! {
+    comment_site (local_site_id, comment_id) {
+        local_site_id -> Int4,
+        comment_id -> Int4,
+        known_at -> Timestamptz,
+        last_refreshed_at -> Nullable<Timestamptz>,
+        removed -> Bool,
+    }
+}
+
+diesel::table! {
+    multi_community_site (local_site_id, multi_community_id) {
+        local_site_id -> Int4,
+        multi_community_id -> Int4,
+        known_at -> Timestamptz,
+        last_refreshed_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    private_message_site (local_site_id, private_message_id) {
+        local_site_id -> Int4,
+        private_message_id -> Int4,
+        role -> Text,
+        known_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    media_object (id) {
+        id -> Int8,
+        content_hash -> Text,
+        canonical_pictrs_alias -> Text,
+        size_bytes -> Int8,
+        width -> Int4,
+        height -> Int4,
+        content_type -> Text,
+        #[max_length = 50]
+        blurhash -> Nullable<Varchar>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    media_reference (id) {
+        id -> Int8,
+        local_site_id -> Int4,
+        media_id -> Int8,
+        owner_person_id -> Nullable<Int4>,
+        post_id -> Nullable<Int4>,
+        purpose -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(comment -> community (community_id));
 diesel::joinable!(comment -> language (language_id));
 diesel::joinable!(comment -> person (creator_id));
+diesel::joinable!(comment -> local_site (origin_local_site_id));
 diesel::joinable!(comment -> post (post_id));
 diesel::joinable!(comment_actions -> comment (comment_id));
 diesel::joinable!(comment_actions -> person (person_id));
 diesel::joinable!(comment_report -> comment (comment_id));
 diesel::joinable!(community -> instance (instance_id));
+diesel::joinable!(community -> local_site (origin_local_site_id));
 diesel::joinable!(community_actions -> community (community_id));
 diesel::joinable!(community_language -> community (community_id));
 diesel::joinable!(community_language -> language (language_id));
@@ -1030,16 +1169,18 @@ diesel::joinable!(community_tag -> community (community_id));
 diesel::joinable!(custom_emoji_keyword -> custom_emoji (custom_emoji_id));
 diesel::joinable!(email_verification -> local_user (local_user_id));
 diesel::joinable!(federation_allowlist -> instance (instance_id));
+diesel::joinable!(federation_allowlist -> local_site (local_site_id));
 diesel::joinable!(federation_blocklist -> instance (instance_id));
+diesel::joinable!(federation_blocklist -> local_site (local_site_id));
 diesel::joinable!(federation_queue_state -> instance (instance_id));
+diesel::joinable!(federation_queue_state -> local_site (local_site_id));
 diesel::joinable!(instance_actions -> instance (instance_id));
 diesel::joinable!(instance_actions -> person (person_id));
-diesel::joinable!(local_image -> person (person_id));
-diesel::joinable!(local_image -> post (thumbnail_for_post_id));
 diesel::joinable!(local_site -> multi_community (suggested_multi_community_id));
 diesel::joinable!(local_site -> person (system_account));
 diesel::joinable!(local_site -> site (site_id));
 diesel::joinable!(local_site_rate_limit -> local_site (local_site_id));
+diesel::joinable!(local_user -> local_site (local_site_id));
 diesel::joinable!(local_user -> person (person_id));
 diesel::joinable!(local_user_invite -> local_user (local_user_id));
 diesel::joinable!(local_user_keyword_block -> local_user (local_user_id));
@@ -1078,6 +1219,7 @@ diesel::joinable!(person_saved_combined -> community (community_id));
 diesel::joinable!(person_saved_combined -> post (post_id));
 diesel::joinable!(post -> community (community_id));
 diesel::joinable!(post -> language (language_id));
+diesel::joinable!(post -> local_site (origin_local_site_id));
 diesel::joinable!(post -> person (creator_id));
 diesel::joinable!(post_actions -> person (person_id));
 diesel::joinable!(post_actions -> post (post_id));
@@ -1085,6 +1227,7 @@ diesel::joinable!(post_community_tag -> community_tag (community_tag_id));
 diesel::joinable!(post_community_tag -> post (post_id));
 diesel::joinable!(post_report -> post (post_id));
 diesel::joinable!(private_message_report -> private_message (private_message_id));
+diesel::joinable!(private_message -> local_site (origin_local_site_id));
 diesel::joinable!(registration_application -> local_user (local_user_id));
 diesel::joinable!(registration_application -> person (admin_id));
 diesel::joinable!(report_combined -> comment (comment_id));
@@ -1095,7 +1238,10 @@ diesel::joinable!(report_combined -> post (post_id));
 diesel::joinable!(report_combined -> post_report (post_report_id));
 diesel::joinable!(report_combined -> private_message (private_message_id));
 diesel::joinable!(report_combined -> private_message_report (private_message_report_id));
+diesel::joinable!(received_activity -> local_site (local_site_id));
+diesel::joinable!(sent_activity -> local_site (local_site_id));
 diesel::joinable!(site -> instance (instance_id));
+diesel::joinable!(post_thumbnail_source -> post (post_id));
 diesel::joinable!(site_language -> language (language_id));
 diesel::joinable!(site_language -> site (site_id));
 
@@ -1103,10 +1249,12 @@ diesel::allow_tables_to_appear_in_same_query!(
   comment,
   comment_actions,
   comment_report,
+  comment_site,
   community,
   community_actions,
   community_language,
   community_report,
+  community_site,
   community_tag,
   email_verification,
   federation_allowlist,
@@ -1114,8 +1262,9 @@ diesel::allow_tables_to_appear_in_same_query!(
   federation_queue_state,
   instance,
   instance_actions,
+  installation_admin,
+  internal_activity_delivery,
   language,
-  local_image,
   local_site,
   local_site_rate_limit,
   local_user,
@@ -1127,6 +1276,9 @@ diesel::allow_tables_to_appear_in_same_query!(
   multi_community,
   multi_community_entry,
   multi_community_follow,
+  multi_community_site,
+  media_object,
+  media_reference,
   notification,
   oauth_account,
   oauth_provider,
@@ -1135,13 +1287,18 @@ diesel::allow_tables_to_appear_in_same_query!(
   person_content_combined,
   person_liked_combined,
   person_saved_combined,
+  person_site,
   post,
   post_actions,
   post_community_tag,
   post_report,
+  post_site,
+  post_thumbnail_source,
   private_message,
   private_message_report,
+  private_message_site,
   registration_application,
+  removed_site,
   report_combined,
   site,
   site_language,

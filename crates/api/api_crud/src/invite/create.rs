@@ -1,12 +1,11 @@
 use actix_web::web::{Data, Json};
-use lemmy_api_utils::{context::LemmyContext, utils::is_admin};
+use lemmy_api_utils::{context::LemmyContext, tenant::TenantContext, utils::is_admin};
 use lemmy_db_schema::source::local_user_invite::{LocalUserInvite, LocalUserInviteInsertForm};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_local_user_invite::{
   api::{CreateInvitation, CreateInvitationResponse},
   impls::LocalUserInviteQuery,
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 use rand::{RngExt, distr::Alphanumeric};
 
@@ -14,11 +13,12 @@ pub async fn create_invitation(
   Json(data): Json<CreateInvitation>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CreateInvitationResponse>> {
   let pool = &mut context.pool();
 
   let local_user_id = local_user_view.local_user.id;
-  let local_site = SiteView::read_local(pool).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let active_invite_count = LocalUserInviteQuery {
     local_user_id,

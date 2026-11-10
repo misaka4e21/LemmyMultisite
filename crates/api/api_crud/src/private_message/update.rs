@@ -6,6 +6,7 @@ use lemmy_api_utils::{
   notify::notify_private_message,
   plugins::{plugin_hook_after, plugin_hook_before},
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::{
     check_local_user_banned_or_deleted,
     check_private_messages_enabled,
@@ -26,7 +27,6 @@ use lemmy_db_views_private_message::{
   PrivateMessageView,
   api::{EditPrivateMessage, PrivateMessageResponse},
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
@@ -37,6 +37,7 @@ pub async fn edit_private_message(
   Json(data): Json<EditPrivateMessage>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PrivateMessageResponse>> {
   check_local_user_banned_or_deleted(&local_user_view)?;
   // Checking permissions
@@ -49,7 +50,7 @@ pub async fn edit_private_message(
   // Doing the update
   let slur_regex = slur_regex(&context).await?;
   let url_blocklist = get_url_blocklist(&context).await?;
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
   let content = process_markdown(
     &data.content,
     &slur_regex,
@@ -84,6 +85,7 @@ pub async fn edit_private_message(
     &mut context.pool(),
     private_message_id,
     Some(&local_user_view.person),
+    local_site.id,
   )
   .await?;
 

@@ -24,6 +24,7 @@ full = [
 
 [dependencies]
 lemmy_db_views_community_follower = { workspace = true }
+lemmy_db_views_site = { workspace = true, features = ["full"] }
 lemmy_api_utils.workspace = true
 lemmy_apub_objects.workspace = true
 lemmy_db_schema = { workspace = true }

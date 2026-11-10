@@ -5,6 +5,7 @@ use lemmy_api_utils::{
   build_response::build_community_response,
   context::LemmyContext,
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::{check_community_deleted_removed, check_local_user_banned_or_deleted},
 };
 use lemmy_db_schema::{
@@ -25,6 +26,7 @@ pub async fn create_multi_community_entry(
   Json(data): Json<CreateOrDeleteMultiCommunityEntry>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommunityResponse>> {
   let community_id = data.community_id;
 
@@ -45,7 +47,8 @@ pub async fn create_multi_community_entry(
   let inserted_entry = MultiCommunityEntry::create(&mut context.pool(), &form).await?;
 
   if !community.local {
-    let multicomm_follower = SiteView::read_system_account(&mut context.pool()).await?;
+    let multicomm_follower =
+      SiteView::read_system_account(&mut context.pool(), tenant.local_site()).await?;
     let actions = CommunityActions::read(&mut context.pool(), community.id, multicomm_follower.id)
       .await
       .unwrap_or_default();

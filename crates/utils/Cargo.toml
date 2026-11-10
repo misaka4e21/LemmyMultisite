@@ -52,6 +52,7 @@ ts-rs = ["dep:ts-rs"]
 ignored = ["http"]
 
 [dependencies]
+lemmy_db_schema_file = { workspace = true }
 regex = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 itertools = { workspace = true, optional = true }

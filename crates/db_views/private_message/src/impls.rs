@@ -1,11 +1,18 @@
 use crate::PrivateMessageView;
-use diesel::{BoolExpressionMethods, ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
+use diesel::{
+  BoolExpressionMethods,
+  ExpressionMethods,
+  JoinOnDsl,
+  QueryDsl,
+  SelectableHelper,
+  dsl::exists,
+};
 use diesel_async::RunQueryDsl;
 use lemmy_db_schema::source::person::Person;
 use lemmy_db_schema_file::{
   aliases,
-  newtypes::PrivateMessageId,
-  schema::{instance_actions, person, person_actions, private_message},
+  newtypes::{LocalSiteId, PrivateMessageId},
+  schema::{instance_actions, person, person_actions, private_message, private_message_site},
 };
 use lemmy_diesel_utils::connection::{DbPool, get_conn};
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
@@ -41,9 +48,15 @@ impl PrivateMessageView {
     pool: &mut DbPool<'_>,
     private_message_id: PrivateMessageId,
     my_person: Option<&Person>,
+    local_site_id: LocalSiteId,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     let mut pm = Self::joins()
+      .filter(exists(
+        private_message_site::table
+          .filter(private_message_site::private_message_id.eq(private_message::id))
+          .filter(private_message_site::local_site_id.eq(local_site_id)),
+      ))
       .filter(private_message::id.eq(private_message_id))
       .select(Self::as_select())
       .first(conn)

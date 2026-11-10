@@ -29,6 +29,7 @@ use lemmy_apub_objects::{
 };
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
 
 /// List of activities which the shared inbox can handle.
@@ -49,6 +50,71 @@ pub enum SharedInboxActivities {
   AnnounceActivity(AnnounceActivity),
   /// This is a catch-all and needs to be last
   RawAnnouncableActivities(RawAnnouncableActivities),
+}
+
+impl SharedInboxActivities {
+  /// Returns all recipient URLs from to and cc.
+  pub fn recipients(&self) -> Vec<Url> {
+    use SharedInboxActivities::*;
+    match self {
+      Follow(a) => a
+        .to
+        .as_ref()
+        .into_iter()
+        .flat_map(|ids| ids.iter())
+        .map(|id| id.inner().clone())
+        .collect(),
+      AcceptFollow(a) => a
+        .to
+        .as_ref()
+        .into_iter()
+        .flat_map(|ids| ids.iter())
+        .map(|id| id.inner().clone())
+        .collect(),
+      RejectFollow(a) => a
+        .to
+        .as_ref()
+        .into_iter()
+        .flat_map(|ids| ids.iter())
+        .map(|id| id.inner().clone())
+        .collect(),
+      UndoFollow(a) => a
+        .to
+        .as_ref()
+        .into_iter()
+        .flat_map(|ids| ids.iter())
+        .map(|id| id.inner().clone())
+        .collect(),
+      Report(a) => a.to.iter().map(|id| id.inner().clone()).collect(),
+      ResolveReport(a) => a.to.iter().map(|id| id.inner().clone()).collect(),
+      AnnounceActivity(a) => a.to.clone(),
+      RawAnnouncableActivities(a) => {
+        let mut urls = Vec::new();
+        for key in ["to", "cc"] {
+          if let Some(value) = a.other.get(key) {
+            collect_json_urls(value, &mut urls);
+          }
+        }
+        urls
+      }
+    }
+  }
+}
+
+fn collect_json_urls(value: &Value, out: &mut Vec<Url>) {
+  match value {
+    Value::String(value) => {
+      if let Ok(url) = Url::parse(value) {
+        out.push(url);
+      }
+    }
+    Value::Array(values) => {
+      for value in values {
+        collect_json_urls(value, out);
+      }
+    }
+    _ => {}
+  }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -6,6 +6,7 @@ use crate::{
     WORK_FINISHED_RECHECK_DELAY,
     get_activity_cached,
     get_latest_activity_id,
+    get_next_activity_id,
   },
 };
 use activitypub_federation::config::FederationConfig;
@@ -16,7 +17,7 @@ use lemmy_db_schema::source::{
   federation_queue_state::FederationQueueState,
   instance::{Instance, InstanceForm},
 };
-use lemmy_db_schema_file::newtypes::ActivityId;
+use lemmy_db_schema_file::newtypes::{ActivityId, LocalSiteId};
 use lemmy_diesel_utils::connection::{ActualDbPool, DbPool};
 use lemmy_utils::{
   error::LemmyResult,
@@ -81,13 +82,15 @@ pub(crate) struct InstanceWorker {
 impl InstanceWorker {
   pub(crate) async fn init_and_loop(
     instance: Instance,
+    local_site_id: LocalSiteId,
     config: FederationConfig<LemmyContext>,
     federation_worker_config: FederationWorkerConfig,
     stop: CancellationToken,
     stats_sender: UnboundedSender<FederationQueueStateWithDomain>,
   ) -> LemmyResult<()> {
     let pool = config.to_request_data().inner_pool().clone();
-    let state = FederationQueueState::load(&mut DbPool::Pool(&pool), instance.id).await?;
+    let state =
+      FederationQueueState::load(&mut DbPool::Pool(&pool), local_site_id, instance.id).await?;
     let (report_send_result, receive_send_result) =
       tokio::sync::mpsc::unbounded_channel::<SendActivityResult>();
     let mut worker = InstanceWorker {
@@ -140,43 +143,9 @@ impl InstanceWorker {
 
       // send a new activity if there is one
       self.inbox_collector.update_communities().await?;
-      let next_id_to_send = ActivityId(last_sent_id.0 + 1);
-      let successfuls_len: i64 = self.successfuls.len().try_into()?;
-      {
-        // sanity check: calculate next id to send based on the last id and the in flight requests
-        let expected_next_id = self.state.last_successful_id.map(|last_successful_id| {
-          last_successful_id.0 + successfuls_len + i64::from(self.in_flight) + 1
-        });
-        // compare to next id based on incrementing
-        if expected_next_id != Some(next_id_to_send.0) {
-          return Err(
-            anyhow::anyhow!(
-              "{}: next id to send is not as expected: {:?} != {:?}",
-              self.instance.domain,
-              expected_next_id,
-              next_id_to_send
-            )
-            .into(),
-          );
-        }
-      }
-
-      let newest_id_opt = get_latest_activity_id(&mut self.pool()).await?;
-      let newest_id = newest_id_opt.unwrap_or(ActivityId(0));
-      if next_id_to_send > newest_id {
-        // If next id to send for this instance is higher than the highest sent_activity table id
-        // there may be a problem and activities wont send.
-        // However this can occur normally if there was no outgoing activity for a week
-        // and sent_activity was completely emptied by scheduled task.
-        if newest_id_opt.is_some() && next_id_to_send > ActivityId(newest_id.0 + 1) {
-          tracing::error!(
-            "{}: next send id {} is higher than latest id {}+1 in table sent_activity (did the db get cleared?)",
-            self.instance.domain,
-            next_id_to_send.0,
-            newest_id.0
-          );
-        }
-        // no more work to be done, wait before rechecking
+      let Some(next_id_to_send) =
+        get_next_activity_id(&mut self.pool(), self.state.local_site_id, last_sent_id).await?
+      else {
         tokio::select! {
           () = sleep(*WORK_FINISHED_RECHECK_DELAY) => {},
           () = self.stop.cancelled() => {
@@ -184,7 +153,7 @@ impl InstanceWorker {
           }
         }
         continue;
-      }
+      };
       self.in_flight += 1;
       last_sent_id = next_id_to_send;
       self.spawn_send_if_needed(next_id_to_send).await?;
@@ -229,7 +198,7 @@ impl InstanceWorker {
     let last = if let Some(last) = self.state.last_successful_id {
       last
     } else {
-      let latest_id = get_latest_activity_id(&mut self.pool())
+      let latest_id = get_latest_activity_id(&mut self.pool(), self.state.local_site_id)
         .await?
         .unwrap_or(ActivityId(0));
       // this is the initial creation (instance first seen) of the federation queue for this
@@ -459,7 +428,10 @@ mod test {
   use lemmy_api_utils::utils::generate_inbox_url;
   use lemmy_db_schema::source::{
     activity::{SentActivity, SentActivityForm},
+    local_site::{LocalSite, LocalSiteInsertForm},
+    local_site_rate_limit::{LocalSiteRateLimit, LocalSiteRateLimitInsertForm},
     person::{Person, PersonInsertForm},
+    site::{Site, SiteUpsertForm},
   };
   use lemmy_db_schema_file::enums::ActorType;
   use lemmy_diesel_utils::{dburl::DbUrl, traits::Crud};
@@ -493,12 +465,34 @@ mod test {
       let context = LemmyContext::init_test_federation_config().await;
       let instance = Instance::read_or_create(&mut context.pool(), "localhost").await?;
 
+      let site = Site::create(
+        &mut context.pool(),
+        &SiteUpsertForm::new("localhost test".into(), instance.id),
+      )
+      .await?;
+      let system = Person::create(
+        &mut context.pool(),
+        &PersonInsertForm::test_form(instance.id, "localhost_system"),
+      )
+      .await?;
+      let local_site = LocalSite::create(
+        &mut context.pool(),
+        &LocalSiteInsertForm::new(site.id, system.id, instance.domain.clone()),
+      )
+      .await?;
+      LocalSiteRateLimit::create(
+        &mut context.pool(),
+        &LocalSiteRateLimitInsertForm::new(local_site.id),
+      )
+      .await?;
+
       let actor_keypair = generate_actor_keypair()?;
       let ap_id: DbUrl = Url::parse("http://local.com/u/alice")?.into();
       let person_form = PersonInsertForm {
         ap_id: Some(ap_id.clone()),
         private_key: (Some(actor_keypair.private_key)),
-        inbox_url: Some(generate_inbox_url()?),
+        inbox_url: Some(generate_inbox_url(&context.protocol_and_hostname())?),
+        origin_local_site_id: Some(local_site.id),
         ..PersonInsertForm::new("alice".to_string(), actor_keypair.public_key, instance.id)
       };
       let person = Person::create(&mut context.pool(), &person_form).await?;
@@ -521,6 +515,7 @@ mod test {
       };
       spawn(InstanceWorker::init_and_loop(
         instance.clone(),
+        local_site.id,
         context.clone(),
         fed_config,
         cancel.clone(),
@@ -791,6 +786,7 @@ mod test {
       send_community_followers_of: None,
       actor_type: ActorType::Person,
       actor_apub_id: ap_id,
+      local_site_id: LocalSiteId(1),
     };
     let sent = SentActivity::create(&mut context.pool(), form).await?;
 

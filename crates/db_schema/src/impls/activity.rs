@@ -4,7 +4,7 @@ use crate::{
 };
 use diesel::{ExpressionMethods, QueryDsl, dsl::insert_into};
 use diesel_async::RunQueryDsl;
-use lemmy_db_schema_file::newtypes::ActivityId;
+use lemmy_db_schema_file::newtypes::{ActivityId, LocalSiteId};
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
   dburl::DbUrl,
@@ -40,14 +40,40 @@ impl SentActivity {
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)
   }
+
+  /// Lists all queued activities that belong to one site, oldest first.
+  pub async fn list_for_site(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Vec<Self>> {
+    use lemmy_db_schema_file::schema::sent_activity::dsl::{
+      id,
+      local_site_id as site_id,
+      sent_activity,
+    };
+    let conn = &mut get_conn(pool).await?;
+    sent_activity
+      .filter(site_id.eq(local_site_id))
+      .order_by(id)
+      .load(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)
+  }
 }
 
 impl ReceivedActivity {
-  pub async fn create(pool: &mut DbPool<'_>, ap_id_: &DbUrl) -> LemmyResult<()> {
+  pub async fn create(
+    pool: &mut DbPool<'_>,
+    local_site_id_: LocalSiteId,
+    ap_id_: &DbUrl,
+  ) -> LemmyResult<()> {
     use lemmy_db_schema_file::schema::received_activity::dsl::{ap_id, received_activity};
     let conn = &mut get_conn(pool).await?;
     let rows_affected = insert_into(received_activity)
-      .values(ap_id.eq(ap_id_))
+      .values((
+        lemmy_db_schema_file::schema::received_activity::local_site_id.eq(local_site_id_),
+        ap_id.eq(ap_id_),
+      ))
       .on_conflict_do_nothing()
       .execute(conn)
       .await
@@ -81,8 +107,8 @@ mod tests {
     let ap_id: DbUrl = Url::parse("http://example.com/activity/531")?.into();
 
     // inserting activity should only work once
-    ReceivedActivity::create(pool, &ap_id).await?;
-    let second = ReceivedActivity::create(pool, &ap_id).await;
+    ReceivedActivity::create(pool, LocalSiteId(1), &ap_id).await?;
+    let second = ReceivedActivity::create(pool, LocalSiteId(1), &ap_id).await;
     assert!(second.is_err());
 
     Ok(())
@@ -109,6 +135,7 @@ mod tests {
       send_all_instances: false,
       send_community_followers_of: None,
       send_inboxes: vec![],
+      local_site_id: LocalSiteId(1),
     };
 
     SentActivity::create(pool, form).await?;

@@ -40,15 +40,17 @@ use lemmy_api_utils::{
     update_post_tags,
   },
 };
-use lemmy_db_schema::source::{
-  community::Community,
-  community_tag::CommunityTag,
-  local_site::LocalSite,
-  person::Person,
-  post::{Post, PostUpdateForm, PostUpsertForm},
+use lemmy_db_schema::{
+  impls::presence::ensure_post_site,
+  source::{
+    community::Community,
+    community_tag::CommunityTag,
+    local_site::LocalSite,
+    person::Person,
+    post::{Post, PostUpdateForm, PostUpsertForm},
+  },
 };
 use lemmy_db_views_community_moderator::CommunityModeratorView;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::{
   error::{LemmyError, LemmyResult},
@@ -208,7 +210,7 @@ impl Object for ApubPost {
   }
 
   async fn from_json(page: Page, context: &Data<Self::DataType>) -> LemmyResult<ApubPost> {
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = context.site_view()?.local_site.clone();
     let creator = page.creator()?.dereference(context).await?;
     let community = page.community(context).await?;
 
@@ -310,6 +312,12 @@ impl Object for ApubPost {
 
     let timestamp = page.updated.or(page.published).unwrap_or_else(Utc::now);
     let post = Post::upsert_apub(&mut context.pool(), timestamp, &form).await?;
+    ensure_post_site(
+      &mut context.pool(),
+      context.site_view()?.local_site.id,
+      post.id,
+    )
+    .await?;
     plugin_hook_after("federated_post_after_receive", &post);
 
     update_apub_post_tags(&page, &post, context).await?;

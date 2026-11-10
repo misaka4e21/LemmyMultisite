@@ -44,7 +44,10 @@ pub async fn setup_local_site(pool: &mut DbPool<'_>, settings: &Settings) -> Lem
     let domain = settings
       .get_hostname_without_port()
       .with_lemmy_type(LemmyErrorType::Unknown("must have domain".into()))?;
-    let mut site_setup = false;
+    let hostname = settings
+      .bootstrap_hostname()
+      .ok_or_else(|| LemmyErrorType::Unknown("must have hostname".into()))?;
+    let mut admin_setup = None;
 
     conn
       .transaction::<(), LemmyError, _>(async |conn| {
@@ -57,12 +60,15 @@ pub async fn setup_local_site(pool: &mut DbPool<'_>, settings: &Settings) -> Lem
           && let Some(admin_password) = &setup.admin_password
         {
           let person_keypair = generate_actor_keypair()?;
-          let person_ap_id = Person::generate_local_actor_url(admin_username, settings)?;
+          let person_ap_id = Person::generate_local_actor_url(
+            admin_username,
+            &settings.get_protocol_and_hostname(),
+          )?;
 
           // Register the user if there's a site setup
           let person_form = PersonInsertForm {
             ap_id: Some(person_ap_id.clone()),
-            inbox_url: Some(generate_inbox_url()?),
+            inbox_url: Some(generate_inbox_url(&settings.get_protocol_and_hostname())?),
             private_key: Some(person_keypair.private_key),
             ..PersonInsertForm::new(
               admin_username.clone(),
@@ -72,13 +78,11 @@ pub async fn setup_local_site(pool: &mut DbPool<'_>, settings: &Settings) -> Lem
           };
           let person_inserted = Person::create(&mut conn.into(), &person_form).await?;
 
-          let local_user_form = LocalUserInsertForm {
-            email: setup.admin_email.clone(),
-            admin: Some(true),
-            ..LocalUserInsertForm::new(person_inserted.id, Some(admin_password.clone()))
-          };
-          LocalUser::create(&mut conn.into(), &local_user_form, vec![]).await?;
-          site_setup = true;
+          admin_setup = Some((
+            person_inserted,
+            Some(admin_password.clone()),
+            setup.admin_email.clone(),
+          ));
         };
 
         // Add an entry for the site table
@@ -93,7 +97,7 @@ pub async fn setup_local_site(pool: &mut DbPool<'_>, settings: &Settings) -> Lem
         let site_form = SiteUpsertForm {
           ap_id: Some(site_ap_id.clone().into()),
           last_refreshed_at: Some(Utc::now()),
-          inbox_url: Some(generate_inbox_url()?),
+          inbox_url: Some(generate_inbox_url(&settings.get_protocol_and_hostname())?),
           private_key: Some(Some(site_key_pair.private_key)),
           public_key: Some(site_key_pair.public_key),
           ..SiteUpsertForm::new(name, instance.id)
@@ -115,11 +119,21 @@ pub async fn setup_local_site(pool: &mut DbPool<'_>, settings: &Settings) -> Lem
         let system_account = Person::create(&mut conn.into(), &form).await?;
 
         // Finally create the local_site row
+        let site_setup = admin_setup.is_some();
         let local_site_form = LocalSiteInsertForm {
           site_setup: Some(site_setup),
-          ..LocalSiteInsertForm::new(site.id, system_account.id)
+          ..LocalSiteInsertForm::new(site.id, system_account.id, hostname.to_string())
         };
         let local_site = LocalSite::create(&mut conn.into(), &local_site_form).await?;
+
+        if let Some((admin_person, admin_password, admin_email)) = admin_setup {
+          let local_user_form = LocalUserInsertForm {
+            email: admin_email,
+            admin: Some(true),
+            ..LocalUserInsertForm::new(admin_person.id, local_site.id, admin_password)
+          };
+          LocalUser::create(&mut conn.into(), &local_user_form, vec![]).await?;
+        }
 
         // Create the rate limit table
         let local_site_rate_limit_form = LocalSiteRateLimitInsertForm::new(local_site.id);
@@ -129,5 +143,8 @@ pub async fn setup_local_site(pool: &mut DbPool<'_>, settings: &Settings) -> Lem
       .await?;
   }
 
-  SiteView::read_local(pool).await
+  let hostname = settings
+    .bootstrap_hostname()
+    .ok_or_else(|| LemmyErrorType::Unknown("must have hostname".into()))?;
+  SiteView::read_by_hostname(pool, hostname).await
 }

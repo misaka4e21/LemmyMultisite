@@ -183,7 +183,7 @@ use lemmy_api_crud::{
   site::read::get_site,
   user::{create::register, my_user::get_my_user},
 };
-use lemmy_api_utils::context::LemmyContext;
+use lemmy_api_utils::{context::LemmyContext, tenant::TenantContext};
 use lemmy_db_schema::{PostFeatureType, source::post::PostActions};
 use lemmy_db_schema_file::{
   PersonId,
@@ -242,8 +242,9 @@ pub(crate) async fn get_post_v3(
   data: Query<GetPost>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetPostResponseV3>> {
-  let post = get_post(data, context, local_user_view).await?.0;
+  let post = get_post(data, context, local_user_view, tenant).await?.0;
   Ok(Json(GetPostResponseV3 {
     post_view: convert_post_view(post.post_view),
     community_view: convert_community_view(post.community_view),
@@ -260,6 +261,7 @@ pub(crate) async fn list_posts_v3(
   datav3: Query<GetPostsV3>,
   context: ApubData<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetPostsResponseV3>> {
   let GetPostsV3 {
     limit,
@@ -289,7 +291,9 @@ pub(crate) async fn list_posts_v3(
     limit,
     ..Default::default()
   };
-  let res = list_posts(Query(data), context, local_user_view).await?.0;
+  let res = list_posts(Query(data), context, local_user_view, tenant)
+    .await?
+    .0;
   Ok(Json(GetPostsResponseV3 {
     posts: res.items.into_iter().map(convert_post_view).collect(),
     next_page: res.next_page.map(|c| V3PaginationCursor(c.0)),
@@ -300,6 +304,7 @@ pub(crate) async fn list_comments_v3(
   Query(data): Query<GetCommentsV3>,
   context: ApubData<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetCommentsResponseV3>> {
   let GetCommentsV3 {
     max_depth,
@@ -328,7 +333,7 @@ pub(crate) async fn list_comments_v3(
     creator_id: None,
     creator_username: None,
   };
-  let comments = list_comments(Query(data), context, local_user_view)
+  let comments = list_comments(Query(data), context, local_user_view, tenant)
     .await?
     .0;
   Ok(Json(GetCommentsResponseV3 {
@@ -347,6 +352,7 @@ pub(crate) async fn logout_v3(
 pub(crate) async fn get_site_v3(
   local_user_view: Option<LocalUserView>,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetSiteResponseV3>> {
   let GetSiteResponse {
     site_view,
@@ -357,7 +363,9 @@ pub(crate) async fn get_site_v3(
     tagline,
     blocked_urls,
     ..
-  } = get_site(local_user_view.clone(), context.clone()).await?.0;
+  } = get_site(local_user_view.clone(), context.clone(), tenant)
+    .await?
+    .0;
   let my_user = if let Some(local_user_view) = local_user_view {
     Some(Box::pin(get_my_user(local_user_view, context)).await?.0)
   } else {
@@ -404,9 +412,22 @@ pub(crate) async fn login_v3(
   data: Json<Login>,
   req: HttpRequest,
   context: Data<LemmyContext>,
-) -> LemmyResult<Json<LoginResponseV3>> {
-  let res = login(data, req, context).await?.0;
-  convert_login_response(res)
+  tenant: TenantContext,
+) -> LemmyResult<HttpResponse> {
+  let stay_logged_in = data.0.stay_logged_in.unwrap_or_default();
+  let secure = tenant.scheme == "https";
+  let res = login(data, req, context, tenant).await?.0;
+  let jwt = res.jwt.clone();
+  let Json(body) = convert_login_response(res)?;
+  let mut response = HttpResponse::Ok();
+  if let Some(jwt) = jwt {
+    response.cookie(lemmy_api_utils::utils::auth_cookie(
+      &jwt.to_string(),
+      secure,
+      stay_logged_in,
+    ));
+  }
+  Ok(response.json(body))
 }
 
 pub(crate) async fn like_comment_v3(
@@ -441,8 +462,9 @@ pub(crate) async fn create_comment_v3(
   data: Json<CreateComment>,
   context: ApubData<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommentResponseV3>> {
-  let res = Box::pin(create_comment(data, context, local_user_view)).await?;
+  let res = Box::pin(create_comment(data, context, local_user_view, tenant)).await?;
   convert_comment_response(res)
 }
 
@@ -450,6 +472,7 @@ pub(crate) async fn create_post_v3(
   Json(data): Json<CreatePostV3>,
   context: ApubData<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PostResponseV3>> {
   let CreatePostV3 {
     name,
@@ -475,7 +498,7 @@ pub(crate) async fn create_post_v3(
     tags: None,
     scheduled_publish_time_at: None,
   };
-  let res = Box::pin(create_post(Json(data), context, local_user_view)).await?;
+  let res = Box::pin(create_post(Json(data), context, local_user_view, tenant)).await?;
   convert_post_response(res)
 }
 
@@ -483,6 +506,7 @@ pub(crate) async fn search_v3(
   Query(data): Query<SearchV3>,
   context: ApubData<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SearchResponseV3>> {
   let SearchV3 {
     type_,
@@ -507,7 +531,7 @@ pub(crate) async fn search_v3(
     type_: convert_search_type(type_),
     ..Default::default()
   };
-  let data = Box::pin(search(Query(form), context, local_user_view)).await?;
+  let data = Box::pin(search(Query(form), context, local_user_view, tenant)).await?;
   Ok(Json(convert_search_response(data.0, type_)))
 }
 
@@ -515,8 +539,9 @@ pub(crate) async fn resolve_object_v3(
   data: Query<ResolveObject>,
   context: ApubData<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<ResolveObjectResponseV3>> {
-  let res = resolve_object(data, context, local_user_view).await?;
+  let res = resolve_object(data, context, local_user_view, tenant).await?;
   let conv = convert_resolve_object_response(res.0);
   Ok(Json(conv))
 }
@@ -563,8 +588,9 @@ pub async fn create_post_report_v3(
   data: Json<CreatePostReport>,
   context: ApubData<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PostReportResponseV3>> {
-  let res = Box::pin(create_post_report(data, context, local_user_view))
+  let res = Box::pin(create_post_report(data, context, local_user_view, tenant))
     .await?
     .0
     .post_report_view;
@@ -609,11 +635,17 @@ pub async fn create_comment_report_v3(
   data: Json<CreateCommentReport>,
   context: ApubData<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommentReportResponseV3>> {
-  let res = Box::pin(create_comment_report(data, context, local_user_view))
-    .await?
-    .0
-    .comment_report_view;
+  let res = Box::pin(create_comment_report(
+    data,
+    context,
+    local_user_view,
+    tenant,
+  ))
+  .await?
+  .0
+  .comment_report_view;
   let (comment, counts) = convert_comment(res.comment);
   let comment_report = CommentReportV3 {
     id: Default::default(),
@@ -651,8 +683,11 @@ pub(crate) async fn get_community_v3(
   data: Query<GetCommunity>,
   context: ApubData<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetCommunityResponseV3>> {
-  let res = get_community(data, context, local_user_view).await?.0;
+  let res = get_community(data, context, local_user_view, tenant)
+    .await?
+    .0;
   Ok(Json(GetCommunityResponseV3 {
     community_view: convert_community_view(res.community_view),
     site: res.site.map(convert_site),
@@ -672,6 +707,7 @@ pub(crate) async fn read_person_v3(
   data: Query<GetPersonDetailsV3>,
   context: ApubData<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<GetPersonDetailsResponseV3>> {
   let GetPersonDetailsV3 {
     person_id,
@@ -684,9 +720,14 @@ pub(crate) async fn read_person_v3(
     person_id: person_id.map(|id| PersonId(id.0)),
     username: username.clone(),
   };
-  let res = read_person(Query(data), context.clone(), local_user_view.clone())
-    .await?
-    .0;
+  let res = read_person(
+    Query(data),
+    context.clone(),
+    local_user_view.clone(),
+    tenant.clone(),
+  )
+  .await?
+  .0;
   let content = list_person_content(
     Query(ListPersonContent {
       type_: None,
@@ -699,6 +740,7 @@ pub(crate) async fn read_person_v3(
     }),
     context,
     local_user_view,
+    tenant,
   )
   .await?
   .0;
@@ -762,8 +804,9 @@ pub(crate) async fn update_post_v3(
   data: Json<EditPost>,
   context: ApubData<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PostResponseV3>> {
-  let res = Box::pin(edit_post(data, context, local_user_view)).await?;
+  let res = Box::pin(edit_post(data, context, local_user_view, tenant)).await?;
   convert_post_response(res)
 }
 pub(crate) async fn delete_comment_v3(
@@ -778,14 +821,16 @@ pub(crate) async fn update_comment_v3(
   data: Json<EditComment>,
   context: ApubData<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommentResponseV3>> {
-  let res = Box::pin(edit_comment(data, context, local_user_view)).await?;
+  let res = Box::pin(edit_comment(data, context, local_user_view, tenant)).await?;
   convert_comment_response(res)
 }
 pub(crate) async fn list_communities_v3(
   Query(data): Query<ListCommunitiesV3>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<ListCommunitiesResponseV3>> {
   let ListCommunitiesV3 {
     type_,
@@ -806,7 +851,7 @@ pub(crate) async fn list_communities_v3(
     search_term: None,
     search_title_only: None,
   };
-  let res = list_communities(Query(data), context, local_user_view)
+  let res = list_communities(Query(data), context, local_user_view, tenant)
     .await?
     .0;
   Ok(Json(ListCommunitiesResponseV3 {
@@ -818,8 +863,9 @@ pub(crate) async fn register_v3(
   data: Json<Register>,
   req: HttpRequest,
   context: ApubData<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<LoginResponseV3>> {
-  let res = Box::pin(register(data, req, context)).await?.0;
+  let res = Box::pin(register(data, req, context, tenant)).await?.0;
   convert_login_response(res)
 }
 
@@ -840,6 +886,7 @@ pub(crate) async fn create_community_v3(
   Json(data): Json<CreateCommunityV3>,
   context: ApubData<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommunityResponseV3>> {
   let CreateCommunityV3 {
     name,
@@ -857,7 +904,13 @@ pub(crate) async fn create_community_v3(
     posting_restricted_to_mods,
     ..Default::default()
   };
-  let res = Box::pin(create_community(Json(data), context, local_user_view)).await?;
+  let res = Box::pin(create_community(
+    Json(data),
+    context,
+    local_user_view,
+    tenant,
+  ))
+  .await?;
   convert_community_response(res)
 }
 
@@ -1030,6 +1083,7 @@ pub(crate) async fn mark_post_as_read_v3(
   Json(data): Json<MarkPostAsReadV3>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PostResponseV3>> {
   let post_ids: Vec<PostId> = data.post_ids.iter().map(|id| PostId(id.0)).collect();
   PostActions::mark_as_read(&mut context.pool(), local_user_view.person.id, &post_ids).await?;
@@ -1038,7 +1092,7 @@ pub(crate) async fn mark_post_as_read_v3(
     id: Some(last),
     comment_id: None,
   };
-  let post = get_post(Query(form), context, Some(local_user_view.clone())).await?;
+  let post = get_post(Query(form), context, Some(local_user_view.clone()), tenant).await?;
   Ok(Json(PostResponseV3 {
     post_view: convert_post_view(post.0.post_view),
   }))

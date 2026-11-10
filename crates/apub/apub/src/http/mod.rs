@@ -20,6 +20,7 @@ use lemmy_db_schema::source::{
   activity::{ReceivedActivity, SentActivity},
   community::Community,
   instance::Instance,
+  local_site::LocalSite,
 };
 use lemmy_db_schema_file::{InstanceId, enums::CommunityVisibility};
 use lemmy_db_views_community_follower_approval::PendingFollowerView;
@@ -62,6 +63,35 @@ pub async fn shared_inbox(
 
 struct Dummy;
 
+fn is_other_local_host(url: &Url, active_host: &str, local_hosts: &[String]) -> bool {
+  url.host_str().is_some_and(|host| {
+    !host.eq_ignore_ascii_case(active_host)
+      && local_hosts
+        .iter()
+        .any(|local| local.eq_ignore_ascii_case(host))
+  })
+}
+
+fn addresses_only_other_local_site(
+  recipients: &[Url],
+  active_host: &str,
+  local_hosts: &[String],
+) -> bool {
+  let local_recipients = recipients
+    .iter()
+    .filter_map(|url| url.host_str())
+    .filter(|host| {
+      local_hosts
+        .iter()
+        .any(|local| local.eq_ignore_ascii_case(host))
+    })
+    .collect::<Vec<_>>();
+  !local_recipients.is_empty()
+    && !local_recipients
+      .iter()
+      .any(|host| host.eq_ignore_ascii_case(active_host))
+}
+
 impl ReceiveActivityHook<SharedInboxActivities, UserOrCommunity, LemmyContext> for Dummy {
   async fn hook(
     self,
@@ -69,6 +99,15 @@ impl ReceiveActivityHook<SharedInboxActivities, UserOrCommunity, LemmyContext> f
     actor: &UserOrCommunity,
     context: &Data<LemmyContext>,
   ) -> LemmyResult<()> {
+    let active_host = context.hostname();
+    let local_hosts = LocalSite::list_hostnames(&mut context.pool()).await?;
+    if is_other_local_host(activity.id(), active_host, &local_hosts)
+      || is_other_local_host(activity.actor(), active_host, &local_hosts)
+      || addresses_only_other_local_site(&activity.recipients(), active_host, &local_hosts)
+    {
+      return Err(LemmyErrorType::NotFound.into());
+    }
+
     // Mark instance as alive
     // HTTP signature has already been verified at this point, so the
     // sending instance is authenticated and evidently online.
@@ -83,7 +122,12 @@ impl ReceiveActivityHook<SharedInboxActivities, UserOrCommunity, LemmyContext> f
     // Store received activities in the database. This ensures that the same activity doesn't get
     // received and processed more than once, which would be a waste of resources.
     debug!("Received activity {}", activity.id().to_string());
-    ReceivedActivity::create(&mut context.pool(), &activity.id().clone().into()).await?;
+    ReceivedActivity::create(
+      &mut context.pool(),
+      context.site_view()?.local_site.id,
+      &activity.id().clone().into(),
+    )
+    .await?;
 
     // This could also take the actor as param, but lifetimes and serde derives are tricky.
     // It is really a before hook, but doesnt allow modifying the data. It could use a
@@ -125,12 +169,10 @@ async fn get_activity(
   info: web::Path<ActivityQuery>,
   context: Data<LemmyContext>,
 ) -> LemmyResult<HttpResponse> {
-  let settings = context.settings();
+  let hostname = context.protocol_and_hostname();
   let activity_id = Url::parse(&format!(
     "{}/activities/{}/{}",
-    settings.get_protocol_and_hostname(),
-    info.type_,
-    info.id
+    hostname, info.type_, info.id
   ))?
   .into();
   let activity = SentActivity::read_from_apub_id(&mut context.pool(), &activity_id).await?;
@@ -197,5 +239,49 @@ pub(in crate::http) fn get_instance_id(s: &SiteOrMultiOrCommunityOrUser) -> Inst
     Left(Right(m)) => m.instance_id,
     Right(Left(u)) => u.instance_id,
     Right(Right(c)) => c.instance_id,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{addresses_only_other_local_site, is_other_local_host};
+  use url::Url;
+
+  fn hosts() -> Vec<String> {
+    vec!["a.example".to_string(), "b.example".to_string()]
+  }
+
+  #[test]
+  fn detects_other_local_host() {
+    assert!(is_other_local_host(
+      &Url::parse("https://b.example/actors/alice").unwrap(),
+      "a.example",
+      &hosts()
+    ));
+    assert!(!is_other_local_host(
+      &Url::parse("https://a.example/actors/alice").unwrap(),
+      "a.example",
+      &hosts()
+    ));
+  }
+
+  #[test]
+  fn rejects_activity_only_addressed_to_other_site() {
+    let recipients = vec![Url::parse("https://b.example/actors/alice").unwrap()];
+    assert!(addresses_only_other_local_site(
+      &recipients,
+      "a.example",
+      &hosts()
+    ));
+
+    let recipients = vec![
+      Url::parse("https://b.example/actors/alice").unwrap(),
+      Url::parse("https://a.example/actors/bob").unwrap(),
+    ];
+    assert!(!addresses_only_other_local_site(
+      &recipients,
+      "a.example",
+      &hosts()
+    ));
   }
 }

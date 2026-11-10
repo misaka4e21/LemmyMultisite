@@ -1,5 +1,6 @@
 use crate::{
   diesel::{DecoratableTarget, OptionalExtension},
+  impls::presence::{default_local_site_id, ensure_comment_site, set_comment_site_removed},
   source::comment::{
     Comment,
     CommentActions,
@@ -26,7 +27,7 @@ use diesel_uplete::{UpleteCount, uplete};
 use lemmy_db_schema_file::{
   InstanceId,
   PersonId,
-  newtypes::{CommentId, CommunityId, PostId},
+  newtypes::{CommentId, CommunityId, LocalSiteId, PostId},
   schema::{comment, comment_actions, community, post},
 };
 use lemmy_diesel_utils::{
@@ -35,10 +36,7 @@ use lemmy_diesel_utils::{
   traits::Crud,
   utils::functions::{coalesce, hot_rank},
 };
-use lemmy_utils::{
-  error::{LemmyErrorExt, LemmyErrorType, LemmyResult, UntranslatedError},
-  settings::structs::Settings,
-};
+use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult, UntranslatedError};
 use url::Url;
 
 impl Comment {
@@ -163,7 +161,17 @@ impl Comment {
     comment_form: &CommentInsertForm,
     parent_path: Option<&Ltree>,
   ) -> LemmyResult<Comment> {
-    Self::upsert_apub(pool, None, comment_form, parent_path).await
+    let comment = Self::upsert_apub(pool, None, comment_form, parent_path).await?;
+    if comment_form.local.unwrap_or(comment_form.ap_id.is_none()) {
+      let local_site_id = match comment_form.origin_local_site_id {
+        Some(local_site_id) => Some(local_site_id),
+        None => default_local_site_id(pool).await?,
+      };
+      if let Some(local_site_id) = local_site_id {
+        ensure_comment_site(pool, local_site_id, comment.id).await?;
+      }
+    }
+    Ok(comment)
   }
 
   pub async fn upsert_apub(
@@ -226,9 +234,11 @@ impl Comment {
       .await
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
-  pub fn local_url(&self, settings: &Settings) -> LemmyResult<Url> {
-    let domain = settings.get_protocol_and_hostname();
-    Ok(Url::parse(&format!("{domain}/comment/{}", self.id))?)
+  pub fn local_url(&self, protocol_and_hostname: &str) -> LemmyResult<Url> {
+    Ok(Url::parse(&format!(
+      "{protocol_and_hostname}/comment/{}",
+      self.id
+    ))?)
   }
 
   /// The comment was created locally and sent back, indicating that the community accepted it
@@ -269,6 +279,26 @@ impl Comment {
     Self::update_comment_and_children(pool, comment_path, &form).await
   }
 
+  /// Update removal state for a comment tree, writing origin comments to the canonical row and
+  /// comments from other sites to the active site's presence row only.
+  pub async fn update_removed_for_comment_and_children_split(
+    pool: &mut DbPool<'_>,
+    comment_path: &Ltree,
+    local_site_id: LocalSiteId,
+    removed: bool,
+  ) -> LemmyResult<Vec<Self>> {
+    let comments = {
+      let conn = &mut get_conn(pool).await?;
+      comment::table
+        .filter(comment::path.contained_by(comment_path))
+        .select(Self::as_select())
+        .load::<Self>(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::NotFound)?
+    };
+    update_removed_split(pool, comments, local_site_id, removed).await
+  }
+
   /// A helper function to update comment and all its children.
   ///
   /// Don't expose so as to make sure you aren't overwriting data.
@@ -304,6 +334,25 @@ impl Comment {
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
+  /// Update removal state for all comments under a post, keeping remote comments shared.
+  pub async fn update_removed_for_post_split(
+    pool: &mut DbPool<'_>,
+    post_id: PostId,
+    local_site_id: LocalSiteId,
+    removed: bool,
+  ) -> LemmyResult<Vec<Self>> {
+    let comments = {
+      let conn = &mut get_conn(pool).await?;
+      comment::table
+        .filter(comment::post_id.eq(post_id))
+        .select(Self::as_select())
+        .load::<Self>(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::NotFound)?
+    };
+    update_removed_split(pool, comments, local_site_id, removed).await
+  }
+
   pub async fn read_ap_ids_for_post(
     post_id: PostId,
     pool: &mut DbPool<'_>,
@@ -320,6 +369,29 @@ impl Comment {
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)
   }
+}
+
+async fn update_removed_split(
+  pool: &mut DbPool<'_>,
+  comments: Vec<Comment>,
+  local_site_id: LocalSiteId,
+  removed: bool,
+) -> LemmyResult<Vec<Comment>> {
+  let mut updated = Vec::with_capacity(comments.len());
+  for comment in comments {
+    if comment.origin_local_site_id == Some(local_site_id) {
+      let form = CommentUpdateForm {
+        removed: Some(removed),
+        updated_at: Some(Some(Utc::now())),
+        ..Default::default()
+      };
+      updated.push(Comment::update(pool, comment.id, &form).await?);
+    } else {
+      set_comment_site_removed(pool, local_site_id, comment.id, removed).await?;
+      updated.push(comment);
+    }
+  }
+  Ok(updated)
 }
 
 impl Crud for Comment {
@@ -512,6 +584,7 @@ mod tests {
       distinguished: false,
       local: true,
       language_id: LanguageId::default(),
+      origin_local_site_id: None,
       child_count: 1,
       controversy_rank: 0.0,
       downvotes: 0,

@@ -31,13 +31,15 @@ use lemmy_api_utils::{
   plugins::{plugin_hook_after, plugin_hook_before},
   utils::{get_url_blocklist, process_markdown, slur_regex},
 };
-use lemmy_db_schema::source::{
-  comment::{Comment, CommentInsertForm, CommentUpdateForm},
-  community::Community,
-  person::Person,
-  post::Post,
+use lemmy_db_schema::{
+  impls::presence::ensure_comment_site,
+  source::{
+    comment::{Comment, CommentInsertForm, CommentUpdateForm},
+    community::Community,
+    person::Person,
+    post::Post,
+  },
 };
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::{
   error::{LemmyError, LemmyResult, UntranslatedError},
@@ -202,7 +204,7 @@ impl Object for ApubComment {
 
     let slur_regex = slur_regex(context).await?;
     let url_blocklist = get_url_blocklist(context).await?;
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = context.site_view()?.local_site.clone();
 
     let content = append_attachments_to_comment(content, &note.attachment, context).await?;
     let content =
@@ -228,6 +230,7 @@ impl Object for ApubComment {
       language_id,
       federation_pending: Some(false),
       locked: None,
+      origin_local_site_id: None,
     };
     form = plugin_hook_before("federated_comment_before_receive", form).await?;
     let parent_comment_path = parent_comment.map(|t| t.0.path);
@@ -237,6 +240,12 @@ impl Object for ApubComment {
       Some(timestamp),
       &form,
       parent_comment_path.as_ref(),
+    )
+    .await?;
+    ensure_comment_site(
+      &mut context.pool(),
+      context.site_view()?.local_site.id,
+      comment.id,
     )
     .await?;
     plugin_hook_after("federated_comment_after_receive", &comment);

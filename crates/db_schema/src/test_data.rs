@@ -25,7 +25,7 @@ impl TestData {
     let system_acct =
       Person::create(pool, &PersonInsertForm::test_form(instance.id, "langs")).await?;
     let local_site_form = LocalSiteInsertForm {
-      ..LocalSiteInsertForm::new(site.id, system_acct.id)
+      ..LocalSiteInsertForm::new(site.id, system_acct.id, instance.domain.clone())
     };
     let local_site = LocalSite::create(pool, &local_site_form).await?;
     LocalSiteRateLimit::create(pool, &LocalSiteRateLimitInsertForm::new(local_site.id)).await?;

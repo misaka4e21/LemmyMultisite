@@ -42,6 +42,7 @@ pub async fn build_community_response(
     community_id,
     Some(&local_user),
     is_mod_or_admin,
+    local_user.local_site_id,
   )
   .await?;
   let discussion_languages = CommunityLanguage::read(&mut context.pool(), community_id).await?;

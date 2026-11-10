@@ -2,6 +2,7 @@ use activitypub_federation::config::Data;
 use actix_web::web::Json;
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{check_community_mod_of_any_or_admin_action, is_admin},
 };
 use lemmy_db_views_community_follower_approval::PendingFollowerView;
@@ -9,12 +10,13 @@ use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_notification::NotificationView;
 use lemmy_db_views_registration_applications::RegistrationApplicationView;
 use lemmy_db_views_report_combined::ReportCombinedViewInternal;
-use lemmy_db_views_site::{SiteView, api::UnreadCountsResponse};
+use lemmy_db_views_site::api::UnreadCountsResponse;
 use lemmy_utils::error::LemmyResult;
 
 pub async fn get_unread_counts(
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<UnreadCountsResponse>> {
   let person = &local_user_view.person;
   let show_bot_accounts = local_user_view.local_user.show_bot_accounts;
@@ -41,11 +43,15 @@ pub async fn get_unread_counts(
 
   // Admins also get the number of unread registration applications.
   let registration_application_count = if is_admin(&local_user_view).is_ok() {
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = tenant.local_site();
     let verified_email_only = local_site.email_verification_required;
     Some(
-      RegistrationApplicationView::get_unread_count(&mut context.pool(), verified_email_only)
-        .await?,
+      RegistrationApplicationView::get_unread_count(
+        &mut context.pool(),
+        local_site.id,
+        verified_email_only,
+      )
+      .await?,
     )
   } else {
     None

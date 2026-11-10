@@ -327,6 +327,7 @@ pub type Person1AliasAllColumnsTuple = (
   AliasedField<aliases::Person1, person::post_score>,
   AliasedField<aliases::Person1, person::comment_count>,
   AliasedField<aliases::Person1, person::comment_score>,
+  AliasedField<aliases::Person1, person::origin_local_site_id>,
 );
 
 #[cfg(feature = "full")]
@@ -354,6 +355,7 @@ pub type Person2AliasAllColumnsTuple = (
   AliasedField<aliases::Person2, person::post_score>,
   AliasedField<aliases::Person2, person::comment_count>,
   AliasedField<aliases::Person2, person::comment_score>,
+  AliasedField<aliases::Person2, person::origin_local_site_id>,
 );
 
 #[cfg(feature = "full")]

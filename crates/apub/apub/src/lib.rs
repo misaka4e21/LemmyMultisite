@@ -3,13 +3,14 @@ use async_trait::async_trait;
 use chrono::{Days, Utc};
 use lemmy_api_utils::context::LemmyContext;
 use lemmy_apub_objects::utils::functions::{check_apub_id_valid, local_site_data_cached};
-use lemmy_db_views_site::SiteView;
+use lemmy_db_schema_file::newtypes::LocalSiteId;
 use lemmy_diesel_utils::connection::ActualDbPool;
 use lemmy_utils::error::{LemmyError, LemmyErrorType, LemmyResult, UntranslatedError};
 use url::Url;
 
 pub mod collections;
 pub mod http;
+pub mod internal;
 pub mod protocol;
 
 /// Maximum number of outgoing HTTP requests to fetch a single object. Needs to be high enough
@@ -17,13 +18,13 @@ pub mod protocol;
 pub const FEDERATION_HTTP_FETCH_LIMIT: u32 = 100;
 
 #[derive(Clone)]
-pub struct VerifyUrlData(pub ActualDbPool);
+pub struct VerifyUrlData(pub ActualDbPool, pub LocalSiteId);
 
 #[async_trait]
 impl UrlVerifier for VerifyUrlData {
   async fn verify(&self, url: &Url) -> Result<(), ActivityPubError> {
     use UntranslatedError::*;
-    let local_site_data = local_site_data_cached(&mut (&self.0).into())
+    let local_site_data = local_site_data_cached(&mut (&self.0).into(), self.1)
       .await
       .map_err(|e| ActivityPubError::Other(format!("Cant read local site data: {e}")))?;
 
@@ -49,6 +50,6 @@ impl UrlVerifier for VerifyUrlData {
 /// Returns true if the local instance was created in the last 24 hours. In this case Lemmy should
 /// fetch less data over federation, because the setup task fetches a lot of communities.
 async fn is_new_instance(context: &LemmyContext) -> LemmyResult<bool> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = context.site_view()?.local_site.clone();
   Ok(local_site.published_at - Days::new(1) < Utc::now())
 }

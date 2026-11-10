@@ -5,6 +5,7 @@ use diesel::{
   PgTextExpressionMethods,
   QueryDsl,
   SelectableHelper,
+  dsl::{exists, not},
 };
 use diesel_async::RunQueryDsl;
 use i_love_jesus::asc_if;
@@ -31,14 +32,16 @@ use lemmy_db_schema_file::{
     my_local_user_admin_join,
     my_multi_community_follower_join,
   },
-  newtypes::{CommunityId, MultiCommunityId},
+  newtypes::{CommunityId, LocalSiteId, MultiCommunityId},
   schema::{
     community,
     community_actions,
+    community_site,
     instance_actions,
     multi_community,
     multi_community_entry,
     multi_community_follow,
+    multi_community_site,
     person,
   },
 };
@@ -75,9 +78,15 @@ impl CommunityView {
     community_id: CommunityId,
     my_local_user: Option<&'_ LocalUser>,
     is_mod_or_admin: bool,
+    local_site_id: LocalSiteId,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     let mut query = Self::joins(my_local_user.person_id())
+      .filter(exists(
+        community_site::table
+          .filter(community_site::community_id.eq(community::id))
+          .filter(community_site::local_site_id.eq(local_site_id)),
+      ))
       .filter(community::id.eq(community_id))
       .select(Self::as_select())
       .into_boxed();
@@ -87,13 +96,28 @@ impl CommunityView {
 
     // Hide deleted and removed for non-admins or mods
     if !is_mod_or_admin {
-      query = query.filter(Community::hide_removed_and_deleted());
+      query = query
+        .filter(Community::hide_removed_and_deleted())
+        .filter(not(exists(
+          community_site::table
+            .filter(community_site::community_id.eq(community::id))
+            .filter(community_site::local_site_id.eq(local_site_id))
+            .filter(community_site::removed.eq(true)),
+        )));
     }
 
-    query
+    let mut view = query
       .first(conn)
       .await
-      .with_lemmy_type(LemmyErrorType::NotFound)
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    let site_removed = community_site::table
+      .filter(community_site::community_id.eq(community_id))
+      .filter(community_site::local_site_id.eq(local_site_id))
+      .select(community_site::removed)
+      .first::<bool>(conn)
+      .await?;
+    view.community.removed |= site_removed;
+    Ok(view)
   }
 }
 
@@ -137,6 +161,11 @@ impl CommunityQuery<'_> {
     let limit = limit_fetch(self.limit, None)?;
 
     let mut query = CommunityView::joins(self.local_user.person_id())
+      .filter(exists(
+        community_site::table
+          .filter(community_site::community_id.eq(community::id))
+          .filter(community_site::local_site_id.eq(local_site.id)),
+      ))
       .select(CommunityView::as_select())
       .limit(limit)
       .into_boxed();
@@ -144,7 +173,14 @@ impl CommunityQuery<'_> {
     // Hide deleted and removed for non-admins
     let is_admin = self.local_user.map(|l| l.admin).unwrap_or_default();
     if !is_admin {
-      query = query.filter(Community::hide_removed_and_deleted());
+      query = query
+        .filter(Community::hide_removed_and_deleted())
+        .filter(not(exists(
+          community_site::table
+            .filter(community_site::community_id.eq(community::id))
+            .filter(community_site::local_site_id.eq(local_site.id))
+            .filter(community_site::removed.eq(true)),
+        )));
     }
     if self.local_user.is_none() {
       query = query.filter(community::visibility.ne(CommunityVisibility::LocalOnlyPrivate));
@@ -239,10 +275,21 @@ impl CommunityQuery<'_> {
     pq = pq.then_order_by(key::id);
 
     let conn = &mut get_conn(pool).await?;
-    let res = pq
+    let mut res = pq
       .load::<CommunityView>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)?;
+    let locally_removed: Vec<CommunityId> = community_site::table
+      .filter(community_site::local_site_id.eq(local_site.id))
+      .filter(community_site::removed.eq(true))
+      .select(community_site::community_id)
+      .load(conn)
+      .await?;
+    for community_view in &mut res {
+      if locally_removed.contains(&community_view.community.id) {
+        community_view.community.removed = true;
+      }
+    }
     paginate_response(res, limit, self.page_cursor)
   }
 }
@@ -263,10 +310,16 @@ impl MultiCommunityView {
     pool: &mut DbPool<'_>,
     id: MultiCommunityId,
     my_person_id: Option<PersonId>,
+    local_site_id: LocalSiteId,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
 
     Self::joins(my_person_id)
+      .filter(exists(
+        multi_community_site::table
+          .filter(multi_community_site::multi_community_id.eq(multi_community::id))
+          .filter(multi_community_site::local_site_id.eq(local_site_id)),
+      ))
       .filter(multi_community::id.eq(id))
       .select(Self::as_select())
       .first(conn)
@@ -304,11 +357,20 @@ pub struct MultiCommunityQuery<'a> {
 }
 
 impl MultiCommunityQuery<'_> {
-  pub async fn list(self, pool: &mut DbPool<'_>) -> LemmyResult<PagedResponse<MultiCommunityView>> {
+  pub async fn list(
+    self,
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<PagedResponse<MultiCommunityView>> {
     use lemmy_db_schema::{MultiCommunityListingType::*, MultiCommunitySortType::*};
 
     let limit = limit_fetch(self.limit, self.no_limit)?;
     let mut query = MultiCommunityView::joins(self.local_user.person_id())
+      .filter(exists(
+        multi_community_site::table
+          .filter(multi_community_site::multi_community_id.eq(multi_community::id))
+          .filter(multi_community_site::local_site_id.eq(local_site_id)),
+      ))
       .select(MultiCommunityView::as_select())
       .limit(limit)
       .into_boxed();
@@ -438,6 +500,14 @@ mod tests {
   async fn init_data(pool: &mut DbPool<'_>) -> LemmyResult<Data> {
     let instance = Instance::read_or_create(pool, "my_domain.tld").await?;
 
+    let site_form = SiteUpsertForm::new("test site".to_string(), instance.id);
+    let site = Site::create(pool, &site_form).await?;
+    let system_acct =
+      Person::create(pool, &PersonInsertForm::test_form(instance.id, "langs")).await?;
+    let local_site_form =
+      LocalSiteInsertForm::new(site.id, system_acct.id, instance.domain.clone());
+    let local_site = LocalSite::create(pool, &local_site_form).await?;
+
     let person_name = "tegan".to_string();
 
     let new_person = PersonInsertForm::test_form(instance.id, &person_name);
@@ -495,13 +565,6 @@ mod tests {
       .await?,
     ];
 
-    let site_form = SiteUpsertForm::new("test site".to_string(), instance.id);
-    let site = Site::create(pool, &site_form).await?;
-    let system_acct =
-      Person::create(pool, &PersonInsertForm::test_form(instance.id, "langs")).await?;
-    let local_site_form = LocalSiteInsertForm::new(site.id, system_acct.id);
-    let local_site = LocalSite::create(pool, &local_site_form).await?;
-
     Ok(Data {
       instance,
       local_user,
@@ -532,11 +595,18 @@ mod tests {
     let data = init_data(pool).await?;
     let community = &data.communities[0];
 
-    let unauthenticated = CommunityView::read(pool, community.id, None, false).await?;
+    let unauthenticated =
+      CommunityView::read(pool, community.id, None, false, data.local_site.id).await?;
     assert!(unauthenticated.community_actions.is_none());
 
-    let authenticated =
-      CommunityView::read(pool, community.id, Some(&data.local_user), false).await?;
+    let authenticated = CommunityView::read(
+      pool,
+      community.id,
+      Some(&data.local_user),
+      false,
+      data.local_site.id,
+    )
+    .await?;
     assert!(authenticated.community_actions.is_none());
 
     let form = CommunityFollowerForm::new(
@@ -546,8 +616,14 @@ mod tests {
     );
     CommunityActions::follow(pool, &form).await?;
 
-    let with_pending_follow =
-      CommunityView::read(pool, community.id, Some(&data.local_user), false).await?;
+    let with_pending_follow = CommunityView::read(
+      pool,
+      community.id,
+      Some(&data.local_user),
+      false,
+      data.local_site.id,
+    )
+    .await?;
     assert!(
       with_pending_follow
         .community_actions
@@ -571,8 +647,14 @@ mod tests {
     );
     CommunityActions::follow(pool, &form).await?;
 
-    let with_approval_required_follow =
-      CommunityView::read(pool, community.id, Some(&data.local_user), false).await?;
+    let with_approval_required_follow = CommunityView::read(
+      pool,
+      community.id,
+      Some(&data.local_user),
+      false,
+      data.local_site.id,
+    )
+    .await?;
     assert!(
       with_approval_required_follow
         .community_actions
@@ -585,8 +667,14 @@ mod tests {
       CommunityFollowerState::Accepted,
     );
     CommunityActions::follow(pool, &form).await?;
-    let with_accepted_follow =
-      CommunityView::read(pool, community.id, Some(&data.local_user), false).await?;
+    let with_accepted_follow = CommunityView::read(
+      pool,
+      community.id,
+      Some(&data.local_user),
+      false,
+      data.local_site.id,
+    )
+    .await?;
     assert!(
       with_accepted_follow
         .community_actions
@@ -630,12 +718,24 @@ mod tests {
     .await?;
     assert_eq!(data.communities.len(), authenticated_query.len());
 
-    let unauthenticated_community =
-      CommunityView::read(pool, data.communities[0].id, None, false).await;
+    let unauthenticated_community = CommunityView::read(
+      pool,
+      data.communities[0].id,
+      None,
+      false,
+      data.local_site.id,
+    )
+    .await;
     assert!(unauthenticated_community.is_err());
 
-    let authenticated_community =
-      CommunityView::read(pool, data.communities[0].id, Some(&data.local_user), false).await;
+    let authenticated_community = CommunityView::read(
+      pool,
+      data.communities[0].id,
+      Some(&data.local_user),
+      false,
+      data.local_site.id,
+    )
+    .await;
     assert!(authenticated_community.is_ok());
 
     cleanup(data, pool).await
@@ -727,7 +827,7 @@ mod tests {
 
     // list all multis
     let list_all = MultiCommunityQuery::default()
-      .list(pool)
+      .list(pool, data.local_site.id)
       .await?
       .iter()
       .map(|m| m.multi.id)
@@ -741,7 +841,7 @@ mod tests {
       local_user: Some(&data.local_user),
       ..Default::default()
     }
-    .list(pool)
+    .list(pool, data.local_site.id)
     .await?;
     assert_eq!(list_owner.len(), 1);
     assert_eq!(list_owner[0].multi.id, data.multi_1.id);
@@ -761,7 +861,7 @@ mod tests {
       listing_type: Some(MultiCommunityListingType::Subscribed),
       ..Default::default()
     }
-    .list(pool)
+    .list(pool, data.local_site.id)
     .await?;
     assert_eq!(list_followed.len(), 1);
     assert_eq!(list_followed[0].multi.id, data.multi_2.id);
@@ -778,7 +878,7 @@ mod tests {
       listing_type: Some(MultiCommunityListingType::Subscribed),
       ..Default::default()
     }
-    .list(pool)
+    .list(pool, data.local_site.id)
     .await?;
     assert_eq!(list_followed.len(), 0);
 
@@ -851,7 +951,7 @@ mod tests {
       search_term: Some("multi1".into()),
       ..Default::default()
     }
-    .list(pool)
+    .list(pool, data.local_site.id)
     .await?;
 
     assert_length!(1, search_by_name);

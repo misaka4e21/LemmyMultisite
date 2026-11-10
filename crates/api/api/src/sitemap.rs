@@ -4,9 +4,12 @@ use actix_web::{
   web::Data,
 };
 use jiff_chrono_conversions::TryToJiff;
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_db_schema::source::post::Post;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::dburl::DbUrl;
 use lemmy_utils::error::LemmyResult;
 use sitemap_rs::{url::Url, url_set::UrlSet};
@@ -29,12 +32,15 @@ fn generate_urlset(posts: Vec<(DbUrl, chrono::DateTime<chrono::Utc>)>) -> LemmyR
   Ok(UrlSet::new(urls)?)
 }
 
-pub async fn get_sitemap(context: Data<LemmyContext>) -> LemmyResult<HttpResponse> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+pub async fn get_sitemap(
+  context: Data<LemmyContext>,
+  tenant: TenantContext,
+) -> LemmyResult<HttpResponse> {
+  let local_site = tenant.local_site().clone();
   check_private_instance(&None, &local_site)?;
 
   info!("Generating sitemap...",);
-  let posts = Post::list_for_sitemap(&mut context.pool()).await?;
+  let posts = Post::list_for_sitemap(&mut context.pool(), local_site.id).await?;
   info!("Loaded latest {} posts", posts.len());
 
   let mut buf = Vec::<u8>::new();

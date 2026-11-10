@@ -12,8 +12,10 @@ use crate::{
 };
 use chrono::Utc;
 use diesel::{
+  BoolExpressionMethods,
   ExpressionMethods,
   IntoSql,
+  JoinOnDsl,
   NullableExpressionMethods,
   OptionalExtension,
   QueryDsl,
@@ -67,6 +69,34 @@ fn is_dead_expr() -> _ {
 }
 
 impl Instance {
+  pub async fn allowlist_for_site(
+    pool: &mut DbPool<'_>,
+    local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
+  ) -> LemmyResult<Vec<Self>> {
+    let conn = &mut get_conn(pool).await?;
+    instance::table
+      .inner_join(federation_allowlist::table)
+      .filter(federation_allowlist::local_site_id.eq(local_site_id))
+      .select(Self::as_select())
+      .get_results(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)
+  }
+
+  pub async fn blocklist_for_site(
+    pool: &mut DbPool<'_>,
+    local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
+  ) -> LemmyResult<Vec<Self>> {
+    let conn = &mut get_conn(pool).await?;
+    instance::table
+      .inner_join(federation_blocklist::table)
+      .filter(federation_blocklist::local_site_id.eq(local_site_id))
+      .select(Self::as_select())
+      .get_results(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)
+  }
+
   /// Attempt to read Instance column for the given domain. If it doesn't exist, insert a new one.
   /// There is no need for update as the domain of an existing instance cant change.
   pub async fn read_or_create(pool: &mut DbPool<'_>, domain_: &str) -> LemmyResult<Self> {
@@ -177,17 +207,25 @@ impl Instance {
   /// and dead or not ordered by id
   pub async fn read_federated_with_blocked_and_dead(
     pool: &mut DbPool<'_>,
+    local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
   ) -> LemmyResult<Vec<(Self, bool, bool)>> {
     let conn = &mut get_conn(pool).await?;
     // this needs to be done in two steps because the meaning of the "blocked" column depends on the
     // existence of any value at all in the allowlist. (so a normal join wouldn't work)
     let use_allowlist = federation_allowlist::table
+      .filter(federation_allowlist::local_site_id.eq(local_site_id))
       .select(count_star().gt(0))
       .get_result::<bool>(conn)
       .await?;
     if use_allowlist {
       instance::table
-        .left_join(federation_allowlist::table)
+        .left_join(
+          federation_allowlist::table.on(
+            federation_allowlist::instance_id
+              .eq(instance::id)
+              .and(federation_allowlist::local_site_id.eq(local_site_id)),
+          ),
+        )
         .select((
           Self::as_select(),
           federation_allowlist::instance_id.nullable().is_not_null(),
@@ -199,7 +237,13 @@ impl Instance {
         .with_lemmy_type(LemmyErrorType::NotFound)
     } else {
       instance::table
-        .left_join(federation_blocklist::table)
+        .left_join(
+          federation_blocklist::table.on(
+            federation_blocklist::instance_id
+              .eq(instance::id)
+              .and(federation_blocklist::local_site_id.eq(local_site_id)),
+          ),
+        )
         .select((
           Self::as_select(),
           federation_blocklist::instance_id.nullable().is_null(),

@@ -84,7 +84,8 @@ impl Collection for ApubFeedCollection {
     // If the multi-comm has no local followers its ignored.
     // TODO: This means there will be posts missing in multi-comm without local followers.
     if has_local_followers {
-      let system_account = SiteView::read_system_account(&mut context.pool()).await?;
+      let local_site = context.site_view()?.local_site.clone();
+      let system_account = SiteView::read_system_account(&mut context.pool(), &local_site).await?;
       for community in remote_added {
         let form = CommunityFollowerForm::new(
           community.id,

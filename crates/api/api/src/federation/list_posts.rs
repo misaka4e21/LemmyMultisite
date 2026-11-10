@@ -11,7 +11,11 @@ use crate::federation::{
 };
 use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_db_schema::source::{keyword_block::LocalUserKeywordBlock, post::PostActions};
 use lemmy_db_schema_file::newtypes::PostId;
 use lemmy_db_views_local_user::LocalUserView;
@@ -25,10 +29,11 @@ pub async fn list_posts(
   Query(data): Query<GetPosts>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PagedResponse<PostView>>> {
   let SiteView {
     site, local_site, ..
-  } = &SiteView::read_local(&mut context.pool()).await?;
+  } = &tenant.site_view.clone();
 
   check_private_instance(&local_user_view, local_site)?;
 

@@ -21,7 +21,7 @@ use lemmy_db_schema_file::{
   PersonId,
   aliases::creator_home_instance_actions,
   joins::creator_home_instance_actions_join,
-  newtypes::{LocalUserId, OAuthProviderId},
+  newtypes::{LocalSiteId, LocalUserId, OAuthProviderId},
   schema::{instance_actions, local_user, oauth_account, person},
 };
 use lemmy_diesel_utils::{
@@ -82,10 +82,12 @@ impl LocalUserView {
 
   pub async fn find_by_email_or_name(
     pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
     name_or_email: &str,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     Self::joins()
+      .filter(local_user::local_site_id.eq(local_site_id))
       .filter(
         lower(person::name)
           .eq(lower(name_or_email.to_lowercase()))
@@ -97,9 +99,14 @@ impl LocalUserView {
       .with_lemmy_type(LemmyErrorType::IncorrectLogin)
   }
 
-  pub async fn find_by_email(pool: &mut DbPool<'_>, from_email: &str) -> LemmyResult<Self> {
+  pub async fn find_by_email(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    from_email: &str,
+  ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     Self::joins()
+      .filter(local_user::local_site_id.eq(local_site_id))
       .filter(lower(coalesce(local_user::email, "")).eq(from_email.to_lowercase()))
       .select(Self::as_select())
       .first(conn)
@@ -109,12 +116,14 @@ impl LocalUserView {
 
   pub async fn find_by_oauth_id(
     pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
     oauth_provider_id: OAuthProviderId,
     oauth_user_id: &str,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     Self::joins()
       .inner_join(oauth_account::table)
+      .filter(local_user::local_site_id.eq(local_site_id))
       .filter(oauth_account::oauth_provider_id.eq(oauth_provider_id))
       .filter(oauth_account::oauth_user_id.eq(oauth_user_id))
       .select(Self::as_select())
@@ -123,9 +132,13 @@ impl LocalUserView {
       .with_lemmy_type(LemmyErrorType::NotFound)
   }
 
-  pub async fn list_admins_with_emails(pool: &mut DbPool<'_>) -> LemmyResult<Vec<Self>> {
+  pub async fn list_admins_with_emails(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Vec<Self>> {
     let conn = &mut get_conn(pool).await?;
     Self::joins()
+      .filter(local_user::local_site_id.eq(local_site_id))
       .filter(local_user::email.is_not_null())
       .filter(local_user::admin.eq(true))
       .select(Self::as_select())
@@ -160,6 +173,7 @@ impl LocalUserView {
 
 #[derive(Default)]
 pub struct LocalUserQuery {
+  pub local_site_id: LocalSiteId,
   pub banned_only: Option<bool>,
   pub page_cursor: Option<PaginationCursor>,
   pub limit: Option<i64>,
@@ -171,6 +185,7 @@ impl LocalUserQuery {
   pub async fn list(self, pool: &mut DbPool<'_>) -> LemmyResult<PagedResponse<LocalUserView>> {
     let limit = self.limit.unwrap_or(i64::MAX);
     let mut query = LocalUserView::joins()
+      .filter(local_user::local_site_id.eq(self.local_site_id))
       .filter(person::deleted.eq(false))
       .limit(limit)
       .select(LocalUserView::as_select())
@@ -298,6 +313,7 @@ mod tests {
     .await?;
 
     let list = LocalUserQuery {
+      local_site_id: LocalSiteId(1),
       banned_only: Some(true),
       ..Default::default()
     }

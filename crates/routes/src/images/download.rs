@@ -8,11 +8,14 @@ use actix_web::{
   http::{StatusCode, header::CONTENT_DISPOSITION},
   web::{Data, *},
 };
-use lemmy_api_utils::context::LemmyContext;
-use lemmy_db_schema::source::{images::RemoteImage, local_site::LocalSite};
+use lemmy_api_utils::{context::LemmyContext, tenant::TenantContext};
+use lemmy_db_schema::source::{
+  images::RemoteImage,
+  local_site::LocalSite,
+  media::{MediaObject, MediaReference},
+};
 use lemmy_db_views_local_image::api::{ImageGetParams, ImageProxyParams};
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::SiteView;
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use std::str::FromStr;
@@ -25,13 +28,20 @@ pub async fn get_image(
   req: HttpRequest,
   local_user_view: Option<LocalUserView>,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<HttpResponse> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
-  if is_auth_required(local_user_view.as_ref(), &local_site) {
+  let local_site = tenant.local_site();
+  if is_auth_required(local_user_view.as_ref(), local_site) {
     return Ok(HttpResponse::Unauthorized().finish());
   }
 
   let name = filename.into_inner();
+
+  if let Some(media) = MediaObject::read_by_alias(&mut context.pool(), &name).await? {
+    if !MediaReference::exists_for_site(&mut context.pool(), local_site.id, media.id).await? {
+      return Err(LemmyErrorType::NotFound.into());
+    }
+  }
 
   // If there are no query params, the URL is original
   let pictrs_url = context.settings().pictrs()?.url;
@@ -61,9 +71,10 @@ pub async fn image_proxy(
   req: HttpRequest,
   local_user_view: Option<LocalUserView>,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Either<HttpResponse<()>, HttpResponse<BoxBody>>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
-  if is_auth_required(local_user_view.as_ref(), &local_site) {
+  let local_site = tenant.local_site();
+  if is_auth_required(local_user_view.as_ref(), local_site) {
     return Ok(Either::Right(HttpResponse::Unauthorized().finish()));
   }
 
@@ -100,10 +111,10 @@ pub async fn image_proxy(
     format!("{}image/original?proxy={}", pictrs_config.url, encoded_url)
   };
 
-  let proxy_bypass_domains = SiteView::read_local(&mut context.pool())
-    .await?
-    .local_site
+  let proxy_bypass_domains = tenant
+    .local_site()
     .image_proxy_bypass_domains
+    .clone()
     .map(|e| e.split(',').map(ToString::to_string).collect::<Vec<_>>())
     .unwrap_or_default();
 

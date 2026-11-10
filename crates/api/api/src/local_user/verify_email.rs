@@ -1,22 +1,24 @@
 use actix_web::web::{Data, Json};
-use lemmy_api_utils::{context::LemmyContext, utils::check_local_user_banned_or_deleted};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_local_user_banned_or_deleted,
+};
 use lemmy_db_schema::source::{
   email_verification::EmailVerification,
   local_user::{LocalUser, LocalUserUpdateForm},
 };
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::{
-  SiteView,
-  api::{SuccessResponse, VerifyEmail},
-};
+use lemmy_db_views_site::api::{SuccessResponse, VerifyEmail};
 use lemmy_email::{account::send_email_verified_email, admin::send_new_applicant_email_to_admins};
 use lemmy_utils::error::LemmyResult;
 
 pub async fn verify_email(
   Json(data): Json<VerifyEmail>,
   context: Data<LemmyContext>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SuccessResponse>> {
-  let site_view = SiteView::read_local(&mut context.pool()).await?;
+  let site_view = tenant.site_view.clone();
   let token = data.token.clone();
   let verification = EmailVerification::read_for_token(&mut context.pool(), &token).await?;
   let local_user_id = verification.local_user_id;
@@ -44,12 +46,13 @@ pub async fn verify_email(
     send_new_applicant_email_to_admins(
       &local_user_view.person.name,
       &mut context.pool(),
+      &site_view.local_site,
       context.settings(),
     )
     .await?;
   }
 
-  send_email_verified_email(&local_user_view, context.settings())?;
+  send_email_verified_email(&local_user_view, &site_view.local_site, context.settings())?;
 
   Ok(Json(SuccessResponse::default()))
 }

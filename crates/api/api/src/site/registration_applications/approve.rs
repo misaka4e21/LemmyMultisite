@@ -60,19 +60,28 @@ pub async fn approve_registration_application(
   if approved_local_user_view.local_user.email.is_some() {
     // Email sending may fail, but this won't revert the application approval
     if data.approve {
-      send_application_approved_email(&approved_local_user_view, context.settings())?;
+      send_application_approved_email(
+        &approved_local_user_view,
+        &context.site_view()?.local_site,
+        context.settings(),
+      )?;
     } else {
       send_application_denied_email(
         &approved_local_user_view,
         data.deny_reason.clone(),
+        &context.site_view()?.local_site,
         context.settings(),
       )?;
     }
   }
 
   // Read the view
-  let registration_application =
-    RegistrationApplicationView::read(&mut context.pool(), app_id).await?;
+  let registration_application = RegistrationApplicationView::read(
+    &mut context.pool(),
+    local_user_view.local_user.local_site_id,
+    app_id,
+  )
+  .await?;
 
   Ok(Json(RegistrationApplicationResponse {
     registration_application,

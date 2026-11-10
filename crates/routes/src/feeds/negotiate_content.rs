@@ -1,6 +1,7 @@
 use actix_web::{Error, HttpRequest, http::header::*, web};
 use lemmy_api_utils::{
   context::LemmyContext,
+  tenant::TenantContext,
   utils::{local_user_view_from_jwt, read_auth_token},
 };
 use lemmy_email::{translations::Lang, user_language};
@@ -13,7 +14,10 @@ pub(crate) async fn get_lang_or_negotiate(
   let jwt = read_auth_token(req)?;
 
   let lang = if let Some(jwt) = jwt {
-    let local_user_view = local_user_view_from_jwt(&jwt, context, true).await?;
+    let expected_local_site_id =
+      TenantContext::from_request_extensions(req).map(|tenant| tenant.local_site().id);
+    let local_user_view =
+      local_user_view_from_jwt(&jwt, context, true, expected_local_site_id).await?;
     user_language(&local_user_view.local_user)
   } else if req.headers().contains_key(ACCEPT_LANGUAGE) {
     negotiate_lang(req).unwrap_or(Lang::En)

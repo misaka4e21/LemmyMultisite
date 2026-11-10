@@ -1,6 +1,9 @@
 use crate::util::{FederationQueueStateWithDomain, get_latest_activity_id};
 use chrono::Local;
-use lemmy_db_schema_file::{InstanceId, newtypes::ActivityId};
+use lemmy_db_schema_file::{
+  InstanceId,
+  newtypes::{ActivityId, LocalSiteId},
+};
 use lemmy_diesel_utils::connection::{ActualDbPool, DbPool};
 use lemmy_utils::{error::LemmyResult, federate_retry_sleep_duration};
 use std::{collections::HashMap, time::Duration};
@@ -50,7 +53,14 @@ async fn print_stats_with_error(
   pool: &mut DbPool<'_>,
   stats: &HashMap<InstanceId, FederationQueueStateWithDomain>,
 ) -> LemmyResult<()> {
-  let last_id = get_latest_activity_id(pool).await?.unwrap_or(ActivityId(0));
+  let local_site_id = stats
+    .values()
+    .next()
+    .map(|state| state.state.local_site_id)
+    .unwrap_or(LocalSiteId(1));
+  let last_id = get_latest_activity_id(pool, local_site_id)
+    .await?
+    .unwrap_or(ActivityId(0));
 
   // it's expected that the values are a bit out of date, everything < SAVE_STATE_EVERY should be
   // considered up to date

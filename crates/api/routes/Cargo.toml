@@ -23,6 +23,12 @@ default = []
 [dependencies]
 lemmy_api = { workspace = true }
 lemmy_api_crud = { workspace = true }
+lemmy_api_utils = { workspace = true, features = ["full"] }
+lemmy_db_schema = { workspace = true, features = ["full"] }
+lemmy_db_schema_file = { workspace = true }
+lemmy_db_views_site = { workspace = true, features = ["full"] }
 lemmy_utils = { workspace = true }
 lemmy_routes = { workspace = true }
 actix-web = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }

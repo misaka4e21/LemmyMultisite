@@ -5,6 +5,7 @@ use lemmy_api_utils::{
   build_response::build_community_response,
   context::LemmyContext,
   send_activity::{ActivityChannel, SendActivityData},
+  tenant::TenantContext,
   utils::{
     check_community_mod_action,
     check_nsfw_allowed,
@@ -20,7 +21,6 @@ use lemmy_db_schema::source::{
 };
 use lemmy_db_views_community::api::{CommunityResponse, EditCommunity};
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{traits::Crud, utils::diesel_string_update};
 use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
@@ -34,8 +34,9 @@ pub async fn edit_community(
   Json(data): Json<EditCommunity>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<CommunityResponse>> {
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let slur_regex = slur_regex(&context).await?;
   let url_blocklist = get_url_blocklist(&context).await?;

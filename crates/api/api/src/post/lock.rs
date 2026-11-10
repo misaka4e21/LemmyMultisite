@@ -7,9 +7,12 @@ use lemmy_api_utils::{
   send_activity::{ActivityChannel, SendActivityData},
   utils::check_community_mod_action,
 };
-use lemmy_db_schema::source::{
-  modlog::{Modlog, ModlogInsertForm},
-  post::{Post, PostUpdateForm},
+use lemmy_db_schema::{
+  impls::presence::set_post_site_locked,
+  source::{
+    modlog::{Modlog, ModlogInsertForm},
+    post::{Post, PostUpdateForm},
+  },
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_post::{
@@ -47,15 +50,22 @@ pub async fn lock_post(
   // Update the post
   let post_id = data.post_id;
   let locked = data.locked;
-  let post = Post::update(
-    &mut context.pool(),
-    post_id,
-    &PostUpdateForm {
-      locked: Some(locked),
-      ..Default::default()
-    },
-  )
-  .await?;
+  let active_site_id = local_user_view.local_user.local_site_id;
+  let is_origin = orig_post.post.origin_local_site_id == Some(active_site_id);
+  let post = if is_origin {
+    Post::update(
+      &mut context.pool(),
+      post_id,
+      &PostUpdateForm {
+        locked: Some(locked),
+        ..Default::default()
+      },
+    )
+    .await?
+  } else {
+    set_post_site_locked(&mut context.pool(), active_site_id, post_id, locked).await?;
+    orig_post.post.clone()
+  };
 
   // Mod tables
   let form = ModlogInsertForm::mod_lock_post(
@@ -67,15 +77,17 @@ pub async fn lock_post(
   let action = Modlog::create(&mut context.pool(), &[form]).await?;
   notify_mod_action(action.clone(), &context);
 
-  ActivityChannel::submit_activity(
-    SendActivityData::LockPost(
-      post,
-      local_user_view.person.clone(),
-      data.locked,
-      data.reason.clone(),
-    ),
-    &context,
-  )?;
+  if is_origin {
+    ActivityChannel::submit_activity(
+      SendActivityData::LockPost(
+        post,
+        local_user_view.person.clone(),
+        data.locked,
+        data.reason.clone(),
+      ),
+      &context,
+    )?;
+  }
 
   build_post_response(&context, orig_post.community.id, local_user_view, post_id).await
 }

@@ -122,6 +122,8 @@ pub struct CreateSite {
   pub summary: Option<String>,
   pub community_creation_admin_only: Option<bool>,
   pub email_verification_required: Option<bool>,
+  pub smtp_connection: Option<String>,
+  pub smtp_from_address: Option<String>,
   pub application_question: Option<String>,
   pub private_instance: Option<bool>,
   pub default_theme: Option<String>,
@@ -217,6 +219,8 @@ pub struct EditSite {
   pub community_creation_admin_only: Option<bool>,
   /// Whether to require email verification.
   pub email_verification_required: Option<bool>,
+  pub smtp_connection: Option<String>,
+  pub smtp_from_address: Option<String>,
   /// Your application question form. This is in markdown, and can be many questions.
   pub application_question: Option<String>,
   /// Whether your instance is public, or private.

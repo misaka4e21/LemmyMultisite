@@ -31,7 +31,6 @@ use lemmy_db_schema::source::{
   site::{Site, SiteUpsertForm},
 };
 use lemmy_db_schema_file::{InstanceId, enums::ActorType};
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{sensitive::SensitiveString, traits::Crud};
 use lemmy_utils::{
   error::{LemmyError, LemmyResult, UntranslatedError},
@@ -134,7 +133,7 @@ impl Object for ApubSite {
 
     let slur_regex = slur_regex(context).await?;
     let url_blocklist = get_url_blocklist(context).await?;
-    let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+    let local_site = context.site_view()?.local_site.clone();
 
     let sidebar = read_from_string_or_source_opt(&apub.content, &None, &apub.source);
     let sidebar =

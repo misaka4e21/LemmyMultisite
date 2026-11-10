@@ -2,7 +2,6 @@ use crate::objects::SearchableObjects;
 use activitypub_federation::{config::Data, fetch::object_id::ObjectId};
 use either::Either::*;
 use lemmy_api_utils::context::LemmyContext;
-use lemmy_db_schema::traits::ApubActor;
 use lemmy_utils::utils::markdown::image_links::{markdown_find_links, markdown_handle_title};
 use url::Url;
 
@@ -47,7 +46,7 @@ pub async fn markdown_rewrite_remote_links(
 }
 
 pub(crate) async fn to_local_url(url: &str, context: &Data<LemmyContext>) -> Option<Url> {
-  let local_domain = &context.settings().get_protocol_and_hostname();
+  let local_domain = &context.protocol_and_hostname();
   let object_id = ObjectId::<SearchableObjects>::parse(url).ok()?;
   let object_domain = object_id.inner().domain();
   if object_domain == Some(local_domain) {
@@ -55,13 +54,39 @@ pub(crate) async fn to_local_url(url: &str, context: &Data<LemmyContext>) -> Opt
   }
   let dereferenced = object_id.dereference(context).await.ok()?;
   match dereferenced {
-    Left(Left(Left(post))) => post.local_url(context.settings()),
-    Left(Left(Right(comment))) => comment.local_url(context.settings()),
-    Left(Right(Left(user))) => user.actor_url(context.settings()),
-    Left(Right(Right(community))) => community.actor_url(context.settings()),
-    Right(multi) => multi.actor_url(context.settings()),
+    Left(Left(Left(post))) => Url::parse(&format!(
+      "{}/post/{}",
+      context.protocol_and_hostname(),
+      post.id.0
+    ))
+    .ok(),
+    Left(Left(Right(comment))) => Url::parse(&format!(
+      "{}/comment/{}",
+      context.protocol_and_hostname(),
+      comment.id.0
+    ))
+    .ok(),
+    Left(Right(Left(user))) => actor_url_for_context(&user.ap_id, &user.name, 'u', context),
+    Left(Right(Right(community))) => {
+      actor_url_for_context(&community.ap_id, &community.name, 'c', context)
+    }
+    Right(multi) => actor_url_for_context(&multi.ap_id, &multi.name, 'm', context),
   }
-  .ok()
+}
+
+fn actor_url_for_context(
+  ap_id: &lemmy_diesel_utils::dburl::DbUrl,
+  name: &str,
+  prefix: char,
+  context: &Data<LemmyContext>,
+) -> Option<Url> {
+  let domain = ap_id.inner().domain()?;
+  let path = if domain.eq_ignore_ascii_case(context.hostname()) {
+    format!("{prefix}/{name}")
+  } else {
+    format!("{prefix}/{name}@{domain}")
+  };
+  Url::parse(&format!("{}/{path}", context.protocol_and_hostname())).ok()
 }
 
 #[cfg(test)]

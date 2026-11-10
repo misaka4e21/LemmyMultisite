@@ -9,6 +9,7 @@ use lemmy_api_utils::{
   plugins::{plugin_hook_after, plugin_hook_before},
   request::generate_post_link_metadata,
   send_activity::SendActivityData,
+  tenant::TenantContext,
   utils::{
     check_community_user_action,
     check_nsfw_allowed,
@@ -20,7 +21,7 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_schema::{
-  impls::actor_language::validate_post_language,
+  impls::{actor_language::validate_post_language, presence::ensure_post_site},
   source::post::{Post, PostActions, PostInsertForm, PostLikeForm},
   traits::Likeable,
 };
@@ -28,7 +29,6 @@ use lemmy_db_views_community::CommunityView;
 use lemmy_db_views_community_moderator::CommunityModeratorView;
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_post::api::{CreatePost, PostResponse};
-use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{traits::Crud, utils::diesel_url_create};
 use lemmy_utils::{
   error::LemmyResult,
@@ -48,9 +48,10 @@ pub async fn create_post(
   Json(data): Json<CreatePost>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<PostResponse>> {
   honeypot_check(&data.honeypot)?;
-  let local_site = SiteView::read_local(&mut context.pool()).await?.local_site;
+  let local_site = tenant.local_site().clone();
 
   let slur_regex = slur_regex(&context).await?;
   check_slurs(&data.name, &slur_regex)?;
@@ -92,6 +93,7 @@ pub async fn create_post(
     data.community_id,
     Some(&local_user_view.local_user),
     false,
+    local_site.id,
   )
   .await?;
   let community = &community_view.community;
@@ -117,6 +119,7 @@ pub async fn create_post(
   let scheduled_publish_time_at =
     convert_published_time(data.scheduled_publish_time_at, &local_user_view, &context).await?;
   let mut post_form = PostInsertForm {
+    origin_local_site_id: Some(local_site.id),
     url,
     body,
     alt_text: data.alt_text.clone(),
@@ -140,6 +143,7 @@ pub async fn create_post(
   .await?;
 
   let inserted_post = Post::create(&mut context.pool(), &post_form).await?;
+  ensure_post_site(&mut context.pool(), local_site.id, inserted_post.id).await?;
 
   plugin_hook_after("local_post_after_create", &inserted_post);
 

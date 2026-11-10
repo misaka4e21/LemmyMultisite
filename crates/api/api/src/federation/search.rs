@@ -5,7 +5,11 @@ use crate::federation::{
 use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
 use itertools::Itertools;
-use lemmy_api_utils::{context::LemmyContext, utils::check_private_instance};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  tenant::TenantContext,
+  utils::check_private_instance,
+};
 use lemmy_db_schema::{
   CommunitySortType,
   MultiCommunityListingType,
@@ -31,16 +35,23 @@ pub async fn search(
   Query(data): Query<Search>,
   context: Data<LemmyContext>,
   local_user_view: Option<LocalUserView>,
+  tenant: TenantContext,
 ) -> LemmyResult<Json<SearchResponse>> {
   let SiteView {
     local_site, site, ..
-  } = SiteView::read_local(&mut context.pool()).await?;
+  } = tenant.site_view.clone();
 
   check_private_instance(&local_user_view, &local_site)?;
 
-  let resolve = resolve_object_internal(&data.search_term, &local_user_view, &context)
-    .await
-    .ok();
+  let resolve = resolve_object_internal(
+    &data.search_term,
+    &local_user_view,
+    &context,
+    tenant.site_view.site.instance_id,
+    local_site.id,
+  )
+  .await
+  .ok();
 
   let search_term = Some(data.search_term);
   let search_type = data.type_.unwrap_or_default();
@@ -143,7 +154,7 @@ pub async fn search(
     limit,
     ..Default::default()
   }
-  .list(pool);
+  .list(pool, local_site.id);
 
   let mut posts = Vec::new();
   let mut comments = Vec::new();

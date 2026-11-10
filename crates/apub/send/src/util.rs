@@ -193,17 +193,22 @@ pub(crate) async fn get_activity_cached(
 }
 
 /// return the most current activity id (with 1 second cache)
-pub(crate) async fn get_latest_activity_id(pool: &mut DbPool<'_>) -> Result<Option<ActivityId>> {
-  static CACHE: LazyLock<Cache<(), Option<ActivityId>>> = LazyLock::new(|| {
-    Cache::builder()
-      .time_to_live(*CACHE_DURATION_LATEST_ID)
-      .build()
-  });
+pub(crate) async fn get_latest_activity_id(
+  pool: &mut DbPool<'_>,
+  local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
+) -> Result<Option<ActivityId>> {
+  static CACHE: LazyLock<Cache<lemmy_db_schema_file::newtypes::LocalSiteId, Option<ActivityId>>> =
+    LazyLock::new(|| {
+      Cache::builder()
+        .time_to_live(*CACHE_DURATION_LATEST_ID)
+        .build()
+    });
   CACHE
-    .try_get_with((), async {
+    .try_get_with(local_site_id, async {
       use lemmy_db_schema_file::schema::sent_activity::dsl::{id, sent_activity};
       let conn = &mut get_conn(pool).await?;
       let latest_id: Option<ActivityId> = sent_activity
+        .filter(lemmy_db_schema_file::schema::sent_activity::local_site_id.eq(local_site_id))
         .select(diesel::dsl::max(id))
         .get_result(conn)
         .await?;
@@ -211,6 +216,27 @@ pub(crate) async fn get_latest_activity_id(pool: &mut DbPool<'_>) -> Result<Opti
     })
     .await
     .map_err(|e| anyhow::anyhow!("err getting id: {e:?}"))
+}
+
+/// Return the next queued activity for a site after the given id.
+pub(crate) async fn get_next_activity_id(
+  pool: &mut DbPool<'_>,
+  local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
+  after: ActivityId,
+) -> Result<Option<ActivityId>> {
+  use lemmy_db_schema_file::schema::sent_activity::dsl::{
+    id,
+    local_site_id as site_id,
+    sent_activity,
+  };
+  let conn = &mut get_conn(pool).await?;
+  let next: Option<i64> = sent_activity
+    .filter(site_id.eq(local_site_id))
+    .filter(id.gt(after.0))
+    .select(diesel::dsl::min(id))
+    .first(conn)
+    .await?;
+  Ok(next.map(ActivityId))
 }
 
 /// the domain name is needed for logging, pass it to the stats printer so it doesn't need to look

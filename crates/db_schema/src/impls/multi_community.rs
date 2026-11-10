@@ -1,5 +1,6 @@
 use crate::{
   diesel::{BoolExpressionMethods, OptionalExtension, PgExpressionMethods, SelectableHelper},
+  impls::presence::{default_local_site_id, ensure_multi_community_site},
   source::{
     community::Community,
     multi_community::{
@@ -25,7 +26,7 @@ use diesel::{
 use diesel_async::RunQueryDsl;
 use lemmy_db_schema_file::{
   PersonId,
-  newtypes::{CommunityId, MultiCommunityId},
+  newtypes::{CommunityId, LocalSiteId, MultiCommunityId},
   schema::{
     community,
     instance,
@@ -57,11 +58,21 @@ impl Crud for MultiCommunity {
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
 
-    insert_into(multi_community::table)
+    let multi = insert_into(multi_community::table)
       .values(form)
-      .get_result(conn)
+      .get_result::<Self>(conn)
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
+      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+    if form.local.unwrap_or(true) {
+      let local_site_id = match form.origin_local_site_id {
+        Some(local_site_id) => Some(local_site_id),
+        None => default_local_site_id(&mut conn.into()).await?,
+      };
+      if let Some(local_site_id) = local_site_id {
+        ensure_multi_community_site(&mut conn.into(), local_site_id, multi.id).await?;
+      }
+    }
+    Ok(multi)
   }
 
   async fn update(
@@ -246,6 +257,7 @@ impl ApubActor for MultiCommunity {
     pool: &mut DbPool<'_>,
     name: &str,
     domain: Option<&str>,
+    local_site_id: Option<LocalSiteId>,
     include_deleted: bool,
   ) -> LemmyResult<Option<Self>> {
     let conn = &mut get_conn(pool).await?;
@@ -259,6 +271,8 @@ impl ApubActor for MultiCommunity {
     }
     if let Some(domain) = domain {
       q = q.filter(lower(instance::domain).eq(domain.to_lowercase()))
+    } else if let Some(local_site_id) = local_site_id {
+      q = q.filter(multi_community::origin_local_site_id.eq(local_site_id))
     } else {
       q = q.filter(multi_community::local.eq(true))
     }
@@ -278,9 +292,8 @@ impl ApubActor for MultiCommunity {
     format_actor_url(&self.name, domain, 'm', settings)
   }
 
-  fn generate_local_actor_url(name: &str, settings: &Settings) -> LemmyResult<DbUrl> {
-    let domain = settings.get_protocol_and_hostname();
-    Ok(Url::parse(&format!("{domain}/m/{name}"))?.into())
+  fn generate_local_actor_url(name: &str, protocol_and_hostname: &str) -> LemmyResult<DbUrl> {
+    Ok(Url::parse(&format!("{protocol_and_hostname}/m/{name}"))?.into())
   }
 }
 

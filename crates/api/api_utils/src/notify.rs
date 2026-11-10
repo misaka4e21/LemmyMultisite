@@ -115,7 +115,13 @@ impl NotifyData {
       };
 
       if self.do_send_email {
-        send_notification_email(user_view, c.local_url, c.data, context.settings());
+        send_notification_email(
+          user_view,
+          c.local_url,
+          c.data,
+          &context.site_view()?.local_site,
+          context.settings(),
+        );
       }
     }
     if !forms.is_empty() {
@@ -170,9 +176,9 @@ impl NotifyData {
 
   fn link(&self, context: &LemmyContext) -> LemmyResult<Url> {
     if let Some(comment) = self.comment.as_ref() {
-      Ok(comment.local_url(context.settings())?)
+      Ok(comment.local_url(&context.protocol_and_hostname())?)
     } else {
-      Ok(self.post.local_url(context.settings())?)
+      Ok(self.post.local_url(&context.protocol_and_hostname())?)
     }
   }
 
@@ -195,7 +201,7 @@ impl NotifyData {
 
     Ok(vec![CollectedNotifyData {
       recipient_id: parent_creator_id,
-      local_url: comment.local_url(context.settings())?.into(),
+      local_url: comment.local_url(&context.protocol_and_hostname())?.into(),
       data: NotificationEmailData::Reply {
         comment,
         person: &self.creator,
@@ -215,10 +221,17 @@ impl NotifyData {
     } else {
       let scraped = scrape_text_for_mentions(&self.content())
         .into_iter()
-        .filter(|m| m.is_local(&context.settings().hostname) && m.name.ne(&self.creator.name));
+        .filter(|m| m.is_local(context.hostname()) && m.name.ne(&self.creator.name));
       let mut persons = vec![];
       for m in scraped {
-        let Ok(Some(p)) = Person::read_from_name(&mut context.pool(), &m.name, None, false).await
+        let Ok(Some(p)) = Person::read_from_name(
+          &mut context.pool(),
+          &m.name,
+          None,
+          context.tenant().map(|tenant| tenant.local_site().id),
+          false,
+        )
+        .await
         else {
           // Ignore error if user is remote
           continue;
@@ -303,7 +316,10 @@ async fn notify_private_message_internal(
 
   if is_create {
     plugin_hook_notification(notifications, context).await?;
-    let site_view = SiteView::read_local(&mut context.pool()).await?;
+    let site_view = match context.tenant() {
+      Some(tenant) => tenant.site_view.clone(),
+      None => SiteView::read_by_hostname(&mut context.pool(), context.hostname()).await?,
+    };
     if !site_view.local_site.email_notifications_disabled {
       let d = NotificationEmailData::PrivateMessage {
         sender: &view.creator,
@@ -311,8 +327,11 @@ async fn notify_private_message_internal(
       };
       send_notification_email(
         local_recipient,
-        view.private_message.local_url(context.settings())?,
+        view
+          .private_message
+          .local_url(&context.protocol_and_hostname())?,
         d,
+        &site_view.local_site,
         context.settings(),
       );
     }
@@ -349,7 +368,7 @@ pub fn notify_mod_action(actions: Vec<Modlog>, context: &LemmyContext) {
 
       let modlog_url = format!(
         "{}/modlog?userId={}&actionType={}",
-        context.settings().get_protocol_and_hostname(),
+        context.protocol_and_hostname(),
         local_recipient.person.id.0,
         action.kind
       );
@@ -362,6 +381,7 @@ pub fn notify_mod_action(actions: Vec<Modlog>, context: &LemmyContext) {
         local_recipient,
         Url::parse(&modlog_url)?.into(),
         d,
+        &context.site_view()?.local_site,
         context.settings(),
       );
     }
@@ -379,6 +399,7 @@ mod tests {
   use lemmy_db_schema::{
     NotificationTypeFilter,
     assert_length,
+    impls::presence::default_local_site_id,
     source::{
       comment::{Comment, CommentInsertForm},
       community::{Community, CommunityInsertForm},
@@ -463,8 +484,11 @@ mod tests {
     context: &LemmyContext,
   ) -> LemmyResult<()> {
     let pool = &mut context.pool();
+    let local_site_id = default_local_site_id(pool)
+      .await?
+      .expect("test database must have one local site");
     let pm = PrivateMessage::create(pool, &form).await?;
-    let view = PrivateMessageView::read(pool, pm.id, None).await?;
+    let view = PrivateMessageView::read(pool, pm.id, None, local_site_id).await?;
     notify_private_message_internal(&view, false, context).await?;
     Ok(())
   }
@@ -909,7 +933,10 @@ mod tests {
     assert_ne!(pm, None);
 
     if let Some(pm) = pm {
-      let view = PrivateMessageView::read(pool, pm.id, None).await?;
+      let local_site_id = default_local_site_id(pool)
+        .await?
+        .expect("test database must have one local site");
+      let view = PrivateMessageView::read(pool, pm.id, None, local_site_id).await?;
       let num_sender_messages_before = NotificationQuery::default()
         .list(pool, &view.creator)
         .await?

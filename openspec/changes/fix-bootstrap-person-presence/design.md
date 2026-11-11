@@ -51,7 +51,7 @@ The current database tests create a LocalSite before their users or call `ensure
 - First-site setup with a configured admin, then assert the admin and system Person origins, the two `person_site` rows, `GetSite.admins`, and a person read for the admin.
 - Provisioned site creation, then assert the system account's origin and presence. The admin path is already covered by the existing provision test and should remain covered.
 
-The setup test needs an empty database because `setup_local_site` does nothing when any LocalSite exists. Use the serial test suite and clean the relevant rows before the test, or reset the test database through the existing test workflow.
+The setup test needs the condition that prevents default site resolution. Create two other LocalSites and call the first-site creation body directly, so `Person::create` cannot pick a default site. This avoids depending on an empty shared test database.
 
 ## Risks / Trade-offs
 

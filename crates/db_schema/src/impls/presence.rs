@@ -1,4 +1,4 @@
-use diesel::{ExpressionMethods, QueryDsl, insert_into};
+use diesel::{ExpressionMethods, QueryDsl, insert_into, update};
 use diesel_async::RunQueryDsl;
 use lemmy_db_schema_file::{
   PersonId,
@@ -8,6 +8,7 @@ use lemmy_db_schema_file::{
     community_site,
     local_site,
     multi_community_site,
+    person,
     person_site,
     post_site,
     private_message_site,
@@ -42,6 +43,35 @@ pub async fn ensure_person_site(
   person_id: PersonId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
+  insert_into(person_site::table)
+    .values((
+      person_site::local_site_id.eq(local_site_id),
+      person_site::person_id.eq(person_id),
+    ))
+    .on_conflict_do_nothing()
+    .execute(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+  Ok(())
+}
+
+/// Marks a local Person as belonging to a site and makes that site see the Person.
+///
+/// Callers must pass the Person's owning site. An existing origin is left unchanged, so remote
+/// People keep a NULL origin and an assigned site is not overwritten. The presence insert is
+/// idempotent.
+pub async fn ensure_local_person_site(
+  pool: &mut DbPool<'_>,
+  local_site_id: LocalSiteId,
+  person_id: PersonId,
+) -> LemmyResult<()> {
+  let conn = &mut get_conn(pool).await?;
+  update(person::table.find(person_id))
+    .filter(person::origin_local_site_id.is_null())
+    .set(person::origin_local_site_id.eq(local_site_id))
+    .execute(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
   insert_into(person_site::table)
     .values((
       person_site::local_site_id.eq(local_site_id),
@@ -254,4 +284,100 @@ pub async fn set_post_site_featured(
     .await
     .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::source::{
+    instance::Instance,
+    local_site::{LocalSite, LocalSiteInsertForm},
+    person::{Person, PersonInsertForm},
+    site::{Site, SiteUpsertForm},
+  };
+  use chrono::Utc;
+  use lemmy_diesel_utils::{connection::build_db_pool_for_tests, traits::Crud};
+  use serial_test::serial;
+
+  #[tokio::test]
+  #[serial]
+  async fn ensure_local_person_site_sets_origin_and_presence() -> LemmyResult<()> {
+    let pool = &build_db_pool_for_tests();
+    let pool = &mut pool.into();
+    let unique = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let domain = format!("presence-test-{unique}.example");
+    let instance = Instance::read_or_create(pool, &domain).await?;
+    let site = Site::create(
+      pool,
+      &SiteUpsertForm::new("presence-test".to_string(), instance.id),
+    )
+    .await?;
+    let system = Person::create(
+      pool,
+      &PersonInsertForm::test_form(instance.id, "presence_system"),
+    )
+    .await?;
+    let local_site = LocalSite::create(
+      pool,
+      &LocalSiteInsertForm::new(site.id, system.id, instance.domain.clone()),
+    )
+    .await?;
+
+    // The system account is created before the LocalSite, so Person::create cannot add presence.
+    {
+      let conn = &mut get_conn(pool).await?;
+      let presence: i64 = person_site::table
+        .filter(person_site::person_id.eq(system.id))
+        .count()
+        .get_result(conn)
+        .await?;
+      assert_eq!(presence, 0);
+    }
+
+    ensure_local_person_site(pool, local_site.id, system.id).await?;
+    {
+      let conn = &mut get_conn(pool).await?;
+      let origin: Option<LocalSiteId> = person::table
+        .find(system.id)
+        .select(person::origin_local_site_id)
+        .first(conn)
+        .await?;
+      assert_eq!(origin, Some(local_site.id));
+      let presence: i64 = person_site::table
+        .filter(person_site::person_id.eq(system.id))
+        .count()
+        .get_result(conn)
+        .await?;
+      assert_eq!(presence, 1);
+    }
+
+    let with_origin = Person::create(
+      pool,
+      &PersonInsertForm {
+        origin_local_site_id: Some(local_site.id),
+        ..PersonInsertForm::test_form(instance.id, "presence_with_origin")
+      },
+    )
+    .await?;
+    ensure_local_person_site(pool, local_site.id, with_origin.id).await?;
+    ensure_local_person_site(pool, local_site.id, with_origin.id).await?;
+    {
+      let conn = &mut get_conn(pool).await?;
+      let origin: Option<LocalSiteId> = person::table
+        .find(with_origin.id)
+        .select(person::origin_local_site_id)
+        .first(conn)
+        .await?;
+      assert_eq!(origin, Some(local_site.id));
+      let presence: i64 = person_site::table
+        .filter(person_site::person_id.eq(with_origin.id))
+        .count()
+        .get_result(conn)
+        .await?;
+      assert_eq!(presence, 1);
+    }
+
+    Instance::delete(pool, instance.id).await?;
+    Ok(())
+  }
 }

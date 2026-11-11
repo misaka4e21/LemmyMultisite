@@ -452,6 +452,7 @@ mod tests {
     // Check the test data we inserted before after running migrations
     check_test_data(conn)?;
     check_multisite_backfill(conn)?;
+    check_bootstrap_repair(conn)?;
 
     // Check the current schema
     assert_eq!(
@@ -704,6 +705,47 @@ mod tests {
       media_references,
       vec![(site_id, Some(TEST_USER_ID_1), Some(TEST_POST_ID_1))]
     );
+
+    Ok(())
+  }
+
+  fn check_bootstrap_repair(conn: &mut PgConnection) -> LemmyResult<()> {
+    use lemmy_db_schema_file::schema::{local_site, person, person_site, site};
+
+    let site_id: i32 = local_site::table.select(local_site::id).first(conn)?;
+    let instance_id: i32 = site::table.select(site::instance_id).first(conn)?;
+    let person_id: i32 = person::table
+      .filter(person::instance_id.eq(instance_id))
+      .select(person::id)
+      .order_by(person::id)
+      .first(conn)?;
+    conn.batch_execute(&format!(
+      "UPDATE person SET origin_local_site_id = NULL WHERE id = {person_id};
+       DELETE FROM person_site WHERE person_id = {person_id};"
+    ))?;
+
+    let repair_sql = include_str!(
+      "../../../../migrations/2026-11-11-000016-0000_repair-local-person-presence/up.sql"
+    );
+    conn.batch_execute(repair_sql)?;
+
+    let origin: Option<i32> = person::table
+      .find(person_id)
+      .select(person::origin_local_site_id)
+      .first(conn)?;
+    assert_eq!(origin, Some(site_id));
+    let presence: i64 = person_site::table
+      .filter(person_site::person_id.eq(person_id))
+      .count()
+      .get_result(conn)?;
+    assert_eq!(presence, 1);
+
+    conn.batch_execute(repair_sql)?;
+    let presence: i64 = person_site::table
+      .filter(person_site::person_id.eq(person_id))
+      .count()
+      .get_result(conn)?;
+    assert_eq!(presence, 1);
 
     Ok(())
   }

@@ -32,6 +32,14 @@ A site SHALL see an object only when the site has a presence row for that object
 - **THEN** site B creates its presence row
 - **AND** the post becomes visible to site B under its federation policy
 
+#### Scenario: Bootstrap actors
+- **WHEN** first-site setup or site provisioning creates the administrator or system account
+- **THEN** the owning site has a `person_site` row for that Person
+
+#### Scenario: Existing local person without presence
+- **WHEN** the installation has a local Person row with no site presence
+- **THEN** the owning site gains a presence row for that Person
+
 ### Requirement: Origin moderation and local moderation are separate
 The canonical object SHALL store moderation and deletion state that the origin instance published. Site state rows SHALL store moderation that the local site applied. A local removal on site A MUST NOT change the canonical object or site B's view.
 

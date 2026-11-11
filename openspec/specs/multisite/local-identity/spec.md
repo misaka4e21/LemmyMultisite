@@ -57,6 +57,14 @@ Person, Community, Post, Comment, PrivateMessage, and MultiCommunity rows SHALL 
 - **THEN** that Person has a NULL `origin_local_site_id`
 - **AND** site B can use the same Person row
 
+#### Scenario: Bootstrap administrator
+- **WHEN** first-site setup creates the initial administrator and system account
+- **THEN** both Person rows have `origin_local_site_id` set to that site's LocalSite
+
+#### Scenario: Provisioned site system account
+- **WHEN** an installation administrator provisions a new site
+- **THEN** the site's system account Person row has `origin_local_site_id` set to that site's LocalSite
+
 ### Requirement: Local reads are site-scoped
 Listings and reads for local communities, posts, comments, people, reports, modlog, invites, media, and administrator views SHALL apply the current site scope. A site MUST NOT return another site's local content unless a per-site presence or federation rule allows it.
 

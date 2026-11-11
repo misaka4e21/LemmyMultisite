@@ -71,3 +71,4 @@ ts-rs = { workspace = true, optional = true }
 [dev-dependencies]
 pretty_assertions.workspace = true
 serial_test.workspace = true
+lemmy_db_views_person = { workspace = true, features = ["full"] }

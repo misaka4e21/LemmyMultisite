@@ -7,13 +7,16 @@ use diesel::{
 };
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use lemmy_api_utils::{tenant::canonicalize_host, utils::generate_inbox_url};
-use lemmy_db_schema::source::{
-  instance::Instance,
-  local_site::{LocalSite, LocalSiteInsertForm},
-  local_site_rate_limit::{LocalSiteRateLimit, LocalSiteRateLimitInsertForm},
-  local_user::{LocalUser, LocalUserInsertForm},
-  person::{Person, PersonInsertForm},
-  site::{Site, SiteUpsertForm},
+use lemmy_db_schema::{
+  impls::presence::ensure_local_person_site,
+  source::{
+    instance::Instance,
+    local_site::{LocalSite, LocalSiteInsertForm},
+    local_site_rate_limit::{LocalSiteRateLimit, LocalSiteRateLimitInsertForm},
+    local_user::{LocalUser, LocalUserInsertForm},
+    person::{Person, PersonInsertForm},
+    site::{Site, SiteUpsertForm},
+  },
 };
 use lemmy_db_schema_file::schema::removed_site;
 use lemmy_db_views_site::SiteView;
@@ -110,6 +113,7 @@ pub async fn provision_site(pool: &mut DbPool<'_>, site: ProvisionSite) -> Lemmy
         &LocalSiteRateLimitInsertForm::new(local_site.id),
       )
       .await?;
+      ensure_local_person_site(&mut conn.into(), local_site.id, system_account.id).await?;
 
       let admin_keypair = generate_actor_keypair()?;
       let admin_ap_id = Url::parse(&format!("{base_url}/u/{}", site.admin_username))?;
@@ -143,8 +147,11 @@ mod tests {
   use super::*;
   use crate::utils::provision_site::ProvisionSite;
   use chrono::Utc;
+  use diesel::{ExpressionMethods, QueryDsl};
+  use diesel_async::RunQueryDsl;
   use lemmy_db_schema::source::instance::Instance;
-  use lemmy_diesel_utils::connection::build_db_pool_for_tests;
+  use lemmy_db_schema_file::schema::{person, person_site};
+  use lemmy_diesel_utils::connection::{build_db_pool_for_tests, get_conn};
   use serial_test::serial;
 
   #[tokio::test]
@@ -177,6 +184,29 @@ mod tests {
     );
     assert_eq!(view.local_site_rate_limit.local_site_id, view.local_site.id);
     assert!(SiteView::read_by_hostname(pool, &hostname).await.is_ok());
+
+    {
+      let conn = &mut get_conn(pool).await?;
+      let admin: Person = person::table
+        .filter(person::name.eq("provision_admin"))
+        .filter(person::instance_id.eq(view.site.instance_id))
+        .first(conn)
+        .await?;
+      let system: Person = person::table
+        .find(view.local_site.system_account)
+        .first(conn)
+        .await?;
+      assert_eq!(admin.origin_local_site_id, Some(view.local_site.id));
+      assert_eq!(system.origin_local_site_id, Some(view.local_site.id));
+      for id in [admin.id, system.id] {
+        let presence: i64 = person_site::table
+          .filter(person_site::person_id.eq(id))
+          .count()
+          .get_result(conn)
+          .await?;
+        assert_eq!(presence, 1);
+      }
+    }
 
     let duplicate = provision_site(
       pool,

@@ -233,20 +233,52 @@ pub(crate) mod tests {
     objects::instance::ApubSite,
     utils::test::{file_to_json_object, parse_lemmy_person},
   };
-  use activitypub_federation::fetch::object_id::ObjectId;
+  use activitypub_federation::{
+    config::{Data, FederationConfig},
+    fetch::object_id::ObjectId,
+  };
+  use lemmy_api_utils::tenant::TenantContext;
   use lemmy_db_schema::{source::instance::Instance, test_data::TestData};
+  use lemmy_db_schema_file::newtypes::LocalSiteId;
+  use lemmy_db_views_site::SiteView;
   use pretty_assertions::assert_eq;
   use serial_test::serial;
+  use std::sync::Arc;
+
+  async fn test_context_with_tenant(
+    base: &Data<LemmyContext>,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Data<LemmyContext>> {
+    let site_view = SiteView::read_by_id(&mut base.pool(), local_site_id).await?;
+    let tenant = TenantContext {
+      hostname: site_view.local_site.hostname.clone(),
+      scheme: site_view.site.ap_id.scheme().to_string(),
+      site_view,
+    };
+    let context = (*base).clone().with_tenant(Arc::new(tenant.clone()));
+    Ok(
+      FederationConfig::builder()
+        .domain(tenant.hostname)
+        .app_data(context)
+        .debug(true)
+        .http_fetch_limit(0)
+        .build()
+        .await?
+        .to_request_data(),
+    )
+  }
 
   #[tokio::test]
   #[serial]
   async fn test_parse_lemmy_person() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = test_context_with_tenant(&base_context, test_data.local_site.id).await?;
     let (person, _) = parse_lemmy_person(&context).await?;
 
     assert_eq!(person.display_name, Some("Jean-Luc Picard".to_string()));
     assert!(!person.local);
+    assert!(person.origin_local_site_id.is_none());
     assert_eq!(person.bio.as_ref().map(std::string::String::len), Some(39));
 
     test_data.delete(&mut context.pool()).await?;
@@ -257,8 +289,9 @@ pub(crate) mod tests {
   #[tokio::test]
   #[serial]
   async fn test_parse_pleroma_person() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = test_context_with_tenant(&base_context, test_data.local_site.id).await?;
 
     // create and parse a fake pleroma instance actor, to avoid network request during test
     let mut json: crate::protocol::instance::Instance =
@@ -277,6 +310,7 @@ pub(crate) mod tests {
     assert_eq!(person.ap_id, url.into());
     assert_eq!(person.name, "lanodan");
     assert!(!person.local);
+    assert!(person.origin_local_site_id.is_none());
     assert_eq!(context.request_count(), 1);
     assert_eq!(person.bio.as_ref().map(std::string::String::len), Some(735));
 

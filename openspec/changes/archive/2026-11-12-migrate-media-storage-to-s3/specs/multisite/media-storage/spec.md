@@ -83,3 +83,14 @@ Moving blobs to S3 SHALL NOT change Lemmy's image API or per-site media URL beha
 #### Scenario: Credentials not exposed
 - **WHEN** a client reads an image or an upload response
 - **THEN** the response does not contain S3 access keys, secret keys, or bucket credentials
+
+## MODIFIED Requirements
+
+### Requirement: Deduplicated upload
+The upload path SHALL hash only the file bytes while streaming them to pict-rs. When the hash already exists, the system SHALL reuse the canonical alias, remove any non-canonical alias created by the upload, and end with one stored object.
+
+#### Scenario: Upload duplicate
+- **WHEN** a user uploads bytes whose hash already exists
+- **THEN** the system returns the canonical alias
+- **AND** it creates only a new site reference
+- **AND** it removes the temporary duplicate alias

@@ -138,7 +138,7 @@ pub async fn create_site(
     max_invites_per_user_allowed: data.max_invites_per_user_allowed,
   };
 
-  LocalSite::update(&mut context.pool(), &local_site_form).await?;
+  LocalSite::update(&mut context.pool(), local_site.id, &local_site_form).await?;
 
   let local_site_rate_limit_form = LocalSiteRateLimitUpdateForm {
     message_max_requests: data.rate_limit_message_max_requests,

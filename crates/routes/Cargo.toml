@@ -39,9 +39,10 @@ lemmy_db_schema_file = { workspace = true }
 activitypub_federation = { workspace = true }
 lemmy_email = { workspace = true }
 actix-web = { workspace = true, features = ["cookies"] }
+actix-multipart = "0.8.8"
 chrono = { workspace = true }
 futures = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["multipart", "stream"] }
 reqwest-middleware = { workspace = true }
 serde = { workspace = true }
 url = { workspace = true }

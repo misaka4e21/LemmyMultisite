@@ -27,7 +27,14 @@ pub async fn delete_site_icon(
   let site = tenant.site().clone();
   is_admin(&local_user_view)?;
 
-  delete_old_image(&site.icon, &context).await?;
+  delete_old_image(
+    &site.icon,
+    None,
+    tenant.local_site().id,
+    local_user_view.person.id,
+    &context,
+  )
+  .await?;
 
   let form = SiteUpdateForm {
     icon: Some(None),
@@ -45,7 +52,14 @@ pub async fn delete_site_banner(
   let site = tenant.site().clone();
   is_admin(&local_user_view)?;
 
-  delete_old_image(&site.banner, &context).await?;
+  delete_old_image(
+    &site.banner,
+    None,
+    tenant.local_site().id,
+    local_user_view.person.id,
+    &context,
+  )
+  .await?;
 
   let form = SiteUpdateForm {
     banner: Some(None),
@@ -64,7 +78,14 @@ pub async fn delete_community_icon(
   let community = Community::read(&mut context.pool(), data.id).await?;
   is_mod_or_admin(&mut context.pool(), &local_user_view, community.id).await?;
 
-  delete_old_image(&community.icon, &context).await?;
+  delete_old_image(
+    &community.icon,
+    None,
+    local_user_view.local_user.local_site_id,
+    local_user_view.person.id,
+    &context,
+  )
+  .await?;
 
   let form = CommunityUpdateForm {
     icon: Some(None),
@@ -83,7 +104,14 @@ pub async fn delete_community_banner(
   let community = Community::read(&mut context.pool(), data.id).await?;
   is_mod_or_admin(&mut context.pool(), &local_user_view, community.id).await?;
 
-  delete_old_image(&community.banner, &context).await?;
+  delete_old_image(
+    &community.banner,
+    None,
+    local_user_view.local_user.local_site_id,
+    local_user_view.person.id,
+    &context,
+  )
+  .await?;
 
   let form = CommunityUpdateForm {
     banner: Some(None),
@@ -98,7 +126,14 @@ pub async fn delete_user_avatar(
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
 ) -> LemmyResult<Json<SuccessResponse>> {
-  delete_old_image(&local_user_view.person.avatar, &context).await?;
+  delete_old_image(
+    &local_user_view.person.avatar,
+    None,
+    local_user_view.local_user.local_site_id,
+    local_user_view.person.id,
+    &context,
+  )
+  .await?;
 
   let form = PersonUpdateForm {
     avatar: Some(None),
@@ -113,7 +148,14 @@ pub async fn delete_user_banner(
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
 ) -> LemmyResult<Json<SuccessResponse>> {
-  delete_old_image(&local_user_view.person.banner, &context).await?;
+  delete_old_image(
+    &local_user_view.person.banner,
+    None,
+    local_user_view.local_user.local_site_id,
+    local_user_view.person.id,
+    &context,
+  )
+  .await?;
 
   let form = PersonUpdateForm {
     banner: Some(None),

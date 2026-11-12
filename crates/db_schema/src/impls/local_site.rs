@@ -1,7 +1,7 @@
 use crate::source::local_site::{LocalSite, LocalSiteInsertForm, LocalSiteUpdateForm};
 use diesel::{QueryDsl, dsl::insert_into};
 use diesel_async::RunQueryDsl;
-use lemmy_db_schema_file::schema::local_site;
+use lemmy_db_schema_file::{newtypes::LocalSiteId, schema::local_site};
 use lemmy_diesel_utils::connection::{DbPool, get_conn};
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 
@@ -15,9 +15,13 @@ impl LocalSite {
       .with_lemmy_type(LemmyErrorType::CouldntCreate)
   }
 
-  pub async fn update(pool: &mut DbPool<'_>, form: &LocalSiteUpdateForm) -> LemmyResult<Self> {
+  pub async fn update(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    form: &LocalSiteUpdateForm,
+  ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(local_site::table)
+    diesel::update(local_site::table.find(local_site_id))
       .set(form)
       .get_result::<Self>(conn)
       .await

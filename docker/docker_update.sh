@@ -31,10 +31,11 @@ done
 LOG_PREFIX="[🐀 lemmy]"
 ARCH=$(uname -m 2>/dev/null || echo 'unknown') # uname may not exist on windows machines; default to unknown to be safe.
 
-mkdir -p volumes/pictrs
+mkdir -p volumes/pictrs volumes/rustfs
 
 echo "$LOG_PREFIX Please provide your password to change ownership of the pictrs volume."
 sudo chown -R 991:991 volumes/pictrs
+sudo chown -R 10001:10001 volumes/rustfs
 
 if [ "$ARCH" = 'arm64' ]; then
   echo "$LOG_PREFIX WARN: If building from images, make sure to uncomment 'platform' in the docker-compose.yml file!"

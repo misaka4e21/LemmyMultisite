@@ -2535,7 +2535,7 @@ async fn post_listing_multi_community(data: &mut Data) -> LemmyResult<()> {
     suggested_multi_community_id: Some(Some(multi.id)),
     ..Default::default()
   };
-  let updated_local_site = LocalSite::update(pool, &form).await?;
+  let updated_local_site = LocalSite::update(pool, data.local_site.id, &form).await?;
 
   let suggested = PostQuery {
     listing_type: Some(ListingType::Suggested),

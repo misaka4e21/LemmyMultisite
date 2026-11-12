@@ -79,14 +79,13 @@ The bucket should not be public. Browsers continue to request `/api/v4/image/{al
 3. Run the version's store migration while pict-rs is offline. The documented shape is:
 
    ```bash
-   pict-rs migrate-store --concurrency 32 \
+   pict-rs --old-repo-path /mnt/sled-repo migrate-store --concurrency 32 \
      filesystem -p /mnt/files \
      object-storage -e "$S3_ENDPOINT" -b "$S3_BUCKET" -r "$S3_REGION" \
-       -a "$S3_ACCESS_KEY" -s "$S3_SECRET_KEY" \
-     sled -p /mnt/sled
+       -a "$S3_ACCESS_KEY" -s "$S3_SECRET_KEY" -u
    ```
 
-   Check `pict-rs migrate-store --help` for the exact path-style flag in the pinned image.
+   Remove `-u` when the provider uses virtual-host addressing instead of path-style.
 4. Start pict-rs with the object-storage configuration, then start Lemmy.
 5. Verify an existing avatar or image alias still resolves, upload a new image, and delete it. Confirm the bucket contains the new object and that the sled volume contains the alias metadata.
 6. If migration fails, stop pict-rs, restore the backed-up volume, remove the object-storage environment, and start the old filesystem configuration. Keep the bucket for a later retry.

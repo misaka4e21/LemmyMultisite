@@ -42,7 +42,7 @@ async fn create_test_site(context: &Data<LemmyContext>) -> LemmyResult<(TestData
     site_setup: Some(true),
     ..Default::default()
   };
-  LocalSite::update(pool, &local_site_form).await?;
+  LocalSite::update(pool, data.local_site.id, &local_site_form).await?;
 
   let admin_person = Person::create(
     pool,

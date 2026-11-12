@@ -34,8 +34,10 @@ services:
       - ./lemmy.hjson:/config/config.hjson:Z
       - ./plugins:/plugins:Z
     depends_on:
-      - postgres
-      - pictrs
+      postgres:
+        condition: service_started
+      pictrs:
+        condition: service_healthy
     logging: *default-logging
 
   lemmy-ui:
@@ -69,6 +71,18 @@ services:
     environment:
       - PICTRS_OPENTELEMETRY_URL=http://otel:4137
       - PICTRS__SERVER__API_KEY=my-pictrs-key
+      - PICTRS__STORE__TYPE=object_storage
+      - PICTRS__STORE__ENDPOINT=${S3_ENDPOINT:-http://rustfs:9000}
+      - PICTRS__STORE__BUCKET_NAME=${S3_BUCKET:-lemmy-media}
+      - PICTRS__STORE__REGION=${S3_REGION:-us-east-1}
+      - PICTRS__STORE__ACCESS_KEY=${S3_ACCESS_KEY:-lemmy-rustfs}
+      - PICTRS__STORE__SECRET_KEY=${S3_SECRET_KEY:-lemmy-rustfs-secret}
+      - PICTRS__STORE__USE_PATH_STYLE=${S3_USE_PATH_STYLE:-true}
+      - S3_ENDPOINT=${S3_ENDPOINT:-http://rustfs:9000}
+      - S3_BUCKET=${S3_BUCKET:-lemmy-media}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-lemmy-rustfs}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-lemmy-rustfs-secret}
       - PICTRS__MEDIA__VIDEO_CODEC=vp9
       - PICTRS__MEDIA__GIF__MAX_WIDTH=256
       - PICTRS__MEDIA__GIF__MAX_HEIGHT=256
@@ -77,7 +91,58 @@ services:
     user: 991:991
     volumes:
       - ./volumes/pictrs:/mnt:Z
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
+    logging: *default-logging
+
+  rustfs:
+    # Pinned release. Use a digest in production.
+    image: rustfs/rustfs:1.0.5
+    hostname: rustfs
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-lemmy-rustfs}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-lemmy-rustfs-secret}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - ./volumes/rustfs:/data
+    restart: unless-stopped
+    logging: *default-logging
+
+  rustfs-init:
+    image: amazon/aws-cli:2.40.0
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-lemmy-rustfs}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-lemmy-rustfs-secret}
+      AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://rustfs:9000}
+      S3_BUCKET: ${S3_BUCKET:-lemmy-media}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        i=0
+        until aws --endpoint-url "$${S3_ENDPOINT}" s3api create-bucket --bucket "$${S3_BUCKET}" >/dev/null 2>&1 \
+          || aws --endpoint-url "$${S3_ENDPOINT}" s3api head-bucket --bucket "$${S3_BUCKET}" >/dev/null 2>&1; do
+          i=$$((i + 1))
+          if [ "$$i" -ge 60 ]; then
+            echo "timed out waiting for $${S3_ENDPOINT} and bucket $${S3_BUCKET}" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+    depends_on:
+      rustfs:
+        condition: service_started
+    restart: "no"
     logging: *default-logging
 
   postgres:

@@ -35,6 +35,9 @@ pub async fn ban_from_site(
 
   // Make sure user is an admin
   is_admin(&local_user_view)?;
+  if context.site_view()?.local_site.id != local_user_view.local_user.local_site_id {
+    return Err(LemmyErrorType::NotFound.into());
+  }
 
   // Also make sure you're a higher admin than the target
   LocalUser::is_higher_admin_check(&mut context.pool(), my_person_id, vec![data.person_id]).await?;
@@ -42,6 +45,16 @@ pub async fn ban_from_site(
   is_valid_body_field(&data.reason, false)?;
 
   let expires_at = check_expire_time(data.expires_at)?;
+
+  // Reject targets unknown to this site before changing the ban or scheduling work.
+  PersonView::read(
+    &mut context.pool(),
+    data.person_id,
+    Some(my_person_id),
+    local_instance_id,
+    true,
+  )
+  .await?;
 
   let form = InstanceBanForm::new(
     data.person_id,

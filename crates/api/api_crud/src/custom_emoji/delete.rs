@@ -5,7 +5,6 @@ use lemmy_db_schema::source::custom_emoji::CustomEmoji;
 use lemmy_db_views_custom_emoji::api::DeleteCustomEmoji;
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::SuccessResponse;
-use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::LemmyResult;
 
 pub async fn delete_custom_emoji(
@@ -16,7 +15,12 @@ pub async fn delete_custom_emoji(
   // Make sure user is an admin
   is_admin(&local_user_view)?;
 
-  CustomEmoji::delete(&mut context.pool(), data.id).await?;
+  CustomEmoji::delete_for_site(
+    &mut context.pool(),
+    data.id,
+    local_user_view.local_user.local_site_id,
+  )
+  .await?;
 
   Ok(Json(SuccessResponse::default()))
 }

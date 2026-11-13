@@ -5,10 +5,7 @@ use lemmy_api_utils::{context::LemmyContext, utils::is_admin};
 use lemmy_db_schema::source::oauth_provider::{AdminOAuthProvider, OAuthProviderUpdateForm};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::EditOAuthProvider;
-use lemmy_diesel_utils::{
-  traits::Crud,
-  utils::{diesel_required_string_update, diesel_required_url_update},
-};
+use lemmy_diesel_utils::utils::{diesel_required_string_update, diesel_required_url_update};
 use lemmy_utils::error::LemmyError;
 
 pub async fn edit_oauth_provider(
@@ -37,8 +34,14 @@ pub async fn edit_oauth_provider(
     updated_at: Some(Some(Utc::now())),
   };
 
-  let update_result =
-    AdminOAuthProvider::update(&mut context.pool(), data.id, &oauth_provider_form).await?;
-  let oauth_provider = AdminOAuthProvider::read(&mut context.pool(), update_result.id).await?;
+  let update_result = AdminOAuthProvider::update_for_site(
+    &mut context.pool(),
+    data.id,
+    local_user_view.local_user.local_site_id,
+    &oauth_provider_form,
+  )
+  .await?;
+  let oauth_provider = update_result;
+  crate::site::read::invalidate_site_response(local_user_view.local_user.local_site_id).await;
   Ok(Json(oauth_provider))
 }

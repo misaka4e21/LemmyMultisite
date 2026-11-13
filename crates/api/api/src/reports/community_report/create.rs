@@ -1,6 +1,7 @@
 use crate::check_report_reason;
 use activitypub_federation::config::Data;
 use actix_web::web::Json;
+use diesel_async::AsyncConnection;
 use either::Either;
 use lemmy_api_utils::{
   context::LemmyContext,
@@ -10,6 +11,7 @@ use lemmy_api_utils::{
   utils::{check_community_user_action, check_local_user_banned_or_deleted, slur_regex},
 };
 use lemmy_db_schema::{
+  impls::presence::{SiteReportId, combined_report_id, ensure_report_site},
   source::{
     community::Community,
     community_report::{CommunityReport, CommunityReportForm},
@@ -22,9 +24,9 @@ use lemmy_db_views_report_combined::{
   ReportCombinedViewInternal,
   api::{CommunityReportResponse, CreateCommunityReport},
 };
-use lemmy_diesel_utils::traits::Crud;
+use lemmy_diesel_utils::{connection::get_conn, traits::Crud};
 use lemmy_email::admin::send_new_report_email_to_admins;
-use lemmy_utils::error::LemmyResult;
+use lemmy_utils::error::{LemmyError, LemmyResult};
 
 pub async fn create_community_report(
   Json(data): Json<CreateCommunityReport>,
@@ -55,7 +57,18 @@ pub async fn create_community_report(
     reason,
   };
 
-  let report = CommunityReport::report(&mut context.pool(), &report_form).await?;
+  let pool = &mut context.pool();
+  let conn = &mut get_conn(pool).await?;
+  let site_id = tenant.local_site().id;
+  let (report, combined_id) = conn
+    .transaction::<_, LemmyError, _>(async |conn| {
+      let pool = &mut conn.into();
+      let report = CommunityReport::report(pool, &report_form).await?;
+      let combined_id = combined_report_id(pool, SiteReportId::Community(report.id)).await?;
+      ensure_report_site(pool, site_id, combined_id).await?;
+      Ok((report, combined_id))
+    })
+    .await?;
 
   let community_report_view =
     ReportCombinedViewInternal::read_community_report(&mut context.pool(), report.id, person)
@@ -81,6 +94,7 @@ pub async fn create_community_report(
   ActivityChannel::submit_activity(
     SendActivityData::CreateReport {
       object_id: community.ap_id.inner().clone(),
+      report_id: combined_id,
       actor: local_user_view.person,
       receiver: Either::Left(site),
       reason: data.reason.clone(),

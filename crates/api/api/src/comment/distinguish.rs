@@ -3,7 +3,7 @@ use actix_web::web::Json;
 use lemmy_api_utils::{
   context::LemmyContext,
   send_activity::{ActivityChannel, SendActivityData},
-  utils::{check_community_mod_action, check_community_user_action},
+  utils::{check_community_global_mod_action, check_community_user_action},
 };
 use lemmy_db_schema::source::comment::{Comment, CommentUpdateForm};
 use lemmy_db_views_comment::{
@@ -42,7 +42,7 @@ pub async fn distinguish_comment(
   }
 
   // Verify that only a mod or admin can distinguish a comment
-  check_community_mod_action(
+  check_community_global_mod_action(
     &local_user_view,
     &orig_comment.community,
     false,

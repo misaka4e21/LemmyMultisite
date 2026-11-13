@@ -303,7 +303,7 @@ pub async fn authenticate_with_oauth(
 
   // Fetch the OAUTH provider and make sure it's enabled
   let oauth_provider_id = data.oauth_provider_id;
-  let oauth_provider = AdminOAuthProvider::read(pool, oauth_provider_id)
+  let oauth_provider = AdminOAuthProvider::read_for_site(pool, oauth_provider_id, local_site.id)
     .await
     .ok()
     .ok_or(LemmyErrorType::OauthAuthorizationInvalid)?;

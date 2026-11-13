@@ -8,6 +8,8 @@ use diesel::{
   CombineDsl,
   ExpressionMethods,
   JoinOnDsl,
+  NullableExpressionMethods,
+  OptionalExtension,
   QueryDsl,
   dsl::{IntervalDsl, insert_into, not},
   result::Error,
@@ -16,7 +18,7 @@ use diesel_async::RunQueryDsl;
 use lemmy_db_schema_file::{
   PersonId,
   newtypes::{CommunityId, LanguageId, LocalSiteId, LocalUserId},
-  schema::{community_actions, local_user, person, registration_application},
+  schema::{community, community_actions, local_user, person, registration_application},
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
@@ -67,6 +69,24 @@ impl LocalUser {
       Err(Error::QueryBuilderError(_)) => Ok(0),
       other => other,
     }
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+
+  pub async fn update_for_site(
+    pool: &mut DbPool<'_>,
+    local_user_id: LocalUserId,
+    local_site_id: LocalSiteId,
+    form: &LocalUserUpdateForm,
+  ) -> LemmyResult<Self> {
+    let conn = &mut get_conn(pool).await?;
+    diesel::update(
+      local_user::table
+        .filter(local_user::id.eq(local_user_id))
+        .filter(local_user::local_site_id.eq(local_site_id)),
+    )
+    .set(form)
+    .get_result(conn)
+    .await
     .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
@@ -254,6 +274,13 @@ impl LocalUser {
   ) -> LemmyResult<()> {
     let conn = &mut get_conn(pool).await?;
 
+    let admin_site = local_user::table
+      .filter(local_user::person_id.eq(admin_person_id))
+      .filter(local_user::admin.eq(true))
+      .select(local_user::local_site_id)
+      .first::<LocalSiteId>(conn)
+      .await?;
+
     // Build the list of persons
     let mut persons = target_person_ids;
     persons.push(admin_person_id);
@@ -261,6 +288,7 @@ impl LocalUser {
 
     let res = local_user::table
       .filter(local_user::admin.eq(true))
+      .filter(local_user::local_site_id.eq(admin_site))
       .filter(local_user::person_id.eq_any(persons))
       .order_by(local_user::id)
       // This does a limit 1 select first
@@ -284,6 +312,21 @@ impl LocalUser {
   ) -> LemmyResult<()> {
     let conn = &mut get_conn(pool).await?;
 
+    // Local communities use their owning site's administrator hierarchy.
+    // Remote communities use the acting local user's site, when one exists.
+    let community_site = community::table
+      .find(for_community_id)
+      .select(community::origin_local_site_id)
+      .first::<Option<LocalSiteId>>(conn)
+      .await?;
+    let actor_site = local_user::table
+      .filter(local_user::person_id.eq(admin_person_id))
+      .select(local_user::local_site_id)
+      .first::<LocalSiteId>(conn)
+      .await
+      .optional()?;
+    let hierarchy_site = community_site.or(actor_site);
+
     // Build the list of persons
     let mut persons = target_person_ids;
     persons.push(admin_person_id);
@@ -291,6 +334,7 @@ impl LocalUser {
 
     let admins = local_user::table
       .filter(local_user::admin.eq(true))
+      .filter(local_user::local_site_id.nullable().eq(hierarchy_site))
       .filter(local_user::person_id.eq_any(&persons))
       .order_by(local_user::id)
       .select(local_user::person_id);
@@ -384,7 +428,7 @@ pub struct UserBackupLists {
 mod tests {
   use crate::source::{
     instance::Instance,
-    local_user::{LocalUser, LocalUserInsertForm},
+    local_user::{LocalUser, LocalUserInsertForm, LocalUserUpdateForm},
     person::{Person, PersonInsertForm},
   };
   use lemmy_diesel_utils::{connection::build_db_pool_for_tests, traits::Crud};
@@ -470,12 +514,34 @@ mod tests {
   #[tokio::test]
   #[serial]
   async fn same_username_and_email_on_two_sites() -> LemmyResult<()> {
-    use crate::source::{
-      community::{Community, CommunityInsertForm},
-      local_site::{LocalSite, LocalSiteInsertForm},
-      site::{Site, SiteUpsertForm},
+    use crate::{
+      impls::presence::{
+        SiteReportId,
+        SiteReportObject,
+        combined_report_id,
+        ensure_report_site,
+        lock_report_activity,
+        read_report_site_state,
+        record_report_activity,
+        resolve_report_for_site,
+        resolve_reports_for_site,
+      },
+      source::{
+        community::{Community, CommunityActions, CommunityInsertForm, CommunityModeratorForm},
+        custom_emoji::{CustomEmoji, CustomEmojiInsertForm, CustomEmojiUpdateForm},
+        local_site::{LocalSite, LocalSiteInsertForm},
+        oauth_provider::{AdminOAuthProvider, OAuthProviderInsertForm, OAuthProviderUpdateForm},
+        post::{Post, PostInsertForm},
+        post_report::{PostReport, PostReportForm},
+        site::{Site, SiteUpsertForm},
+        tagline::{Tagline, TaglineInsertForm, TaglineUpdateForm},
+      },
+      traits::Reportable,
     };
     use chrono::Utc;
+    use diesel_async::AsyncConnection;
+    use lemmy_diesel_utils::connection::get_conn;
+    use lemmy_utils::error::LemmyError;
 
     let pool = &build_db_pool_for_tests();
     let pool = &mut pool.into();
@@ -554,6 +620,26 @@ mod tests {
     )
     .await?;
     assert_ne!(first_user.id, second_user.id);
+    let admin_form = LocalUserUpdateForm {
+      admin: Some(true),
+      ..Default::default()
+    };
+    assert!(
+      LocalUser::update_for_site(pool, second_user.id, first_local_site.id, &admin_form)
+        .await
+        .is_err()
+    );
+    let first_admin =
+      LocalUser::update_for_site(pool, first_user.id, first_local_site.id, &admin_form).await?;
+    assert!(first_admin.admin);
+    let second_admin =
+      LocalUser::update_for_site(pool, second_user.id, second_local_site.id, &admin_form).await?;
+    assert!(second_admin.admin);
+    assert!(
+      LocalUser::is_higher_admin_check(pool, second_person.id, vec![first_person.id])
+        .await
+        .is_ok()
+    );
     assert!(
       LocalUser::check_is_email_taken(pool, first_local_site.id, &email)
         .await
@@ -568,15 +654,296 @@ mod tests {
     let community_name = format!("same_community_{suffix}");
     let first_community = Community::create(
       pool,
-      &CommunityInsertForm::new(first_instance.id, community_name.clone(), "pubkey".into()),
+      &CommunityInsertForm {
+        origin_local_site_id: Some(first_local_site.id),
+        ..CommunityInsertForm::new(first_instance.id, community_name.clone(), "pubkey".into())
+      },
     )
     .await?;
     let second_community = Community::create(
       pool,
-      &CommunityInsertForm::new(second_instance.id, community_name, "pubkey".into()),
+      &CommunityInsertForm {
+        origin_local_site_id: Some(second_local_site.id),
+        ..CommunityInsertForm::new(second_instance.id, community_name, "pubkey".into())
+      },
     )
     .await?;
     assert_ne!(first_community.id, second_community.id);
+    CommunityActions::join(
+      pool,
+      &CommunityModeratorForm::new(first_community.id, second_person.id),
+    )
+    .await?;
+    assert!(
+      LocalUser::is_higher_mod_or_admin_check(
+        pool,
+        first_community.id,
+        second_person.id,
+        vec![first_person.id],
+      )
+      .await
+      .is_err()
+    );
+    assert!(
+      LocalUser::is_higher_mod_or_admin_check(
+        pool,
+        second_community.id,
+        second_person.id,
+        vec![first_person.id],
+      )
+      .await
+      .is_ok()
+    );
+
+    let oauth_url = url::Url::parse("https://identity.example/oauth")?;
+    let oauth_form = OAuthProviderInsertForm {
+      local_site_id: first_local_site.id,
+      display_name: "provider".into(),
+      issuer: oauth_url.clone().into(),
+      authorization_endpoint: oauth_url.clone().into(),
+      token_endpoint: oauth_url.clone().into(),
+      userinfo_endpoint: oauth_url.clone().into(),
+      id_claim: "sub".into(),
+      client_id: "shared-client".into(),
+      client_secret: "secret".into(),
+      scopes: "openid".into(),
+      auto_verify_email: None,
+      account_linking_enabled: None,
+      use_pkce: None,
+      enabled: None,
+    };
+    let first_provider = AdminOAuthProvider::create(pool, &oauth_form).await?;
+    assert!(AdminOAuthProvider::create(pool, &oauth_form).await.is_err());
+    let second_provider = AdminOAuthProvider::create(
+      pool,
+      &OAuthProviderInsertForm {
+        local_site_id: second_local_site.id,
+        ..oauth_form
+      },
+    )
+    .await?;
+    assert_ne!(first_provider.id, second_provider.id);
+    let provider_update = OAuthProviderUpdateForm {
+      display_name: Some("updated provider".into()),
+      ..Default::default()
+    };
+    assert!(
+      AdminOAuthProvider::update_for_site(
+        pool,
+        second_provider.id,
+        first_local_site.id,
+        &provider_update
+      )
+      .await
+      .is_err()
+    );
+    assert_eq!(
+      AdminOAuthProvider::update_for_site(
+        pool,
+        first_provider.id,
+        first_local_site.id,
+        &provider_update
+      )
+      .await?
+      .display_name,
+      "updated provider"
+    );
+    assert_eq!(
+      AdminOAuthProvider::get_all(pool, first_local_site.id)
+        .await?
+        .len(),
+      1
+    );
+    assert!(
+      AdminOAuthProvider::read_for_site(pool, second_provider.id, first_local_site.id)
+        .await
+        .is_err()
+    );
+    assert!(
+      AdminOAuthProvider::delete_for_site(pool, second_provider.id, first_local_site.id)
+        .await
+        .is_err()
+    );
+
+    let emoji_form = CustomEmojiInsertForm {
+      local_site_id: first_local_site.id,
+      shortcode: "same".into(),
+      image_url: oauth_url.into(),
+      alt_text: "same".into(),
+      category: "test".into(),
+    };
+    let first_emoji = CustomEmoji::create(pool, &emoji_form).await?;
+    assert!(CustomEmoji::create(pool, &emoji_form).await.is_err());
+    let second_emoji = CustomEmoji::create(
+      pool,
+      &CustomEmojiInsertForm {
+        local_site_id: second_local_site.id,
+        ..emoji_form
+      },
+    )
+    .await?;
+    assert_ne!(first_emoji.id, second_emoji.id);
+    let emoji_update = CustomEmojiUpdateForm {
+      alt_text: Some("updated emoji".into()),
+      ..Default::default()
+    };
+    assert!(
+      CustomEmoji::update_for_site(pool, second_emoji.id, first_local_site.id, &emoji_update)
+        .await
+        .is_err()
+    );
+    assert_eq!(
+      CustomEmoji::update_for_site(pool, first_emoji.id, first_local_site.id, &emoji_update)
+        .await?
+        .alt_text,
+      "updated emoji"
+    );
+    assert!(
+      CustomEmoji::delete_for_site(pool, second_emoji.id, first_local_site.id)
+        .await
+        .is_err()
+    );
+
+    let first_tagline = Tagline::create(
+      pool,
+      &TaglineInsertForm {
+        local_site_id: first_local_site.id,
+        content: "first".into(),
+      },
+    )
+    .await?;
+    let second_tagline = Tagline::create(
+      pool,
+      &TaglineInsertForm {
+        local_site_id: second_local_site.id,
+        content: "second".into(),
+      },
+    )
+    .await?;
+    let tagline_update = TaglineUpdateForm {
+      content: "updated tagline".into(),
+      updated_at: None,
+    };
+    assert!(
+      Tagline::update_for_site(
+        pool,
+        second_tagline.id,
+        first_local_site.id,
+        &tagline_update
+      )
+      .await
+      .is_err()
+    );
+    assert_eq!(
+      Tagline::update_for_site(pool, first_tagline.id, first_local_site.id, &tagline_update)
+        .await?
+        .content,
+      "updated tagline"
+    );
+    assert_eq!(
+      Tagline::get_random(pool, first_local_site.id).await?.id,
+      first_tagline.id
+    );
+    assert!(
+      Tagline::delete_for_site(pool, second_tagline.id, first_local_site.id)
+        .await
+        .is_err()
+    );
+
+    let post = Post::create(
+      pool,
+      &PostInsertForm::new("report test".into(), first_person.id, first_community.id),
+    )
+    .await?;
+    let report = PostReport::report(
+      pool,
+      &PostReportForm {
+        creator_id: first_person.id,
+        post_id: post.id,
+        original_post_name: post.name.clone(),
+        original_post_url: None,
+        original_post_body: None,
+        reason: "report test".into(),
+        violates_instance_rules: true,
+      },
+    )
+    .await?;
+    let report_id = combined_report_id(pool, SiteReportId::Post(report.id)).await?;
+    let conn = &mut get_conn(pool).await?;
+    conn
+      .transaction::<_, LemmyError, _>(async |conn| {
+        let pool = &mut conn.into();
+        let activity = "https://remote.example/activities/flag/test";
+        assert!(lock_report_activity(pool, activity).await?.is_none());
+        record_report_activity(pool, activity, report_id).await?;
+        assert_eq!(lock_report_activity(pool, activity).await?, Some(report_id));
+        Ok(())
+      })
+      .await?;
+    ensure_report_site(pool, first_local_site.id, report_id).await?;
+    assert!(
+      resolve_report_for_site(
+        pool,
+        second_local_site.id,
+        report_id,
+        second_person.id,
+        true,
+        None
+      )
+      .await
+      .is_err()
+    );
+    ensure_report_site(pool, second_local_site.id, report_id).await?;
+    ensure_report_site(pool, second_local_site.id, report_id).await?;
+    resolve_report_for_site(
+      pool,
+      first_local_site.id,
+      report_id,
+      first_person.id,
+      true,
+      Some(Some("handled".into())),
+    )
+    .await?;
+    let first_report = read_report_site_state(pool, first_local_site.id, report_id).await?;
+    let second_report = read_report_site_state(pool, second_local_site.id, report_id).await?;
+    assert!(first_report.resolved);
+    assert_eq!(first_report.conclusion.as_deref(), Some("handled"));
+    assert!(!second_report.resolved);
+    assert!(second_report.resolver_id.is_none());
+    assert!(second_report.conclusion.is_none());
+    resolve_report_for_site(
+      pool,
+      first_local_site.id,
+      report_id,
+      first_person.id,
+      false,
+      None,
+    )
+    .await?;
+    let first_report = read_report_site_state(pool, first_local_site.id, report_id).await?;
+    assert!(!first_report.resolved);
+    assert_eq!(first_report.conclusion.as_deref(), Some("handled"));
+    assert_eq!(
+      resolve_reports_for_site(
+        pool,
+        first_local_site.id,
+        SiteReportObject::Post(post.id),
+        None,
+        first_person.id,
+      )
+      .await?,
+      1
+    );
+    assert!(
+      read_report_site_state(pool, first_local_site.id, report_id)
+        .await?
+        .resolved
+    );
+    assert!(
+      !read_report_site_state(pool, second_local_site.id, report_id)
+        .await?
+        .resolved
+    );
 
     Instance::delete(pool, first_instance.id).await?;
     Instance::delete(pool, second_instance.id).await?;

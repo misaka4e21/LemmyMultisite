@@ -18,6 +18,7 @@ pub async fn create_oauth_provider(
 
   let cloned_data = data.clone();
   let oauth_provider_form = OAuthProviderInsertForm {
+    local_site_id: local_user_view.local_user.local_site_id,
     display_name: cloned_data.display_name,
     issuer: Url::parse(&cloned_data.issuer)?.into(),
     authorization_endpoint: Url::parse(&cloned_data.authorization_endpoint)?.into(),
@@ -34,5 +35,6 @@ pub async fn create_oauth_provider(
   };
   let oauth_provider =
     AdminOAuthProvider::create(&mut context.pool(), &oauth_provider_form).await?;
+  crate::site::read::invalidate_site_response(local_user_view.local_user.local_site_id).await;
   Ok(Json(oauth_provider))
 }

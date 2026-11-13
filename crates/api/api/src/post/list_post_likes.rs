@@ -1,6 +1,6 @@
 use actix_web::web::{Data, Json, Query};
-use lemmy_api_utils::{context::LemmyContext, utils::is_mod_or_admin};
-use lemmy_db_schema::source::post::Post;
+use lemmy_api_utils::{context::LemmyContext, utils::check_community_global_mod_action};
+use lemmy_db_schema::source::{community::Community, post::Post};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_post::api::ListPostLikes;
 use lemmy_db_views_vote::VoteView;
@@ -14,7 +14,9 @@ pub async fn list_post_likes(
   local_user_view: LocalUserView,
 ) -> LemmyResult<Json<PagedResponse<VoteView>>> {
   let post = Post::read(&mut context.pool(), data.post_id).await?;
-  is_mod_or_admin(&mut context.pool(), &local_user_view, post.community_id).await?;
+  let community = Community::read(&mut context.pool(), post.community_id).await?;
+  check_community_global_mod_action(&local_user_view, &community, false, &mut context.pool())
+    .await?;
 
   let post_likes = VoteView::list_for_post(
     &mut context.pool(),

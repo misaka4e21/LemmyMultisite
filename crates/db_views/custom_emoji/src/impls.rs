@@ -6,7 +6,7 @@ use lemmy_db_schema::source::{
   custom_emoji_keyword::CustomEmojiKeyword,
 };
 use lemmy_db_schema_file::{
-  newtypes::CustomEmojiId,
+  newtypes::{CustomEmojiId, LocalSiteId},
   schema::{custom_emoji, custom_emoji_keyword},
 };
 use lemmy_diesel_utils::connection::{DbPool, get_conn};
@@ -35,10 +35,15 @@ impl CustomEmojiView {
     )
   }
 
-  pub async fn get(pool: &mut DbPool<'_>, emoji_id: CustomEmojiId) -> LemmyResult<Self> {
+  pub async fn get(
+    pool: &mut DbPool<'_>,
+    emoji_id: CustomEmojiId,
+    site_id: LocalSiteId,
+  ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     let emojis = Self::joins()
       .filter(custom_emoji::id.eq(emoji_id))
+      .filter(custom_emoji::local_site_id.eq(site_id))
       .select(selection())
       .load::<CustomEmojiTuple>(conn)
       .await?;
@@ -52,10 +57,16 @@ impl CustomEmojiView {
     }
   }
 
-  pub async fn list(pool: &mut DbPool<'_>, category: &Option<String>) -> LemmyResult<Vec<Self>> {
+  pub async fn list(
+    pool: &mut DbPool<'_>,
+    site_id: LocalSiteId,
+    category: &Option<String>,
+  ) -> LemmyResult<Vec<Self>> {
     let conn = &mut get_conn(pool).await?;
 
-    let mut query = Self::joins().into_boxed();
+    let mut query = Self::joins()
+      .filter(custom_emoji::local_site_id.eq(site_id))
+      .into_boxed();
 
     if let Some(category) = category {
       query = query.filter(custom_emoji::category.eq(category))

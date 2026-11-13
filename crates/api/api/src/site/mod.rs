@@ -6,3 +6,8 @@ pub mod list_all_media;
 pub mod mod_log;
 pub mod purge;
 pub mod registration_applications;
+
+#[cfg(test)]
+mod configuration_tenant_tests;
+#[cfg(test)]
+mod oauth_tenant_tests;

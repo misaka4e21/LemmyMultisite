@@ -1,0 +1,11 @@
+DROP INDEX idx_tagline_local_site_id;
+ALTER TABLE custom_emoji DROP CONSTRAINT custom_emoji_site_image_url_key;
+ALTER TABLE custom_emoji DROP CONSTRAINT custom_emoji_site_shortcode_key;
+ALTER TABLE oauth_provider DROP CONSTRAINT oauth_provider_site_client_id_key;
+ALTER TABLE oauth_provider DROP COLUMN local_site_id;
+ALTER TABLE custom_emoji DROP COLUMN local_site_id;
+ALTER TABLE tagline DROP COLUMN local_site_id;
+ALTER TABLE oauth_provider ADD CONSTRAINT oauth_provider_client_id_key UNIQUE (client_id);
+ALTER TABLE custom_emoji ADD CONSTRAINT custom_emoji_shortcode_key UNIQUE (shortcode);
+ALTER TABLE custom_emoji ADD CONSTRAINT custom_emoji_image_url_key UNIQUE (image_url);
+DROP TABLE site_configuration_migration_map;

@@ -5,16 +5,17 @@ use lemmy_api_utils::{
   send_activity::{ActivityChannel, SendActivityData},
   utils::is_admin,
 };
-use lemmy_db_schema::source::{
-  comment::Comment,
-  local_user::LocalUser,
-  modlog::{Modlog, ModlogInsertForm},
+use lemmy_db_schema::{
+  impls::presence::delete_comment_for_site,
+  source::{
+    local_user::LocalUser,
+    modlog::{Modlog, ModlogInsertForm},
+  },
 };
 use lemmy_db_views_comment::{CommentView, api::PurgeComment};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::SuccessResponse;
-use lemmy_diesel_utils::traits::Crud;
-use lemmy_utils::error::LemmyResult;
+use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 
 pub async fn purge_comment(
   Json(data): Json<PurgeComment>,
@@ -23,6 +24,9 @@ pub async fn purge_comment(
 ) -> LemmyResult<Json<SuccessResponse>> {
   // Only let admin purge an item
   is_admin(&local_user_view)?;
+  if context.site_view()?.local_site.id != local_user_view.local_user.local_site_id {
+    return Err(LemmyErrorType::NotFound.into());
+  }
 
   let comment_id = data.comment_id;
   let local_instance_id = local_user_view.person.instance_id;
@@ -36,6 +40,10 @@ pub async fn purge_comment(
   )
   .await?;
 
+  if comment_view.comment.origin_local_site_id != Some(local_user_view.local_user.local_site_id) {
+    return Err(LemmyErrorType::NotFound.into());
+  }
+
   // Also check that you're a higher admin
   LocalUser::is_higher_admin_check(
     &mut context.pool(),
@@ -46,7 +54,12 @@ pub async fn purge_comment(
 
   // TODO read comments for pictrs images and purge them
 
-  Comment::delete(&mut context.pool(), comment_id).await?;
+  delete_comment_for_site(
+    &mut context.pool(),
+    local_user_view.local_user.local_site_id,
+    comment_id,
+  )
+  .await?;
 
   // Mod tables
   let form = ModlogInsertForm::admin_purge_comment(

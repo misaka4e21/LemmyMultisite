@@ -2,10 +2,13 @@ use crate::{
   source::tagline::{Tagline, TaglineInsertForm, TaglineUpdateForm, tagline_keys as key},
   utils::limit_fetch,
 };
-use diesel::{QueryDsl, insert_into};
+use diesel::{ExpressionMethods, QueryDsl, insert_into};
 use diesel_async::RunQueryDsl;
 use i_love_jesus::SortDirection;
-use lemmy_db_schema_file::{newtypes::TaglineId, schema::tagline};
+use lemmy_db_schema_file::{
+  newtypes::{LocalSiteId, TaglineId},
+  schema::tagline,
+};
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
   pagination::{
@@ -66,11 +69,15 @@ impl PaginationCursorConversion for Tagline {
 impl Tagline {
   pub async fn list(
     pool: &mut DbPool<'_>,
+    site_id: LocalSiteId,
     page_cursor: Option<PaginationCursor>,
     limit: Option<i64>,
   ) -> LemmyResult<PagedResponse<Self>> {
     let limit = limit_fetch(limit, None)?;
-    let query = tagline::table.limit(limit).into_boxed();
+    let query = tagline::table
+      .filter(tagline::local_site_id.eq(site_id))
+      .limit(limit)
+      .into_boxed();
     let paginated_query = Self::paginate(query, &page_cursor, SortDirection::Desc, pool)
       .await?
       .then_order_by(key::published_at)
@@ -84,13 +91,52 @@ impl Tagline {
     paginate_response(res, limit, page_cursor)
   }
 
-  pub async fn get_random(pool: &mut DbPool<'_>) -> LemmyResult<Self> {
+  pub async fn get_random(pool: &mut DbPool<'_>, site_id: LocalSiteId) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     tagline::table
+      .filter(tagline::local_site_id.eq(site_id))
       .order(random())
       .limit(1)
       .first::<Self>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)
+  }
+
+  pub async fn update_for_site(
+    pool: &mut DbPool<'_>,
+    id: TaglineId,
+    site_id: LocalSiteId,
+    form: &TaglineUpdateForm,
+  ) -> LemmyResult<Self> {
+    let conn = &mut get_conn(pool).await?;
+    diesel::update(
+      tagline::table
+        .find(id)
+        .filter(tagline::local_site_id.eq(site_id)),
+    )
+    .set(form)
+    .get_result(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+
+  pub async fn delete_for_site(
+    pool: &mut DbPool<'_>,
+    id: TaglineId,
+    site_id: LocalSiteId,
+  ) -> LemmyResult<usize> {
+    let conn = &mut get_conn(pool).await?;
+    let count = diesel::delete(
+      tagline::table
+        .find(id)
+        .filter(tagline::local_site_id.eq(site_id)),
+    )
+    .execute(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::Deleted)?;
+    if count == 0 {
+      return Err(LemmyErrorType::NotFound.into());
+    }
+    Ok(count)
   }
 }

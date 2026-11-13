@@ -125,6 +125,7 @@ impl PersonView {
           .inner_join(local_site::table.on(local_site::id.eq(person_site::local_site_id)))
           .inner_join(site::table.on(site::id.eq(local_site::site_id)))
           .filter(person_site::person_id.eq(person::id))
+          .filter(local_user::local_site_id.eq(local_site::id))
           .filter(site::instance_id.eq(local_instance_id)),
       ))
       .filter(person::deleted.eq(false))
@@ -371,6 +372,41 @@ mod tests {
     )
     .await?;
 
+    let other_instance = Instance::read_or_create(pool, "other-person-site.example").await?;
+    let other_site = Site::create(
+      pool,
+      &SiteUpsertForm::new("other".into(), other_instance.id),
+    )
+    .await?;
+    let other_system = Person::create(
+      pool,
+      &PersonInsertForm::test_form(other_instance.id, "other_system"),
+    )
+    .await?;
+    let other_local_site = LocalSite::create(
+      pool,
+      &LocalSiteInsertForm::new(
+        other_site.id,
+        other_system.id,
+        other_instance.domain.clone(),
+      ),
+    )
+    .await?;
+    let other_admin = Person::create(
+      pool,
+      &PersonInsertForm::test_form(other_instance.id, "other_admin"),
+    )
+    .await?;
+    let mut other_admin_form = LocalUserInsertForm::test_form_admin(other_admin.id);
+    other_admin_form.local_site_id = other_local_site.id;
+    LocalUser::create(pool, &other_admin_form, vec![]).await?;
+    ensure_person_site(pool, data.alice_local_user.local_site_id, other_admin.id).await?;
+    assert!(
+      PersonView::read(pool, other_admin.id, None, data.alice.instance_id, false)
+        .await
+        .is_ok()
+    );
+
     let list = PersonView::list_admins(None, data.alice.instance_id, pool).await?;
     assert_length!(1, list);
     assert_eq!(list[0].person.id, data.alice.id);
@@ -385,6 +421,7 @@ mod tests {
       .is_admin;
     assert!(!is_admin);
 
+    Instance::delete(pool, other_instance.id).await?;
     cleanup(data, pool).await
   }
 

@@ -276,6 +276,7 @@ diesel::table! {
         category -> Text,
         published_at -> Timestamptz,
         updated_at -> Nullable<Timestamptz>,
+        local_site_id -> Int4,
     }
 }
 
@@ -724,6 +725,7 @@ diesel::table! {
         published_at -> Timestamptz,
         updated_at -> Nullable<Timestamptz>,
         use_pkce -> Bool,
+        local_site_id -> Int4,
     }
 }
 
@@ -1000,6 +1002,32 @@ diesel::table! {
 }
 
 diesel::table! {
+    site_configuration_migration_map (resource_type, resource_id) {
+        resource_type -> Text,
+        resource_id -> Int4,
+        local_site_id -> Int4,
+    }
+}
+
+diesel::table! {
+    report_activity (ap_id) {
+        ap_id -> Text,
+        report_combined_id -> Int4,
+    }
+}
+
+diesel::table! {
+    report_site (local_site_id, report_combined_id) {
+        local_site_id -> Int4,
+        report_combined_id -> Int4,
+        resolved -> Bool,
+        resolver_id -> Nullable<Int4>,
+        conclusion -> Nullable<Text>,
+        updated_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
     secret (id) {
         id -> Int4,
         jwt_secret -> Varchar,
@@ -1062,6 +1090,7 @@ diesel::table! {
         content -> Text,
         published_at -> Timestamptz,
         updated_at -> Nullable<Timestamptz>,
+        local_site_id -> Int4,
     }
 }
 
@@ -1093,6 +1122,7 @@ diesel::table! {
         removed -> Bool,
         locked -> Bool,
         featured -> Bool,
+        ban_removed -> Bool,
     }
 }
 
@@ -1103,6 +1133,7 @@ diesel::table! {
         known_at -> Timestamptz,
         last_refreshed_at -> Nullable<Timestamptz>,
         removed -> Bool,
+        ban_removed -> Bool,
     }
 }
 
@@ -1121,6 +1152,8 @@ diesel::table! {
         private_message_id -> Int4,
         role -> Text,
         known_at -> Timestamptz,
+        removed -> Bool,
+        ban_removed -> Bool,
     }
 }
 
@@ -1293,6 +1326,9 @@ diesel::allow_tables_to_appear_in_same_query!(
   post_community_tag,
   post_report,
   post_site,
+  report_activity,
+  report_site,
+  site_configuration_migration_map,
   post_thumbnail_source,
   private_message,
   private_message_report,

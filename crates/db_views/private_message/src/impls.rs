@@ -63,6 +63,13 @@ impl PrivateMessageView {
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)?;
 
+    let site_removed = private_message_site::table
+      .find((local_site_id, private_message_id))
+      .select(private_message_site::removed.or(private_message_site::ban_removed))
+      .first::<bool>(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    pm.private_message.removed |= site_removed;
     pm.private_message.clear_deleted_by_recipient(my_person);
     Ok(pm)
   }

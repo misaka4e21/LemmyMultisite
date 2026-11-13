@@ -182,8 +182,8 @@ where
   Ok(())
 }
 
-pub async fn handle_outgoing_activities(context: Data<LemmyContext>) {
-  while let Some(data) = ActivityChannel::retrieve_activity().await {
+pub async fn handle_outgoing_activities(_context: Data<LemmyContext>) {
+  while let Some((data, context)) = ActivityChannel::retrieve_activity().await {
     if let Err(e) = match_outgoing_activities(data, &context).await {
       tracing::warn!("error while saving outgoing activity to db: {e}");
     }
@@ -385,6 +385,7 @@ pub async fn match_outgoing_activities(
       DeleteUser(person, remove_data) => send_apub_delete_user(person, remove_data, context).await,
       CreateReport {
         object_id,
+        report_id,
         actor,
         receiver,
         reason,
@@ -394,6 +395,7 @@ pub async fn match_outgoing_activities(
           &actor.into(),
           &receiver.map_either(Into::into, Into::into),
           reason,
+          report_id,
           context,
         )
         .await

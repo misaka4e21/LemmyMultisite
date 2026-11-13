@@ -1,6 +1,7 @@
 use crate::check_report_reason;
 use activitypub_federation::config::Data;
 use actix_web::web::Json;
+use diesel_async::AsyncConnection;
 use either::Either;
 use lemmy_api_utils::{
   context::LemmyContext,
@@ -15,6 +16,7 @@ use lemmy_api_utils::{
   },
 };
 use lemmy_db_schema::{
+  impls::presence::{SiteReportId, combined_report_id, ensure_report_site},
   source::post_report::{PostReport, PostReportForm},
   traits::Reportable,
 };
@@ -24,8 +26,9 @@ use lemmy_db_views_report_combined::{
   ReportCombinedViewInternal,
   api::{CreatePostReport, PostReportResponse},
 };
+use lemmy_diesel_utils::connection::get_conn;
 use lemmy_email::admin::send_new_report_email_to_admins;
-use lemmy_utils::error::LemmyResult;
+use lemmy_utils::error::{LemmyError, LemmyResult};
 
 /// Creates a post report and notifies the moderators of the community
 pub async fn create_post_report(
@@ -65,7 +68,18 @@ pub async fn create_post_report(
     violates_instance_rules: data.violates_instance_rules.unwrap_or_default(),
   };
 
-  let report = PostReport::report(&mut context.pool(), &report_form).await?;
+  let pool = &mut context.pool();
+  let conn = &mut get_conn(pool).await?;
+  let site_id = tenant.local_site().id;
+  let (report, combined_id) = conn
+    .transaction::<_, LemmyError, _>(async |conn| {
+      let pool = &mut conn.into();
+      let report = PostReport::report(pool, &report_form).await?;
+      let combined_id = combined_report_id(pool, SiteReportId::Post(report.id)).await?;
+      ensure_report_site(pool, site_id, combined_id).await?;
+      Ok((report, combined_id))
+    })
+    .await?;
 
   let post_report_view =
     ReportCombinedViewInternal::read_post_report(&mut context.pool(), report.id, person).await?;
@@ -88,6 +102,7 @@ pub async fn create_post_report(
     ActivityChannel::submit_activity(
       SendActivityData::CreateReport {
         object_id: orig_post.post.ap_id.inner().clone(),
+        report_id: combined_id,
         actor: local_user_view.person,
         receiver: Either::Right(orig_post.community),
         reason: data.reason.clone(),

@@ -20,6 +20,7 @@ pub async fn get_pending_follows_list(
   let items = PendingFollowerView::list_approval_required(
     &mut context.pool(),
     local_user_view.person.id,
+    local_user_view.local_user.local_site_id,
     all_communities,
     data.unread_only.unwrap_or_default(),
     data.page_cursor,

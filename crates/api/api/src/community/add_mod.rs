@@ -5,7 +5,7 @@ use lemmy_api_utils::{
   context::LemmyContext,
   notify::notify_mod_action,
   send_activity::{ActivityChannel, SendActivityData},
-  utils::check_community_mod_action,
+  utils::check_community_global_mod_action,
 };
 use lemmy_db_schema::source::{
   community::{Community, CommunityActions, CommunityModeratorForm},
@@ -27,7 +27,8 @@ pub async fn add_mod_to_community(
 ) -> LemmyResult<Json<AddModToCommunityResponse>> {
   let community = Community::read(&mut context.pool(), data.community_id).await?;
   // Verify that only mods or admins can add mod
-  check_community_mod_action(&local_user_view, &community, false, &mut context.pool()).await?;
+  check_community_global_mod_action(&local_user_view, &community, false, &mut context.pool())
+    .await?;
 
   // Check that you're a higher mod.
   // Do this even if you're adding a mod (so that lower mods can't re-order higher ones)

@@ -1,6 +1,5 @@
 use activitypub_federation::config::Data;
 use actix_web::web::Json;
-use chrono::Utc;
 use either::Either;
 use lemmy_api_utils::{
   context::LemmyContext,
@@ -8,11 +7,13 @@ use lemmy_api_utils::{
   utils::is_admin,
 };
 use lemmy_db_schema::{
-  source::{
-    community_report::{CommunityReport, UpdateCommunityReportForm},
-    site::Site,
+  impls::presence::{
+    SiteReportId,
+    combined_report_id,
+    read_report_site_state,
+    resolve_report_for_site,
   },
-  traits::Reportable,
+  source::site::Site,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_report_combined::{
@@ -32,20 +33,28 @@ pub async fn resolve_community_report(
   let report_id = data.report_id;
   let person = &local_user_view.person;
 
-  let conclusion = diesel_string_update(data.conclusion.as_deref());
+  let site_id = local_user_view.local_user.local_site_id;
+  let combined_id =
+    combined_report_id(&mut context.pool(), SiteReportId::Community(report_id)).await?;
+  resolve_report_for_site(
+    &mut context.pool(),
+    site_id,
+    combined_id,
+    person.id,
+    data.resolved,
+    diesel_string_update(data.conclusion.as_deref()),
+  )
+  .await?;
 
-  let form = UpdateCommunityReportForm {
-    resolver_id: Some(person.id),
-    resolved: Some(data.resolved),
-    conclusion,
-    updated_at: Some(Utc::now()),
-  };
-
-  CommunityReport::update_resolved(&mut context.pool(), report_id, &form).await?;
-
-  let community_report_view =
+  let mut community_report_view =
     ReportCombinedViewInternal::read_community_report(&mut context.pool(), report_id, person)
       .await?;
+  let state = read_report_site_state(&mut context.pool(), site_id, combined_id).await?;
+  community_report_view.community_report.resolved = state.resolved;
+  community_report_view.community_report.resolver_id = state.resolver_id;
+  community_report_view.community_report.conclusion = state.conclusion;
+  community_report_view.community_report.updated_at = state.updated_at;
+  community_report_view.resolver = Some(person.clone());
   let site = Site::read_from_instance_id(
     &mut context.pool(),
     community_report_view.community.instance_id,

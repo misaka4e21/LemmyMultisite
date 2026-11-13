@@ -30,15 +30,7 @@ use lemmy_apub_objects::{
   },
   utils::functions::verify_person_in_site_or_community,
 };
-use lemmy_db_schema::{
-  source::{
-    comment_report::CommentReport,
-    community_report::CommunityReport,
-    post_report::PostReport,
-    private_message_report::PrivateMessageReport,
-  },
-  traits::Reportable,
-};
+use lemmy_db_schema::impls::presence::{SiteReportObject, resolve_reports_for_site};
 use lemmy_utils::error::{LemmyError, LemmyResult};
 use url::Url;
 
@@ -94,27 +86,27 @@ impl Activity for ResolveReport {
     let object = self.object.dereference(context).await?;
     let reporter = object.actor.dereference(context).await?;
     let actor = self.actor.dereference(context).await?;
-    match object.object.dereference(context).await? {
-      ReportableObjects::Left(PostOrComment::Left(post)) => {
-        PostReport::resolve_apub(&mut context.pool(), post.id, reporter.id, actor.id).await?;
-      }
+    let site_id = context.site_view()?.local_site.id;
+    let target = match object.object.dereference(context).await? {
+      ReportableObjects::Left(PostOrComment::Left(post)) => SiteReportObject::Post(post.id),
       ReportableObjects::Left(PostOrComment::Right(comment)) => {
-        CommentReport::resolve_apub(&mut context.pool(), comment.id, reporter.id, actor.id).await?;
+        SiteReportObject::Comment(comment.id)
       }
       ReportableObjects::Right(Either::Left(community)) => {
-        CommunityReport::resolve_apub(&mut context.pool(), community.id, reporter.id, actor.id)
-          .await?;
+        SiteReportObject::Community(community.id)
       }
       ReportableObjects::Right(Either::Right(private_message)) => {
-        PrivateMessageReport::resolve_apub(
-          &mut context.pool(),
-          private_message.id,
-          reporter.id,
-          actor.id,
-        )
-        .await?;
+        SiteReportObject::PrivateMessage(private_message.id)
       }
     };
+    resolve_reports_for_site(
+      &mut context.pool(),
+      site_id,
+      target,
+      Some(reporter.id),
+      actor.id,
+    )
+    .await?;
 
     let receiver = object.to[0].dereference(context).await?;
     if let Some(community) = local_community(&receiver) {

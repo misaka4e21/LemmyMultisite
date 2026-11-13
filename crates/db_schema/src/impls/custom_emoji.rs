@@ -5,9 +5,9 @@ use crate::source::{
 use diesel::{ExpressionMethods, QueryDsl, dsl::insert_into};
 use diesel_async::RunQueryDsl;
 use lemmy_db_schema_file::{
-  newtypes::CustomEmojiId,
+  newtypes::{CustomEmojiId, LocalSiteId},
   schema::{
-    custom_emoji::dsl::custom_emoji,
+    custom_emoji::{self as emoji_table, dsl::custom_emoji},
     custom_emoji_keyword::dsl::{custom_emoji_id, custom_emoji_keyword},
   },
 };
@@ -42,6 +42,46 @@ impl Crud for CustomEmoji {
       .get_result::<Self>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+}
+
+impl CustomEmoji {
+  pub async fn update_for_site(
+    pool: &mut DbPool<'_>,
+    emoji_id: CustomEmojiId,
+    site_id: LocalSiteId,
+    form: &CustomEmojiUpdateForm,
+  ) -> LemmyResult<Self> {
+    let conn = &mut get_conn(pool).await?;
+    diesel::update(
+      custom_emoji
+        .find(emoji_id)
+        .filter(emoji_table::local_site_id.eq(site_id)),
+    )
+    .set(form)
+    .get_result(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+
+  pub async fn delete_for_site(
+    pool: &mut DbPool<'_>,
+    emoji_id: CustomEmojiId,
+    site_id: LocalSiteId,
+  ) -> LemmyResult<usize> {
+    let conn = &mut get_conn(pool).await?;
+    let count = diesel::delete(
+      custom_emoji
+        .find(emoji_id)
+        .filter(emoji_table::local_site_id.eq(site_id)),
+    )
+    .execute(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::Deleted)?;
+    if count == 0 {
+      return Err(LemmyErrorType::NotFound.into());
+    }
+    Ok(count)
   }
 }
 

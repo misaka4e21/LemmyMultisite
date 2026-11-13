@@ -2,9 +2,11 @@ use crate::{CommentView, NotificationData, NotificationView, NotificationViewInt
 use diesel::{
   BoolExpressionMethods,
   ExpressionMethods,
+  NullableExpressionMethods,
   PgExpressionMethods,
   QueryDsl,
   SelectableHelper,
+  dsl::{exists, not},
 };
 use diesel_async::RunQueryDsl;
 use i_love_jesus::SortDirection;
@@ -22,8 +24,19 @@ use lemmy_db_schema::{
 use lemmy_db_schema_file::{
   PersonId,
   enums::NotificationType,
-  newtypes::NotificationId,
-  schema::{comment, community, modlog, notification, person, post, private_message},
+  newtypes::{LocalSiteId, NotificationId},
+  schema::{
+    comment,
+    comment_site,
+    community,
+    modlog,
+    notification,
+    person,
+    post,
+    post_site,
+    private_message,
+    private_message_site,
+  },
 };
 use lemmy_db_views_modlog::ModlogView;
 use lemmy_db_views_notification_sql::notification_joins;
@@ -58,7 +71,10 @@ impl NotificationView {
       .filter(notification::recipient_id.eq(my_person.id))
       // Filter unreads
       .filter(unread_filter)
-      .filter(filter_deleted_and_removed(my_person.id))
+      .filter(filter_deleted_and_removed(
+        my_person.id,
+        my_person.origin_local_site_id,
+      ))
       .filter(community::id.is_null().or(filter_private_or_followed()))
       // Don't count replies from blocked users
       .filter(filter_blocked())
@@ -85,6 +101,11 @@ impl NotificationView {
 
     let res = notification_joins(my_person.id, my_person.instance_id)
       .filter(notification::id.eq(id))
+      .filter(notification::recipient_id.eq(my_person.id))
+      .filter(filter_deleted_and_removed(
+        my_person.id,
+        my_person.origin_local_site_id,
+      ))
       .select(NotificationViewInternal::as_select())
       .get_result::<NotificationViewInternal>(conn)
       .await
@@ -139,7 +160,10 @@ impl NotificationQuery {
       let mut query = notification_joins(my_person.id, my_person.instance_id)
         // Dont show replies from blocked users or instances
         .filter(filter_blocked())
-        .filter(filter_deleted_and_removed(my_person.id))
+        .filter(filter_deleted_and_removed(
+          my_person.id,
+          my_person.origin_local_site_id,
+        ))
         .filter(community::id.is_null().or(filter_private_or_followed()))
         .limit(limit)
         .select(NotificationViewInternal::as_select())
@@ -307,7 +331,7 @@ fn map_to_enum(
 
 /// Filter out the deleted and removed items.
 #[diesel::dsl::auto_type]
-fn filter_deleted_and_removed(my_person_id: PersonId) -> _ {
+fn filter_deleted_and_removed(my_person_id: PersonId, site_id: Option<LocalSiteId>) -> _ {
   // Use is_distinct_from since that handles null
   comment::deleted
     .is_distinct_from(true)
@@ -317,11 +341,31 @@ fn filter_deleted_and_removed(my_person_id: PersonId) -> _ {
         .is_not_null()
         .or(comment::removed.is_distinct_from(true)),
     )
+    .and(
+      modlog::id.is_not_null().or(not(exists(
+        comment_site::table
+          .filter(comment_site::local_site_id.nullable().eq(site_id))
+          .filter(
+            comment_site::comment_id
+              .nullable()
+              .eq(notification::comment_id),
+          )
+          .filter(comment_site::removed.or(comment_site::ban_removed)),
+      ))),
+    )
     .and(post::deleted.is_distinct_from(true))
     .and(
       modlog::id
         .is_not_null()
         .or(post::removed.is_distinct_from(true)),
+    )
+    .and(
+      modlog::id.is_not_null().or(not(exists(
+        post_site::table
+          .filter(post_site::local_site_id.nullable().eq(site_id))
+          .filter(post_site::post_id.nullable().eq(notification::post_id))
+          .filter(post_site::removed.or(post_site::ban_removed)),
+      ))),
     )
     // Filter out the deleted / removed
     .and(private_message::deleted.is_distinct_from(true))
@@ -329,6 +373,18 @@ fn filter_deleted_and_removed(my_person_id: PersonId) -> _ {
       modlog::id
         .is_not_null()
         .or(private_message::removed.is_distinct_from(true)),
+    )
+    .and(
+      modlog::id.is_not_null().or(not(exists(
+        private_message_site::table
+          .filter(private_message_site::local_site_id.nullable().eq(site_id))
+          .filter(
+            private_message_site::private_message_id
+              .nullable()
+              .eq(notification::private_message_id),
+          )
+          .filter(private_message_site::removed.or(private_message_site::ban_removed)),
+      ))),
     )
     // Also hide messages deleted by the recipient, but only for them
     .and(

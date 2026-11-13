@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use lemmy_db_schema_file::newtypes::TaglineId;
+use lemmy_db_schema_file::newtypes::{LocalSiteId, TaglineId};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 #[cfg(feature = "full")]
@@ -21,12 +21,14 @@ pub struct Tagline {
   pub content: String,
   pub published_at: DateTime<Utc>,
   pub updated_at: Option<DateTime<Utc>>,
+  pub local_site_id: LocalSiteId,
 }
 
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "full", derive(Insertable, AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = tagline))]
 pub struct TaglineInsertForm {
+  pub local_site_id: LocalSiteId,
   pub content: String,
 }
 

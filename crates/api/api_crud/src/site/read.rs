@@ -69,8 +69,11 @@ async fn read_site(context: &LemmyContext, tenant: &TenantContext) -> LemmyResul
   let discussion_languages = SiteLanguage::read_local_raw(&mut context.pool()).await?;
   let blocked_urls =
     LocalSiteUrlBlocklist::get_all(&mut context.pool(), tenant.local_site().id).await?;
-  let tagline = Tagline::get_random(&mut context.pool()).await.ok();
-  let admin_oauth_providers = AdminOAuthProvider::get_all(&mut context.pool()).await?;
+  let tagline = Tagline::get_random(&mut context.pool(), tenant.local_site().id)
+    .await
+    .ok();
+  let admin_oauth_providers =
+    AdminOAuthProvider::get_all(&mut context.pool(), tenant.local_site().id).await?;
   let oauth_providers =
     AdminOAuthProvider::convert_providers_to_public(admin_oauth_providers.clone());
   let last_application_duration_seconds =

@@ -11,16 +11,24 @@ use chrono::{DateTime, Days, Utc};
 use diesel::{
   BoolExpressionMethods,
   ExpressionMethods,
+  JoinOnDsl,
   PgExpressionMethods,
   QueryDsl,
   SelectableHelper,
-  dsl::not,
+  dsl::{exists, not},
 };
 use diesel_async::RunQueryDsl;
 use i_love_jesus::{SortDirection, asc_if};
 use lemmy_db_schema::{
   ReportSortType,
   ReportType,
+  impls::presence::{
+    SiteReportId,
+    SiteReportState,
+    combined_report_id,
+    local_site_id_for_person,
+    read_report_site_state,
+  },
   source::{
     combined::report::{ReportCombined, report_combined_keys as key},
     person::Person,
@@ -29,7 +37,6 @@ use lemmy_db_schema::{
   utils::limit_fetch,
 };
 use lemmy_db_schema_file::{
-  PersonId,
   newtypes::{
     CommentReportId,
     CommunityId,
@@ -38,8 +45,17 @@ use lemmy_db_schema_file::{
     PostId,
     PostReportId,
     PrivateMessageReportId,
+    ReportCombinedId,
   },
-  schema::{comment_report, community_actions, local_user, post_report, report_combined},
+  schema::{
+    comment_report,
+    community_actions,
+    local_user,
+    local_site,
+    post_report,
+    report_combined,
+    report_site,
+  },
 };
 use lemmy_db_views_report_combined_sql::report_combined_joins;
 use lemmy_diesel_utils::{
@@ -51,8 +67,68 @@ use lemmy_diesel_utils::{
     PaginationCursorConversion,
     paginate_response,
   },
+  traits::Crud,
 };
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
+
+/// Reads the calling account's site-specific report state, when one exists.
+async fn report_state_for_person(
+  pool: &mut DbPool<'_>,
+  my_person: &Person,
+  report: SiteReportId,
+) -> Option<SiteReportState> {
+  let site_id = local_site_id_for_person(pool, my_person.id).await.ok()??;
+  let combined_id = combined_report_id(pool, report).await.ok()?;
+  read_report_site_state(pool, site_id, combined_id).await.ok()
+}
+
+/// Report ids visible to a site, including local reports that predate explicit site rows.
+async fn visible_report_ids_for_site(
+  pool: &mut DbPool<'_>,
+  site_id: LocalSiteId,
+  unresolved_only: bool,
+) -> LemmyResult<Vec<ReportCombinedId>> {
+  use std::collections::HashMap;
+
+  let conn = &mut get_conn(pool).await?;
+  let site_rows = report_site::table
+    .filter(report_site::local_site_id.eq(site_id))
+    .select((report_site::report_combined_id, report_site::resolved))
+    .load::<(ReportCombinedId, bool)>(conn)
+    .await?;
+  let legacy_rows = report_combined::table
+    .inner_join(local_user::table.on(local_user::person_id.eq(report_combined::report_creator_id)))
+    .filter(local_user::local_site_id.eq(site_id))
+    .select((report_combined::id, report_combined::resolved))
+    .load::<(ReportCombinedId, bool)>(conn)
+    .await?;
+
+  let mut states = HashMap::new();
+  for (id, resolved) in legacy_rows {
+    states.insert(id, resolved);
+  }
+  for (id, resolved) in site_rows {
+    states.insert(id, resolved);
+  }
+  let site_count: i64 = local_site::table.count().get_result(conn).await?;
+  if site_count <= 1 {
+    let orphan_rows = report_combined::table
+      .filter(not(exists(
+        report_site::table.filter(report_site::report_combined_id.eq(report_combined::id)),
+      )))
+      .select((report_combined::id, report_combined::resolved))
+      .load::<(ReportCombinedId, bool)>(conn)
+      .await?;
+    for (id, resolved) in orphan_rows {
+      states.entry(id).or_insert(resolved);
+    }
+  }
+  Ok(states
+    .into_iter()
+    .filter(|(_, resolved)| !unresolved_only || !*resolved)
+    .map(|(id, _)| id)
+    .collect())
+}
 
 impl ReportCombinedViewInternal {
   pub async fn read_comment_report(
@@ -68,9 +144,17 @@ impl ReportCombinedViewInternal {
       .await?;
 
     let res = InternalToCombinedView::map_to_enum(res);
-    let Some(ReportCombinedView::Comment(c)) = res else {
+    let Some(ReportCombinedView::Comment(mut c)) = res else {
       return Err(LemmyErrorType::NotFound.into());
     };
+    if let Some(state) =
+      report_state_for_person(pool, my_person, SiteReportId::Comment(report_id)).await
+    {
+      c.comment_report.resolved = state.resolved;
+      c.comment_report.resolver_id = state.resolver_id;
+      c.comment_report.conclusion = state.conclusion;
+      c.comment_report.updated_at = state.updated_at;
+    }
     Ok(c)
   }
 
@@ -87,9 +171,16 @@ impl ReportCombinedViewInternal {
       .await?;
 
     let res = InternalToCombinedView::map_to_enum(res);
-    let Some(ReportCombinedView::Post(p)) = res else {
+    let Some(ReportCombinedView::Post(mut p)) = res else {
       return Err(LemmyErrorType::NotFound.into());
     };
+    if let Some(state) = report_state_for_person(pool, my_person, SiteReportId::Post(report_id)).await
+    {
+      p.post_report.resolved = state.resolved;
+      p.post_report.resolver_id = state.resolver_id;
+      p.post_report.conclusion = state.conclusion;
+      p.post_report.updated_at = state.updated_at;
+    }
     Ok(p)
   }
 
@@ -106,9 +197,17 @@ impl ReportCombinedViewInternal {
       .await?;
 
     let res = InternalToCombinedView::map_to_enum(res);
-    let Some(ReportCombinedView::Community(c)) = res else {
+    let Some(ReportCombinedView::Community(mut c)) = res else {
       return Err(LemmyErrorType::NotFound.into());
     };
+    if let Some(state) =
+      report_state_for_person(pool, my_person, SiteReportId::Community(report_id)).await
+    {
+      c.community_report.resolved = state.resolved;
+      c.community_report.resolver_id = state.resolver_id;
+      c.community_report.conclusion = state.conclusion;
+      c.community_report.updated_at = state.updated_at;
+    }
     Ok(c)
   }
 
@@ -125,9 +224,17 @@ impl ReportCombinedViewInternal {
       .await?;
 
     let res = InternalToCombinedView::map_to_enum(res);
-    let Some(ReportCombinedView::PrivateMessage(pm)) = res else {
+    let Some(ReportCombinedView::PrivateMessage(mut pm)) = res else {
       return Err(LemmyErrorType::NotFound.into());
     };
+    if let Some(state) =
+      report_state_for_person(pool, my_person, SiteReportId::PrivateMessage(report_id)).await
+    {
+      pm.private_message_report.resolved = state.resolved;
+      pm.private_message_report.resolver_id = state.resolver_id;
+      pm.private_message_report.conclusion = state.conclusion;
+      pm.private_message_report.updated_at = state.updated_at;
+    }
     Ok(pm)
   }
 
@@ -135,10 +242,11 @@ impl ReportCombinedViewInternal {
   pub async fn get_report_count(pool: &mut DbPool<'_>, user: &LocalUserView) -> LemmyResult<i64> {
     use diesel::dsl::count;
 
-    let conn = &mut get_conn(pool).await?;
+    let site_report_ids =
+      visible_report_ids_for_site(pool, user.local_user.local_site_id, true).await?;
 
     let mut query = report_combined_joins(user.person.id, user.person.instance_id)
-      .filter(not(report_combined::resolved))
+      .filter(report_combined::id.eq_any(site_report_ids))
       .select(count(report_combined::id))
       .into_boxed();
 
@@ -148,6 +256,7 @@ impl ReportCombinedViewInternal {
       query = query.filter(filter_mod_reports());
     }
 
+    let conn = &mut get_conn(pool).await?;
     query
       .first::<i64>(conn)
       .await
@@ -214,18 +323,18 @@ impl ReportCombinedQuery {
     user: &LocalUserView,
   ) -> LemmyResult<PagedResponse<ReportCombinedView>> {
     let limit = limit_fetch(self.limit, None)?;
-
-    let site_user_ids: Vec<PersonId> = {
-      let conn = &mut get_conn(pool).await?;
-      local_user::table
-        .filter(local_user::local_site_id.eq(self.local_site_id))
-        .select(local_user::person_id)
-        .load(conn)
-        .await?
+    let local_site_id = if self.local_site_id.0 == 0 {
+      user.local_user.local_site_id
+    } else {
+      self.local_site_id
     };
 
+    let unresolved_only = self.unresolved_only.unwrap_or_default();
+    let site_report_ids =
+      visible_report_ids_for_site(pool, local_site_id, unresolved_only).await?;
+
     let mut query = report_combined_joins(user.person.id, user.person.instance_id)
-      .filter(report_combined::report_creator_id.eq_any(site_user_ids))
+      .filter(report_combined::id.eq_any(site_report_ids))
       .select(ReportCombinedViewInternal::as_select())
       .limit(limit)
       .into_boxed();
@@ -234,13 +343,16 @@ impl ReportCombinedQuery {
       query = query.filter(report_combined::community_id.eq(community_id));
     }
 
-    if user.local_user.admin {
-      let show_community_rule_violations = self.show_community_rule_violations.unwrap_or_default();
-      if !show_community_rule_violations {
-        query = query.filter(filter_admin_reports(Utc::now() - Days::new(3)));
+    if !self.my_reports_only.unwrap_or_default() {
+      if user.local_user.admin {
+        let show_community_rule_violations =
+          self.show_community_rule_violations.unwrap_or_default();
+        if !show_community_rule_violations {
+          query = query.filter(filter_admin_reports(Utc::now() - Days::new(3)));
+        }
+      } else {
+        query = query.filter(filter_mod_reports());
       }
-    } else {
-      query = query.filter(filter_mod_reports());
     }
 
     if let Some(post_id) = self.post_id {
@@ -262,11 +374,6 @@ impl ReportCombinedQuery {
         ReportType::Communities => query.filter(report_combined::community_report_id.is_not_null()),
       }
     }
-
-    let unresolved_only = self.unresolved_only.unwrap_or_default();
-    if unresolved_only {
-      query = query.filter(not(report_combined::resolved));
-    };
 
     let sort_direction = match self.sort.unwrap_or_default() {
       // By default, if viewing all reports, order by newest, but if viewing unresolved only, show
@@ -290,10 +397,43 @@ impl ReportCombinedQuery {
       .await?;
 
     // Map the query results to the enum
-    let out = res
-      .into_iter()
-      .filter_map(InternalToCombinedView::map_to_enum)
-      .collect();
+    let mut out = Vec::with_capacity(res.len());
+    for mut view in res {
+      let state = read_report_site_state(pool, local_site_id, view.report_combined.id).await?;
+      view.report_combined.resolved = state.resolved;
+      view.report_combined.resolver_id = state.resolver_id;
+      view.resolver = match state.resolver_id {
+        Some(id) => Some(Person::read(pool, id).await?),
+        None => None,
+      };
+      if let Some(report) = &mut view.post_report {
+        report.resolved = state.resolved;
+        report.resolver_id = state.resolver_id;
+        report.conclusion.clone_from(&state.conclusion);
+        report.updated_at = state.updated_at;
+      }
+      if let Some(report) = &mut view.comment_report {
+        report.resolved = state.resolved;
+        report.resolver_id = state.resolver_id;
+        report.conclusion.clone_from(&state.conclusion);
+        report.updated_at = state.updated_at;
+      }
+      if let Some(report) = &mut view.community_report {
+        report.resolved = state.resolved;
+        report.resolver_id = state.resolver_id;
+        report.conclusion.clone_from(&state.conclusion);
+        report.updated_at = state.updated_at;
+      }
+      if let Some(report) = &mut view.private_message_report {
+        report.resolved = state.resolved;
+        report.resolver_id = state.resolver_id;
+        report.conclusion.clone_from(&state.conclusion);
+        report.updated_at = state.updated_at;
+      }
+      if let Some(report) = InternalToCombinedView::map_to_enum(view) {
+        out.push(report);
+      }
+    }
 
     paginate_response(out, limit, self.page_cursor)
   }
@@ -573,6 +713,91 @@ mod tests {
     Instance::delete(pool, data.instance.id).await?;
 
     Ok(())
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn own_report_is_visible_only_in_receiving_site() -> LemmyResult<()> {
+    use lemmy_db_schema::impls::presence::{
+      SiteReportId,
+      combined_report_id,
+      ensure_report_site,
+      resolve_report_for_site,
+    };
+    use lemmy_db_schema_file::newtypes::LocalSiteId;
+
+    let pool = &build_db_pool_for_tests();
+    let pool = &mut pool.into();
+    let _site = lemmy_db_schema::test_data::TestData::create(pool).await?;
+    let data = init_data(pool).await?;
+    let sara_user = LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        local_site_id: data.admin_view.local_user.local_site_id,
+        ..LocalUserInsertForm::test_form(data.sara.id)
+      },
+      vec![],
+    )
+    .await?;
+    let sara_view = LocalUserView {
+      local_user: sara_user,
+      person: data.sara.clone(),
+      banned: false,
+      ban_expires_at: None,
+    };
+    let report = PostReport::report(
+      pool,
+      &PostReportForm {
+        creator_id: data.sara.id,
+        post_id: data.post.id,
+        original_post_name: data.post.name.clone(),
+        original_post_url: None,
+        original_post_body: None,
+        reason: "site isolation".into(),
+        violates_instance_rules: true,
+      },
+    )
+    .await?;
+    let combined_id = combined_report_id(pool, SiteReportId::Post(report.id)).await?;
+    let site_id = sara_view.local_user.local_site_id;
+    ensure_report_site(pool, site_id, combined_id).await?;
+
+    let own_reports = ReportCombinedQuery {
+      local_site_id: site_id,
+      my_reports_only: Some(true),
+      ..Default::default()
+    }
+    .list(pool, &sara_view)
+    .await?;
+    assert_eq!(own_reports.items.len(), 1);
+    assert_eq!(
+      ReportCombinedViewInternal::get_report_count(pool, &data.admin_view).await?,
+      1
+    );
+
+    let other_site = ReportCombinedQuery {
+      local_site_id: LocalSiteId(-1),
+      my_reports_only: Some(true),
+      ..Default::default()
+    }
+    .list(pool, &sara_view)
+    .await?;
+    assert!(other_site.items.is_empty());
+
+    resolve_report_for_site(
+      pool,
+      site_id,
+      combined_id,
+      data.admin_view.person.id,
+      true,
+      None,
+    )
+    .await?;
+    assert_eq!(
+      ReportCombinedViewInternal::get_report_count(pool, &data.admin_view).await?,
+      0
+    );
+    cleanup(data, pool).await
   }
 
   #[tokio::test]

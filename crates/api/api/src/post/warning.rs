@@ -6,7 +6,7 @@ use lemmy_api_utils::{
   context::LemmyContext,
   notify::notify_mod_action,
   send_activity::{ActivityChannel, SendActivityData},
-  utils::check_community_mod_action,
+  utils::check_community_global_mod_action,
 };
 use lemmy_db_schema::source::modlog::{Modlog, ModlogInsertForm};
 use lemmy_db_views_local_user::LocalUserView;
@@ -34,7 +34,7 @@ pub async fn create_post_warning(
   )
   .await?;
 
-  check_community_mod_action(
+  check_community_global_mod_action(
     &local_user_view,
     &orig_post.community,
     false,

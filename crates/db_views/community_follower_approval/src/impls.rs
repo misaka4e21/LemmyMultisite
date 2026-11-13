@@ -24,7 +24,7 @@ use lemmy_db_schema_file::{
   PersonId,
   aliases,
   enums::{CommunityFollowerState, CommunityVisibility},
-  newtypes::CommunityId,
+  newtypes::{CommunityId, LocalSiteId},
   schema::{community, community_actions, person},
 };
 use lemmy_diesel_utils::{
@@ -71,6 +71,7 @@ impl PendingFollowerView {
   pub async fn list_approval_required(
     pool: &mut DbPool<'_>,
     mod_id: PersonId,
+    local_site_id: LocalSiteId,
     all_communities: bool,
     unread_only: bool,
     page_cursor: Option<PaginationCursor>,
@@ -97,7 +98,9 @@ impl PendingFollowerView {
       .into_boxed();
 
     // if param is false, only return items for communities where user is a mod
-    if !all_communities {
+    if all_communities {
+      query = query.filter(community::origin_local_site_id.eq(local_site_id));
+    } else {
       query = query.filter(person::id.eq(mod_id));
     }
 
@@ -333,11 +336,13 @@ mod tests {
   async fn test_pending_followers() -> LemmyResult<()> {
     let pool = &build_db_pool_for_tests();
     let pool = &mut pool.into();
+    let site = lemmy_db_schema::test_data::TestData::create(pool).await?;
 
     // insert local community
     let local_instance = Instance::read_or_create(pool, "my_domain.tld").await?;
     let community_form = CommunityInsertForm {
       visibility: Some(CommunityVisibility::Private),
+      origin_local_site_id: Some(site.local_site.id),
       ..CommunityInsertForm::new(
         local_instance.id,
         "test_community_3".to_string(),
@@ -363,8 +368,16 @@ mod tests {
     // check that counts are initially 0
     let count = PendingFollowerView::count_approval_required(pool, mod_.id).await?;
     assert_eq!(0, count);
-    let list =
-      PendingFollowerView::list_approval_required(pool, mod_.id, false, true, None, None).await?;
+    let list = PendingFollowerView::list_approval_required(
+      pool,
+      mod_.id,
+      LocalSiteId(1),
+      false,
+      true,
+      None,
+      None,
+    )
+    .await?;
     assert_length!(0, list);
 
     // user is not allowed to post
@@ -383,8 +396,38 @@ mod tests {
     // now there should be a pending follow
     let count = PendingFollowerView::count_approval_required(pool, mod_.id).await?;
     assert_eq!(1, count);
-    let list =
-      PendingFollowerView::list_approval_required(pool, mod_.id, false, true, None, None).await?;
+    let site_list = PendingFollowerView::list_approval_required(
+      pool,
+      mod_.id,
+      site.local_site.id,
+      true,
+      true,
+      None,
+      None,
+    )
+    .await?;
+    assert_eq!(site_list.items.len(), 1);
+    let other_site_list = PendingFollowerView::list_approval_required(
+      pool,
+      mod_.id,
+      LocalSiteId(-1),
+      true,
+      true,
+      None,
+      None,
+    )
+    .await?;
+    assert!(other_site_list.items.is_empty());
+    let list = PendingFollowerView::list_approval_required(
+      pool,
+      mod_.id,
+      LocalSiteId(1),
+      false,
+      true,
+      None,
+      None,
+    )
+    .await?;
     assert_length!(1, list);
     assert_eq!(person.id, list[0].person.id);
     assert_eq!(community.id, list[0].community.id);
@@ -405,11 +448,27 @@ mod tests {
     // check counts again
     let count = PendingFollowerView::count_approval_required(pool, mod_.id).await?;
     assert_eq!(0, count);
-    let list =
-      PendingFollowerView::list_approval_required(pool, mod_.id, false, true, None, None).await?;
+    let list = PendingFollowerView::list_approval_required(
+      pool,
+      mod_.id,
+      LocalSiteId(1),
+      false,
+      true,
+      None,
+      None,
+    )
+    .await?;
     assert_length!(0, list);
-    let list_all =
-      PendingFollowerView::list_approval_required(pool, mod_.id, false, false, None, None).await?;
+    let list_all = PendingFollowerView::list_approval_required(
+      pool,
+      mod_.id,
+      LocalSiteId(1),
+      false,
+      false,
+      None,
+      None,
+    )
+    .await?;
     assert_length!(1, list_all);
     assert_eq!(person.id, list_all[0].person.id);
     assert_eq!(community.id, list_all[0].community.id);
@@ -427,8 +486,16 @@ mod tests {
     .await?;
     let count = PendingFollowerView::count_approval_required(pool, mod_.id).await?;
     assert_eq!(0, count);
-    let list =
-      PendingFollowerView::list_approval_required(pool, mod_.id, false, true, None, None).await?;
+    let list = PendingFollowerView::list_approval_required(
+      pool,
+      mod_.id,
+      LocalSiteId(1),
+      false,
+      true,
+      None,
+      None,
+    )
+    .await?;
     assert_length!(0, list);
 
     assert_eq!(

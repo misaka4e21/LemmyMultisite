@@ -3,18 +3,21 @@ use actix_web::web::Json;
 use lemmy_api_utils::{
   context::LemmyContext,
   send_activity::{ActivityChannel, SendActivityData},
-  utils::{is_admin, purge_post_images},
+  utils::is_admin,
 };
-use lemmy_db_schema::source::{
-  local_user::LocalUser,
-  modlog::{Modlog, ModlogInsertForm},
-  post::Post,
+use lemmy_db_schema::{
+  impls::presence::delete_post_for_site,
+  source::{
+    local_user::LocalUser,
+    modlog::{Modlog, ModlogInsertForm},
+    post::Post,
+  },
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_post::api::PurgePost;
 use lemmy_db_views_site::api::SuccessResponse;
 use lemmy_diesel_utils::traits::Crud;
-use lemmy_utils::error::LemmyResult;
+use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 
 pub async fn purge_post(
   Json(data): Json<PurgePost>,
@@ -23,9 +26,15 @@ pub async fn purge_post(
 ) -> LemmyResult<Json<SuccessResponse>> {
   // Only let admin purge an item
   is_admin(&local_user_view)?;
+  if context.site_view()?.local_site.id != local_user_view.local_user.local_site_id {
+    return Err(LemmyErrorType::NotFound.into());
+  }
 
   // Read the post to get the community_id
   let post = Post::read(&mut context.pool(), data.post_id).await?;
+  if post.origin_local_site_id != Some(local_user_view.local_user.local_site_id) {
+    return Err(LemmyErrorType::NotFound.into());
+  }
 
   // Also check that you're a higher admin
   LocalUser::is_higher_admin_check(
@@ -35,9 +44,12 @@ pub async fn purge_post(
   )
   .await?;
 
-  purge_post_images(post.url.clone(), post.thumbnail_url.clone(), &context).await;
-
-  Post::delete(&mut context.pool(), data.post_id).await?;
+  delete_post_for_site(
+    &mut context.pool(),
+    local_user_view.local_user.local_site_id,
+    data.post_id,
+  )
+  .await?;
 
   // Mod tables
   let form =

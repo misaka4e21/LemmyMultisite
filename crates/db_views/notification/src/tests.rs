@@ -89,6 +89,11 @@ async fn test_private_message() -> LemmyResult<()> {
     panic!();
   };
   assert_eq!(pm, notif_pm.private_message);
+  assert!(
+    NotificationView::read(pool, notifs[0].notification.id, &data.bob)
+      .await
+      .is_err()
+  );
 
   // Make sure filtering is working correctly, filter for bobs messages
   let notifs = NotificationQuery {
@@ -146,6 +151,91 @@ async fn test_private_message() -> LemmyResult<()> {
   assert_length!(2, notifs);
 
   cleanup(data, pool).await
+}
+
+#[tokio::test]
+#[serial]
+async fn site_removed_private_message_is_hidden_from_notifications() -> LemmyResult<()> {
+  use lemmy_db_schema::{
+    impls::presence::{ensure_local_person_site, set_creator_content_site_removed},
+    test_data::TestData,
+  };
+
+  let pool = &build_db_pool_for_tests();
+  let pool = &mut pool.into();
+  let data = TestData::create(pool).await?;
+  ensure_local_person_site(pool, data.local_site.id, data.person.id).await?;
+  let recipient = Person::read(pool, data.person.id).await?;
+  let sender = Person::create(
+    pool,
+    &PersonInsertForm::test_form(data.instance.id, "notification_sender"),
+  )
+  .await?;
+  let message = PrivateMessage::create(
+    pool,
+    &PrivateMessageInsertForm::new(sender.id, recipient.id, "message".into()),
+  )
+  .await?;
+  let community = Community::create(
+    pool,
+    &CommunityInsertForm::new(data.instance.id, "notifications".into(), "key".into()),
+  )
+  .await?;
+  let post = Post::create(
+    pool,
+    &PostInsertForm::new("post".into(), sender.id, community.id),
+  )
+  .await?;
+  let other_post = Post::create(
+    pool,
+    &PostInsertForm::new("other".into(), recipient.id, community.id),
+  )
+  .await?;
+  let comment = Comment::create(
+    pool,
+    &CommentInsertForm::new(sender.id, other_post.id, community.id, "comment".into()),
+    None,
+  )
+  .await?;
+  let notifications = Notification::create(
+    pool,
+    &[
+      NotificationInsertForm::new_private_message(&message),
+      NotificationInsertForm::new_post(&post, recipient.id, NotificationType::Subscribed),
+      NotificationInsertForm::new_comment(&comment, recipient.id, NotificationType::Reply),
+    ],
+  )
+  .await?;
+  let notification_id = notifications[0].id;
+  assert_eq!(
+    NotificationView::get_unread_count(pool, &recipient, false).await?,
+    3
+  );
+  assert!(
+    NotificationView::read(pool, notification_id, &recipient)
+      .await
+      .is_ok()
+  );
+  set_creator_content_site_removed(pool, data.local_site.id, sender.id, true).await?;
+  assert_eq!(
+    NotificationView::get_unread_count(pool, &recipient, false).await?,
+    0
+  );
+  assert_length!(
+    0,
+    NotificationQuery::default().list(pool, &recipient).await?
+  );
+  assert!(
+    NotificationView::read(pool, notification_id, &recipient)
+      .await
+      .is_err()
+  );
+  set_creator_content_site_removed(pool, data.local_site.id, sender.id, false).await?;
+  assert_eq!(
+    NotificationView::get_unread_count(pool, &recipient, false).await?,
+    3
+  );
+  data.delete(pool).await
 }
 
 #[tokio::test]

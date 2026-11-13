@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use lemmy_db_schema_file::newtypes::OAuthProviderId;
+use lemmy_db_schema_file::newtypes::{LocalSiteId, OAuthProviderId};
 #[cfg(feature = "full")]
 use lemmy_db_schema_file::schema::oauth_provider;
 use lemmy_diesel_utils::{dburl::DbUrl, sensitive::SensitiveString};
@@ -56,6 +56,7 @@ pub struct AdminOAuthProvider {
   pub updated_at: Option<DateTime<Utc>>,
   /// switch to enable or disable PKCE
   pub use_pkce: bool,
+  pub local_site_id: LocalSiteId,
 }
 
 #[skip_serializing_none]
@@ -86,6 +87,7 @@ pub struct PublicOAuthProvider {
 #[cfg_attr(feature = "full", derive(Insertable, AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = oauth_provider))]
 pub struct OAuthProviderInsertForm {
+  pub local_site_id: LocalSiteId,
   pub display_name: String,
   pub issuer: DbUrl,
   pub authorization_endpoint: DbUrl,
@@ -101,7 +103,7 @@ pub struct OAuthProviderInsertForm {
   pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "full", derive(Insertable, AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = oauth_provider))]
 pub struct OAuthProviderUpdateForm {

@@ -23,6 +23,7 @@ use lemmy_db_schema::{
     local_site_rate_limit::LocalSiteRateLimit,
     local_site_url_blocklist::LocalSiteUrlBlocklist,
     login_token::LoginToken,
+    media::MediaReference,
     modlog::{Modlog, ModlogInsertForm},
     oauth_account::OAuthAccount,
     person::{Person, PersonUpdateForm},
@@ -347,6 +348,26 @@ pub async fn check_community_mod_action(
   Ok(())
 }
 
+/// Authorizes changes to shared community state, which affect every site that sees it.
+pub async fn check_community_global_mod_action(
+  local_user_view: &LocalUserView,
+  community: &Community,
+  allow_deleted: bool,
+  pool: &mut DbPool<'_>,
+) -> LemmyResult<()> {
+  check_community_mod_action(local_user_view, community, allow_deleted, pool).await?;
+  if community.origin_local_site_id != Some(local_user_view.local_user.local_site_id) {
+    CommunityModeratorView::check_is_community_moderator(
+      pool,
+      community.id,
+      local_user_view.person.id,
+    )
+    .await
+    .map_err(|_| LemmyErrorType::NotAModOrAdmin)?;
+  }
+  Ok(())
+}
+
 /// Don't allow creating reports for removed / deleted posts
 pub fn check_post_deleted_or_removed(post: &Post) -> LemmyResult<()> {
   if post.deleted || post.removed {
@@ -580,14 +601,17 @@ pub async fn purge_post_images(
 fn delete_local_user_images(person_id: PersonId, context: &LemmyContext) {
   let context_ = context.clone();
   spawn_try_task(async move {
+    let site_id = context_.site_view()?.local_site.id;
     let pictrs_uploads =
       LocalImageView::get_all_by_person_id(&mut context_.pool(), person_id).await?;
 
-    // Delete their images
     for upload in pictrs_uploads {
-      delete_image_alias(&upload.local_image.pictrs_alias, &context_)
-        .await
-        .ok();
+      let alias = &upload.local_image.pictrs_alias;
+      if MediaReference::delete_for_site_and_user(&mut context_.pool(), alias, site_id, person_id)
+        .await?
+      {
+        delete_image_alias(alias, &context_).await.ok();
+      }
     }
     Ok(())
   });
@@ -1121,6 +1145,100 @@ mod tests {
   use lemmy_db_schema_file::newtypes::{CommentId, LanguageId};
   use pretty_assertions::assert_eq;
   use serial_test::serial;
+
+  #[tokio::test]
+  #[serial]
+  async fn global_community_actions_require_site_ownership_or_mod_role() -> LemmyResult<()> {
+    use lemmy_db_schema::source::{
+      community::{CommunityInsertForm, CommunityModeratorForm},
+      instance::Instance,
+      local_site::{LocalSite, LocalSiteInsertForm},
+      local_user::{LocalUser, LocalUserInsertForm},
+      person::PersonInsertForm,
+      site::SiteUpsertForm,
+    };
+
+    let context = LemmyContext::init_test_context().await;
+    let pool = &mut context.pool();
+    let data = TestData::create(pool).await?;
+    LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        local_site_id: data.local_site.id,
+        ..LocalUserInsertForm::test_form_admin(data.person.id)
+      },
+      vec![],
+    )
+    .await?;
+    let admin = LocalUserView::read_person(pool, data.person.id).await?;
+    let own = Community::create(
+      pool,
+      &CommunityInsertForm {
+        origin_local_site_id: Some(data.local_site.id),
+        ..CommunityInsertForm::new(data.instance.id, "owned".into(), "key".into())
+      },
+    )
+    .await?;
+    let remote = Community::create(
+      pool,
+      &CommunityInsertForm {
+        local: Some(false),
+        ..CommunityInsertForm::new(data.instance.id, "remote".into(), "key".into())
+      },
+    )
+    .await?;
+    let other_instance = Instance::read_or_create(pool, "other-auth.example").await?;
+    let other_site = Site::create(
+      pool,
+      &SiteUpsertForm::new("other".into(), other_instance.id),
+    )
+    .await?;
+    let other_system = Person::create(
+      pool,
+      &PersonInsertForm::test_form(other_instance.id, "system"),
+    )
+    .await?;
+    let other_local_site = LocalSite::create(
+      pool,
+      &LocalSiteInsertForm::new(other_site.id, other_system.id, "other-auth.example".into()),
+    )
+    .await?;
+    let other_community = Community::create(
+      pool,
+      &CommunityInsertForm {
+        origin_local_site_id: Some(other_local_site.id),
+        ..CommunityInsertForm::new(other_instance.id, "other".into(), "key".into())
+      },
+    )
+    .await?;
+    assert!(
+      check_community_global_mod_action(&admin, &own, false, pool)
+        .await
+        .is_ok()
+    );
+    assert!(
+      check_community_global_mod_action(&admin, &remote, false, pool)
+        .await
+        .is_err()
+    );
+    assert!(
+      check_community_global_mod_action(&admin, &other_community, false, pool)
+        .await
+        .is_err()
+    );
+    CommunityActions::join(
+      pool,
+      &CommunityModeratorForm::new(remote.id, admin.person.id),
+    )
+    .await?;
+    assert!(
+      check_community_global_mod_action(&admin, &remote, false, pool)
+        .await
+        .is_ok()
+    );
+    Instance::delete(pool, other_instance.id).await?;
+    data.delete(pool).await
+  }
 
   #[test]
   #[rustfmt::skip]

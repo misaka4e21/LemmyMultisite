@@ -22,6 +22,7 @@ pub async fn create_custom_emoji(
   is_admin(&local_user_view)?;
 
   let emoji_form = CustomEmojiInsertForm {
+    local_site_id: local_user_view.local_user.local_site_id,
     shortcode: data.shortcode.to_lowercase().trim().to_string(),
     image_url: data.image_url.clone(),
     alt_text: data.alt_text.clone(),
@@ -31,6 +32,11 @@ pub async fn create_custom_emoji(
 
   CustomEmojiKeyword::create_from_keywords(&mut context.pool(), emoji.id, &data.keywords).await?;
 
-  let view = CustomEmojiView::get(&mut context.pool(), emoji.id).await?;
+  let view = CustomEmojiView::get(
+    &mut context.pool(),
+    emoji.id,
+    local_user_view.local_user.local_site_id,
+  )
+  .await?;
   Ok(Json(CustomEmojiResponse { custom_emoji: view }))
 }

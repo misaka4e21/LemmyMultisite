@@ -113,9 +113,12 @@ impl LocalUser {
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
-  pub async fn set_all_users_email_verified(pool: &mut DbPool<'_>) -> LemmyResult<Vec<Self>> {
+  pub async fn set_all_users_email_verified(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Vec<Self>> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(local_user::table)
+    diesel::update(local_user::table.filter(local_user::local_site_id.eq(local_site_id)))
       .set(local_user::email_verified.eq(true))
       .get_results::<Self>(conn)
       .await
@@ -124,9 +127,10 @@ impl LocalUser {
 
   pub async fn set_all_users_registration_applications_accepted(
     pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
   ) -> LemmyResult<Vec<Self>> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(local_user::table)
+    diesel::update(local_user::table.filter(local_user::local_site_id.eq(local_site_id)))
       .set(local_user::accepted_application.eq(true))
       .get_results::<Self>(conn)
       .await

@@ -168,9 +168,12 @@ pub async fn edit_site(
     updated_at: Some(Some(Utc::now())),
   };
 
-  LocalSiteRateLimit::update(&mut context.pool(), &local_site_rate_limit_form)
-    .await
-    .ok();
+  LocalSiteRateLimit::update(
+    &mut context.pool(),
+    local_site.id,
+    &local_site_rate_limit_form,
+  )
+  .await?;
 
   if let Some(url_blocklist) = data.blocked_urls.clone() {
     // If this validation changes it must be synced with
@@ -193,7 +196,8 @@ pub async fn edit_site(
     .map(|ols| ols.registration_mode == RegistrationMode::RequireApplication)
     .unwrap_or(false);
   if !old_require_application && new_require_application {
-    LocalUser::set_all_users_registration_applications_accepted(&mut context.pool()).await?;
+    LocalUser::set_all_users_registration_applications_accepted(&mut context.pool(), local_site.id)
+      .await?;
   }
 
   let new_require_email_verification = update_local_site
@@ -201,7 +205,7 @@ pub async fn edit_site(
     .map(|ols| ols.email_verification_required)
     .unwrap_or(false);
   if !local_site.email_verification_required && new_require_email_verification {
-    LocalUser::set_all_users_email_verified(&mut context.pool()).await?;
+    LocalUser::set_all_users_email_verified(&mut context.pool(), local_site.id).await?;
   }
 
   let site_view = SiteView::read_by_hostname(&mut context.pool(), &tenant.hostname).await?;

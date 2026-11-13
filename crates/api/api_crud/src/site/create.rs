@@ -160,7 +160,12 @@ pub async fn create_site(
     updated_at: Some(Some(Utc::now())),
   };
 
-  LocalSiteRateLimit::update(&mut context.pool(), &local_site_rate_limit_form).await?;
+  LocalSiteRateLimit::update(
+    &mut context.pool(),
+    local_site.id,
+    &local_site_rate_limit_form,
+  )
+  .await?;
 
   let site_view = SiteView::read_by_hostname(&mut context.pool(), &tenant.hostname).await?;
 
@@ -170,6 +175,7 @@ pub async fn create_site(
     .rate_limit_cell()
     .set_config_for_site(site_view.local_site.id, rate_limit_config);
   TenantContext::invalidate_all();
+  SiteView::invalidate(site_view.local_site.id).await;
   invalidate_site_response(site_view.local_site.id).await;
 
   Ok(Json(SiteResponse { site_view }))

@@ -8,7 +8,14 @@ use crate::{
     post::purge_post,
   },
 };
-use actix_web::web::{self, Json, Query};
+use actix_web::{
+  App,
+  HttpMessage,
+  HttpResponse,
+  dev::Service,
+  test,
+  web::{self, Json, Query},
+};
 use diesel::{ExpressionMethods, QueryDsl};
 use diesel_async::RunQueryDsl;
 use lemmy_api_crud::{
@@ -23,15 +30,24 @@ use lemmy_api_crud::{
     delete::delete_oauth_provider,
     update::edit_oauth_provider,
   },
-  site::read::{get_site, invalidate_site_response},
+  site::{
+    create::create_site,
+    read::{get_site, invalidate_site_response},
+    update::edit_site,
+  },
   tagline::{
     create::create_tagline,
     delete::delete_tagline,
     list::list_taglines,
     update::edit_tagline,
   },
+  user::create::register,
 };
-use lemmy_api_utils::{context::LemmyContext, send_activity::ActivityChannel};
+use lemmy_api_utils::{
+  context::LemmyContext,
+  send_activity::ActivityChannel,
+  utils::local_site_rate_limit_to_rate_limit_config,
+};
 use lemmy_db_schema::{
   impls::presence::{
     ensure_comment_site,
@@ -43,8 +59,12 @@ use lemmy_db_schema::{
     comment::{Comment, CommentInsertForm},
     community::{Community, CommunityInsertForm},
     instance::{Instance, InstanceActions},
-    local_site::{LocalSite, LocalSiteInsertForm},
-    local_site_rate_limit::{LocalSiteRateLimit, LocalSiteRateLimitInsertForm},
+    local_site::{LocalSite, LocalSiteInsertForm, LocalSiteUpdateForm},
+    local_site_rate_limit::{
+      LocalSiteRateLimit,
+      LocalSiteRateLimitInsertForm,
+      LocalSiteRateLimitUpdateForm,
+    },
     local_user::{LocalUser, LocalUserInsertForm},
     person::{Person, PersonInsertForm},
     post::{Post, PostInsertForm},
@@ -52,7 +72,11 @@ use lemmy_db_schema::{
   },
   test_data::TestData,
 };
-use lemmy_db_schema_file::schema::{modlog, person};
+use lemmy_db_schema_file::{
+  enums::RegistrationMode,
+  newtypes::LocalSiteId,
+  schema::{modlog, person},
+};
 use lemmy_db_views_comment::api::PurgeComment;
 use lemmy_db_views_community::api::PurgeCommunity;
 use lemmy_db_views_custom_emoji::api::{
@@ -64,19 +88,326 @@ use lemmy_db_views_custom_emoji::api::{
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_person::api::{AddAdmin, BanPerson, PurgePerson};
 use lemmy_db_views_post::api::PurgePost;
+use lemmy_db_views_registration_applications::api::Register;
 use lemmy_db_views_site::api::{
   CreateOAuthProvider,
+  CreateSite,
   CreateTagline,
   DeleteOAuthProvider,
   DeleteTagline,
   EditOAuthProvider,
+  EditSite,
   EditTagline,
   ListTaglines,
 };
 use lemmy_diesel_utils::{connection::get_conn, traits::Crud};
-use lemmy_utils::error::LemmyResult;
+use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 use serial_test::serial;
 use url::Url;
+
+async fn runtime_post_limit(context: &LemmyContext, site_id: LocalSiteId) -> u32 {
+  let app = test::init_service(
+    App::new()
+      .route("/", web::get().to(|| async { HttpResponse::Ok() }))
+      .wrap(context.rate_limit_cell().post())
+      .wrap_fn(move |request, service| {
+        request.extensions_mut().insert(site_id);
+        service.call(request)
+      }),
+  )
+  .await;
+  let response = test::call_service(&app, test::TestRequest::get().uri("/").to_request()).await;
+  response
+    .headers()
+    .get("x-ratelimit-limit")
+    .unwrap()
+    .to_str()
+    .unwrap()
+    .parse()
+    .unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn site_settings_updates_are_scoped_to_the_current_tenant() -> LemmyResult<()> {
+  let base = LemmyContext::init_test_context().await;
+  let pool = &mut base.pool();
+  let first = TestData::create(pool).await?;
+  let first_user = LocalUser::create(
+    pool,
+    &LocalUserInsertForm {
+      local_site_id: first.local_site.id,
+      email_verified: Some(false),
+      accepted_application: Some(false),
+      ..LocalUserInsertForm::test_form_admin(first.person.id)
+    },
+    vec![],
+  )
+  .await?;
+  let admin = LocalUserView::read_person(pool, first.person.id).await?;
+  let instance = Instance::read_or_create(pool, "settings-isolation.example").await?;
+  let site = Site::create(pool, &SiteUpsertForm::new("other".into(), instance.id)).await?;
+  let person = Person::create(pool, &PersonInsertForm::test_form(instance.id, "other")).await?;
+  let second = LocalSite::create(
+    pool,
+    &LocalSiteInsertForm::new(site.id, person.id, "settings-isolation.example".into()),
+  )
+  .await?;
+  LocalSiteRateLimit::create(pool, &LocalSiteRateLimitInsertForm::new(second.id)).await?;
+  let second_user = LocalUser::create(
+    pool,
+    &LocalUserInsertForm {
+      local_site_id: second.id,
+      email_verified: Some(false),
+      accepted_application: Some(false),
+      ..LocalUserInsertForm::test_form_admin(person.id)
+    },
+    vec![],
+  )
+  .await?;
+  LocalSite::update(
+    pool,
+    first.local_site.id,
+    &LocalSiteUpdateForm {
+      site_setup: Some(false),
+      email_verification_required: Some(false),
+      registration_mode: Some(RegistrationMode::Open),
+      ..Default::default()
+    },
+  )
+  .await?;
+  let (_, second_tenant) = site_context(&base, second.id).await?;
+  let second_limits = second_tenant.site_view.local_site_rate_limit.clone();
+  base.rate_limit_cell().set_config_for_site(
+    second.id,
+    local_site_rate_limit_to_rate_limit_config(&second_limits),
+  );
+  let (context, tenant) = site_context(&base, first.local_site.id).await?;
+  let web_context = web::Data::new(context.app_data().clone());
+  get_site(None, web_context.clone(), tenant.clone()).await?;
+  get_site(None, web_context.clone(), second_tenant.clone()).await?;
+  let response = create_site(
+    Json(CreateSite {
+      name: "First site".into(),
+      rate_limit_post_max_requests: Some(12),
+      ..Default::default()
+    }),
+    context.clone(),
+    admin.clone(),
+    tenant,
+  )
+  .await?;
+  assert_eq!(
+    response.site_view.local_site_rate_limit.post_max_requests,
+    12
+  );
+  assert_eq!(runtime_post_limit(&context, first.local_site.id).await, 12);
+  assert_eq!(
+    runtime_post_limit(&context, second.id).await,
+    second_limits.post_max_requests as u32
+  );
+  let (_, refreshed_tenant) = site_context(&base, first.local_site.id).await?;
+  assert_eq!(
+    get_site(None, web_context.clone(), refreshed_tenant)
+      .await?
+      .site_view
+      .local_site_rate_limit
+      .post_max_requests,
+    12
+  );
+  assert_eq!(
+    lemmy_db_views_site::SiteView::read_by_hostname(pool, "settings-isolation.example")
+      .await?
+      .local_site_rate_limit,
+    second_limits
+  );
+
+  for form in [
+    LocalSiteRateLimitUpdateForm {
+      import_user_settings_max_requests: Some(7),
+      ..Default::default()
+    },
+    LocalSiteRateLimitUpdateForm {
+      import_user_settings_interval_seconds: Some(99),
+      ..Default::default()
+    },
+  ] {
+    LocalSiteRateLimit::update(pool, first.local_site.id, &form).await?;
+  }
+  let conn = &mut get_conn(pool).await?;
+  let limits: LocalSiteRateLimit = lemmy_db_schema_file::schema::local_site_rate_limit::table
+    .find(first.local_site.id)
+    .first(conn)
+    .await?;
+  assert_eq!(limits.import_user_settings_max_requests, 7);
+  assert_eq!(limits.import_user_settings_interval_seconds, 99);
+
+  let (context, tenant) = site_context(&base, first.local_site.id).await?;
+  let response = edit_site(
+    Json(EditSite {
+      rate_limit_post_max_requests: Some(13),
+      email_verification_required: Some(true),
+      registration_mode: Some(RegistrationMode::RequireApplication),
+      application_question: Some("Why join?".into()),
+      ..Default::default()
+    }),
+    context.clone(),
+    admin.clone(),
+    tenant,
+  )
+  .await?;
+  assert_eq!(
+    response.site_view.local_site_rate_limit.post_max_requests,
+    13
+  );
+  assert_eq!(runtime_post_limit(&context, first.local_site.id).await, 13);
+  assert_eq!(
+    runtime_post_limit(&context, second.id).await,
+    second_limits.post_max_requests as u32
+  );
+  let (_, refreshed_tenant) = site_context(&base, first.local_site.id).await?;
+  assert_eq!(
+    get_site(None, web_context.clone(), refreshed_tenant)
+      .await?
+      .site_view
+      .local_site_rate_limit
+      .post_max_requests,
+    13
+  );
+  assert_eq!(
+    get_site(None, web_context, second_tenant)
+      .await?
+      .site_view
+      .local_site_rate_limit,
+    second_limits
+  );
+  assert_eq!(
+    lemmy_db_views_site::SiteView::read_by_hostname(pool, "settings-isolation.example")
+      .await?
+      .local_site_rate_limit,
+    second_limits
+  );
+  let first_after = LocalUserView::read_person(pool, first.person.id)
+    .await?
+    .local_user;
+  let second_after = LocalUserView::read_person(pool, person.id)
+    .await?
+    .local_user;
+  assert_eq!(first_after.id, first_user.id);
+  assert!(first_after.email_verified && first_after.accepted_application);
+  assert_eq!(second_after.id, second_user.id);
+  assert!(!second_after.email_verified && !second_after.accepted_application);
+
+  let new_person = Person::create(
+    pool,
+    &PersonInsertForm::test_form(first.instance.id, "new_pending"),
+  )
+  .await?;
+  LocalUser::create(
+    pool,
+    &LocalUserInsertForm {
+      local_site_id: first.local_site.id,
+      email_verified: Some(false),
+      accepted_application: Some(false),
+      ..LocalUserInsertForm::test_form_admin(new_person.id)
+    },
+    vec![],
+  )
+  .await?;
+  let (context, tenant) = site_context(&base, first.local_site.id).await?;
+  edit_site(
+    Json(EditSite::default()),
+    context.clone(),
+    admin.clone(),
+    tenant.clone(),
+  )
+  .await?;
+  let pending = LocalUserView::read_person(pool, new_person.id)
+    .await?
+    .local_user;
+  assert!(!pending.email_verified && !pending.accepted_application);
+  let missing_email = Register {
+    username: "newuser".into(),
+    password: "valid_password".to_string().into(),
+    password_verify: "valid_password".to_string().into(),
+    answer: Some("answer".into()),
+    ..Default::default()
+  };
+  assert!(matches!(
+    register(
+      Json(missing_email),
+      actix_web::test::TestRequest::default().to_http_request(),
+      context.clone(),
+      tenant.clone()
+    )
+    .await, Err(error) if matches!(error.error_type, LemmyErrorType::EmailRequired)
+  ));
+  let missing_answer = Register {
+    username: "newuser".into(),
+    password: "valid_password".to_string().into(),
+    password_verify: "valid_password".to_string().into(),
+    email: Some("new@example.com".to_string().into()),
+    ..Default::default()
+  };
+  assert!(matches!(
+    register(
+      Json(missing_answer),
+      actix_web::test::TestRequest::default().to_http_request(),
+      context.clone(),
+      tenant.clone()
+    )
+    .await, Err(error) if matches!(error.error_type, LemmyErrorType::RegistrationApplicationAnswerRequired)
+  ));
+  let registered = register(
+    Json(Register {
+      username: "newuser".into(),
+      password: "valid_password".to_string().into(),
+      password_verify: "valid_password".to_string().into(),
+      email: Some("new@example.com".to_string().into()),
+      answer: Some("answer".into()),
+      ..Default::default()
+    }),
+    actix_web::test::TestRequest::default().to_http_request(),
+    context.clone(),
+    tenant.clone(),
+  )
+  .await?;
+  assert!(registered.registration_created);
+  assert!(registered.verify_email_sent);
+  let registered_user = LocalUserView::read_from_name(pool, "newuser")
+    .await?
+    .local_user;
+  assert!(!registered_user.email_verified && !registered_user.accepted_application);
+
+  let conn = &mut get_conn(pool).await?;
+  diesel::delete(
+    lemmy_db_schema_file::schema::local_site_rate_limit::table.find(first.local_site.id),
+  )
+  .execute(conn)
+  .await?;
+  assert!(
+    edit_site(
+      Json(EditSite {
+        rate_limit_post_max_requests: Some(14),
+        ..Default::default()
+      }),
+      context,
+      admin,
+      tenant
+    )
+    .await
+    .is_err()
+  );
+  assert_eq!(
+    lemmy_db_views_site::SiteView::read_by_hostname(pool, "settings-isolation.example")
+      .await?
+      .local_site_rate_limit,
+    second_limits
+  );
+
+  Instance::delete(pool, instance.id).await?;
+  first.delete(pool).await
+}
 
 #[tokio::test]
 #[serial]

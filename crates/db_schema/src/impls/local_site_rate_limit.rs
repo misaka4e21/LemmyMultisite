@@ -6,9 +6,9 @@ use crate::{
     LocalSiteRateLimitUpdateForm,
   },
 };
-use diesel::dsl::insert_into;
+use diesel::{QueryDsl, dsl::insert_into};
 use diesel_async::RunQueryDsl;
-use lemmy_db_schema_file::schema::local_site_rate_limit;
+use lemmy_db_schema_file::{newtypes::LocalSiteId, schema::local_site_rate_limit};
 use lemmy_diesel_utils::connection::{DbPool, get_conn};
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
 
@@ -35,6 +35,7 @@ impl LocalSiteRateLimit {
   }
   pub async fn update(
     pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
     form: &LocalSiteRateLimitUpdateForm,
   ) -> LemmyResult<()> {
     // avoid error "There are no changes to save. This query cannot be built"
@@ -42,7 +43,7 @@ impl LocalSiteRateLimit {
       return Ok(());
     }
     let conn = &mut get_conn(pool).await?;
-    diesel::update(local_site_rate_limit::table)
+    diesel::update(local_site_rate_limit::table.find(local_site_id))
       .set(form)
       .get_result::<Self>(conn)
       .await?;
@@ -64,6 +65,8 @@ impl LocalSiteRateLimitUpdateForm {
       && self.comment_interval_seconds.is_none()
       && self.search_max_requests.is_none()
       && self.search_interval_seconds.is_none()
+      && self.import_user_settings_max_requests.is_none()
+      && self.import_user_settings_interval_seconds.is_none()
       && self.updated_at.is_none()
   }
 }

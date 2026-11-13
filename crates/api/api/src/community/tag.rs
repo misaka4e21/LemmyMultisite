@@ -4,7 +4,7 @@ use chrono::Utc;
 use lemmy_api_utils::{
   context::LemmyContext,
   send_activity::{ActivityChannel, SendActivityData},
-  utils::{check_community_mod_action, slur_regex},
+  utils::{check_community_global_mod_action, slur_regex},
 };
 use lemmy_db_schema::source::{
   community::Community,
@@ -43,7 +43,8 @@ pub async fn create_community_tag(
   let community = community_view.community;
 
   // Verify that only mods can create tags
-  check_community_mod_action(&local_user_view, &community, false, &mut context.pool()).await?;
+  check_community_global_mod_action(&local_user_view, &community, false, &mut context.pool())
+    .await?;
 
   check_api_elements_count(community_view.tags.0.len())?;
   if let Some(summary) = &data.summary {
@@ -83,7 +84,8 @@ pub async fn edit_community_tag(
   let community = Community::read(&mut context.pool(), tag.community_id).await?;
 
   // Verify that only mods can update tags
-  check_community_mod_action(&local_user_view, &community, false, &mut context.pool()).await?;
+  check_community_global_mod_action(&local_user_view, &community, false, &mut context.pool())
+    .await?;
 
   if let Some(summary) = &data.summary {
     summary_length_check(summary)?;
@@ -112,7 +114,8 @@ pub async fn delete_community_tag(
   let community = Community::read(&mut context.pool(), tag.community_id).await?;
 
   // Verify that only mods can delete tags
-  check_community_mod_action(&local_user_view, &community, false, &mut context.pool()).await?;
+  check_community_global_mod_action(&local_user_view, &community, false, &mut context.pool())
+    .await?;
 
   // Soft delete the tag
   let tag_form = CommunityTagUpdateForm {

@@ -90,6 +90,22 @@ impl Crud for Person {
 }
 
 impl Person {
+  /// Read a non-deleted person only when it is owned by the selected site.
+  pub async fn read_owned_by_site(
+    pool: &mut DbPool<'_>,
+    person_id: PersonId,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Self> {
+    let conn = &mut get_conn(pool).await?;
+    person::table
+      .find(person_id)
+      .filter(person::origin_local_site_id.eq(Some(local_site_id)))
+      .filter(person::deleted.eq(false))
+      .first(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)
+  }
+
   /// Update or insert the person.
   ///
   /// This is necessary for federation, because Activitypub doesn't distinguish between these

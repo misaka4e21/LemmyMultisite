@@ -8,17 +8,14 @@ use lemmy_api_utils::{
   utils::check_community_mod_action,
 };
 use lemmy_db_schema::{
-  impls::presence::set_post_site_removed,
+  impls::presence::{SiteReportObject, resolve_reports_for_site, set_post_site_removed},
   source::{
     comment::Comment,
-    comment_report::CommentReport,
     community::Community,
     local_user::LocalUser,
     modlog::{Modlog, ModlogInsertForm},
     post::{Post, PostUpdateForm},
-    post_report::PostReport,
   },
-  traits::Reportable,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_post::api::{PostResponse, RemovePost};
@@ -67,8 +64,14 @@ pub async fn remove_post(
     orig_post.clone()
   };
 
-  PostReport::resolve_all_for_object(&mut context.pool(), post_id, local_user_view.person.id)
-    .await?;
+  resolve_reports_for_site(
+    &mut context.pool(),
+    active_site_id,
+    SiteReportObject::Post(post_id),
+    None,
+    local_user_view.person.id,
+  )
+  .await?;
 
   // Mod tables
   let form = ModlogInsertForm::mod_remove_post(
@@ -109,8 +112,16 @@ pub async fn remove_post(
     let actions = Modlog::create(&mut context.pool(), &forms).await?;
     notify_mod_action(actions, &context);
 
-    CommentReport::resolve_all_for_post(&mut context.pool(), post.id, local_user_view.person.id)
+    for comment in &updated_comments {
+      resolve_reports_for_site(
+        &mut context.pool(),
+        active_site_id,
+        SiteReportObject::Comment(comment.id),
+        None,
+        local_user_view.person.id,
+      )
       .await?;
+    }
   }
 
   if is_origin {

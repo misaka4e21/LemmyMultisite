@@ -92,6 +92,11 @@ mod tests {
     let context = LemmyContext::init_test_context().await;
     let token = InstallationAdminClaims::generate(42, &context)?;
     assert_eq!(InstallationAdminClaims::validate(&token, &context)?, 42);
+    assert!(
+      crate::claims::Claims::validate(&token, &context, false, None)
+        .await
+        .is_err()
+    );
     Ok(())
   }
 }

@@ -5,7 +5,7 @@ use lemmy_api_utils::{
   context::LemmyContext,
   notify::notify_mod_action,
   send_activity::{ActivityChannel, SendActivityData},
-  utils::check_community_mod_action,
+  utils::check_community_global_mod_action,
 };
 use lemmy_db_schema::source::{
   comment::Comment,
@@ -30,7 +30,7 @@ pub async fn lock_comment(
   let orig_comment =
     CommentView::read(&mut context.pool(), comment_id, None, local_instance_id).await?;
 
-  check_community_mod_action(
+  check_community_global_mod_action(
     &local_user_view,
     &orig_comment.community,
     false,

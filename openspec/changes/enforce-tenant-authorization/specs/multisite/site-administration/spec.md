@@ -26,6 +26,11 @@ Administrator assignment, removal, hierarchy checks, site bans, registration act
 - **WHEN** an administrator reads the current site's report count
 - **THEN** the count excludes reports outside that site's authority
 
+#### Scenario: Federated report received by multiple sites
+- **WHEN** a federated report is received by site A and site B
+- **THEN** each receiving site has its own report association and resolution state
+- **AND** resolving the report on site A does not resolve or expose site B's state
+
 ### Requirement: Existing configuration migration preserves ownership
 Migration SHALL assign existing global configuration to one site per record. A single-site installation SHALL assign records to its only site. A multi-site installation SHALL require an explicit complete ownership mapping and SHALL reject migration when ownership or OAuth account associations are ambiguous or inconsistent; failed migration MUST leave existing data unchanged.
 

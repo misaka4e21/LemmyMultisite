@@ -111,6 +111,16 @@ mod tests {
     // John is the mod
     let john = PersonInsertForm::test_form(instance.id, "john the modder");
     let john = Person::create(pool, &john).await?;
+    // Modlog queries are scoped to the acting site, so the moderator needs a local user on it.
+    LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        local_site_id: local_site.id,
+        ..LocalUserInsertForm::test_form(john.id)
+      },
+      vec![],
+    )
+    .await?;
 
     let sara_form = PersonInsertForm::test_form(instance.id, "sara");
     let sara = Person::create(pool, &sara_form).await?;
@@ -411,6 +421,16 @@ mod tests {
 
     let person_a_form = PersonInsertForm::test_form(instance.id, "person_a_bulk_test");
     let person_a = Person::create(pool, &person_a_form).await?;
+    // Modlog queries are scoped to the acting site, so the moderator needs a local user on it.
+    LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        local_site_id: local_site.id,
+        ..LocalUserInsertForm::test_form(person_a.id)
+      },
+      vec![],
+    )
+    .await?;
 
     let person_b_form = PersonInsertForm::test_form(instance.id, "person_b_bulk_test");
     let person_b = Person::create(pool, &person_b_form).await?;

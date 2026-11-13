@@ -7,7 +7,12 @@ use lemmy_api_utils::{
   plugins::{plugin_hook_after, plugin_hook_before},
   send_activity::{ActivityChannel, SendActivityData},
   tenant::TenantContext,
-  utils::{check_community_user_action, check_nsfw_allowed, is_mod_or_admin, update_post_tags},
+  utils::{
+    check_community_global_mod_action,
+    check_community_user_action,
+    check_nsfw_allowed,
+    update_post_tags,
+  },
 };
 use lemmy_db_schema::source::post::{Post, PostUpdateForm};
 use lemmy_db_views_local_user::LocalUserView;
@@ -42,7 +47,8 @@ pub async fn mod_edit_post(
   let community = orig_post.community;
 
   check_community_user_action(&local_user_view, &community, &mut context.pool()).await?;
-  is_mod_or_admin(&mut context.pool(), &local_user_view, community.id).await?;
+  check_community_global_mod_action(&local_user_view, &community, false, &mut context.pool())
+    .await?;
 
   let mut post_form = PostUpdateForm {
     nsfw: data.nsfw,

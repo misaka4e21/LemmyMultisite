@@ -8,16 +8,13 @@ use activitypub_federation::{config::Data, kinds::activity::DeleteType, traits::
 use lemmy_api_utils::{context::LemmyContext, notify::notify_mod_action};
 use lemmy_apub_objects::objects::person::ApubPerson;
 use lemmy_db_schema::{
+  impls::presence::{SiteReportObject, resolve_reports_for_site},
   source::{
     comment::{Comment, CommentUpdateForm},
-    comment_report::CommentReport,
     community::{Community, CommunityUpdateForm},
-    community_report::CommunityReport,
     modlog::{Modlog, ModlogInsertForm},
     post::{Post, PostUpdateForm},
-    post_report::PostReport,
   },
-  traits::Reportable,
 };
 use lemmy_db_views_community_moderator::CommunityModeratorView;
 use lemmy_diesel_utils::traits::Crud;
@@ -107,12 +104,20 @@ pub(crate) async fn receive_remove_action(
   context: &Data<LemmyContext>,
 ) -> LemmyResult<()> {
   let reason = reason.unwrap_or_else(|| MOD_ACTION_DEFAULT_REASON.to_string());
+  let site_id = context.site_view()?.local_site.id;
   match DeletableObjects::read_from_db(object, context).await? {
     DeletableObjects::Community(community) => {
       if community.local {
         return Err(UntranslatedError::OnlyLocalAdminCanRemoveCommunity.into());
       }
-      CommunityReport::resolve_all_for_object(&mut context.pool(), community.id, actor.id).await?;
+      resolve_reports_for_site(
+        &mut context.pool(),
+        site_id,
+        SiteReportObject::Community(community.id),
+        None,
+        actor.id,
+      )
+      .await?;
       let community_owner =
         CommunityModeratorView::top_mod_for_community(&mut context.pool(), community.id).await?;
       let form = ModlogInsertForm::admin_remove_community(
@@ -136,7 +141,14 @@ pub(crate) async fn receive_remove_action(
       .await?;
     }
     DeletableObjects::Post(post) => {
-      PostReport::resolve_all_for_object(&mut context.pool(), post.id, actor.id).await?;
+      resolve_reports_for_site(
+        &mut context.pool(),
+        site_id,
+        SiteReportObject::Post(post.id),
+        None,
+        actor.id,
+      )
+      .await?;
       let form = ModlogInsertForm::mod_remove_post(actor.id, &post, true, &reason, None);
       let action = Modlog::create(&mut context.pool(), &[form]).await?;
       notify_mod_action(action, context.app_data());
@@ -152,9 +164,18 @@ pub(crate) async fn receive_remove_action(
 
       let remove_children = with_replies.unwrap_or_default();
       if remove_children {
-        CommentReport::resolve_all_for_post(&mut context.pool(), post.id, actor.id).await?;
         let updated_comments: Vec<Comment> =
           Comment::update_removed_for_post(&mut context.pool(), post.id, true).await?;
+        for comment in &updated_comments {
+          resolve_reports_for_site(
+            &mut context.pool(),
+            site_id,
+            SiteReportObject::Comment(comment.id),
+            None,
+            actor.id,
+          )
+          .await?;
+        }
 
         let forms: Vec<_> = updated_comments
           .iter()
@@ -185,13 +206,22 @@ pub(crate) async fn receive_remove_action(
         .community_id;
 
       if remove_children {
-        CommentReport::resolve_all_for_thread(&mut context.pool(), &comment.path, actor.id).await?;
         let updated_comments: Vec<Comment> = Comment::update_removed_for_comment_and_children(
           &mut context.pool(),
           &comment.path,
           true,
         )
         .await?;
+        for comment in &updated_comments {
+          resolve_reports_for_site(
+            &mut context.pool(),
+            site_id,
+            SiteReportObject::Comment(comment.id),
+            None,
+            actor.id,
+          )
+          .await?;
+        }
 
         let forms: Vec<_> = updated_comments
           .iter()
@@ -212,7 +242,14 @@ pub(crate) async fn receive_remove_action(
         let actions = Modlog::create(&mut context.pool(), &forms).await?;
         notify_mod_action(actions, context);
       } else {
-        CommentReport::resolve_all_for_object(&mut context.pool(), comment.id, actor.id).await?;
+        resolve_reports_for_site(
+          &mut context.pool(),
+          site_id,
+          SiteReportObject::Comment(comment.id),
+          None,
+          actor.id,
+        )
+        .await?;
         let form = ModlogInsertForm::mod_remove_comment(
           actor.id,
           &comment,

@@ -8,13 +8,11 @@ use lemmy_api_utils::{
   utils::{check_community_mod_action, is_admin},
 };
 use lemmy_db_schema::{
-  impls::presence::set_community_site_removed,
+  impls::presence::{SiteReportObject, resolve_reports_for_site, set_community_site_removed},
   source::{
     community::{Community, CommunityUpdateForm},
-    community_report::CommunityReport,
     modlog::{Modlog, ModlogInsertForm},
   },
-  traits::Reportable,
 };
 use lemmy_db_views_community::api::{CommunityResponse, RemoveCommunity};
 use lemmy_db_views_community_moderator::CommunityModeratorView;
@@ -53,9 +51,11 @@ pub async fn remove_community(
     community
   };
 
-  CommunityReport::resolve_all_for_object(
+  resolve_reports_for_site(
     &mut context.pool(),
-    community_id,
+    active_site_id,
+    SiteReportObject::Community(community_id),
+    None,
     local_user_view.person.id,
   )
   .await?;

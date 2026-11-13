@@ -10,7 +10,10 @@ use lemmy_db_schema::source::{
   private_message::PrivateMessage,
   site::Site,
 };
-use lemmy_db_schema_file::{PersonId, newtypes::CommunityId};
+use lemmy_db_schema_file::{
+  PersonId,
+  newtypes::{CommunityId, ReportCombinedId},
+};
 use lemmy_db_views_comment::CommentView;
 use lemmy_db_views_community::api::BanFromCommunity;
 use lemmy_db_views_post::PostView;
@@ -106,6 +109,7 @@ pub enum SendActivityData {
   DeleteUser(Person, bool),
   CreateReport {
     object_id: Url,
+    report_id: ReportCombinedId,
     actor: Person,
     receiver: Either<Site, Community>,
     reason: String,
@@ -133,22 +137,22 @@ static ACTIVITY_CHANNEL: LazyLock<ActivityChannel> = LazyLock::new(|| {
 });
 
 pub struct ActivityChannel {
-  weak_sender: WeakUnboundedSender<SendActivityData>,
-  receiver: Mutex<UnboundedReceiver<SendActivityData>>,
-  keepalive_sender: Mutex<Option<UnboundedSender<SendActivityData>>>,
+  weak_sender: WeakUnboundedSender<(SendActivityData, Data<LemmyContext>)>,
+  receiver: Mutex<UnboundedReceiver<(SendActivityData, Data<LemmyContext>)>>,
+  keepalive_sender: Mutex<Option<UnboundedSender<(SendActivityData, Data<LemmyContext>)>>>,
 }
 
 impl ActivityChannel {
-  pub async fn retrieve_activity() -> Option<SendActivityData> {
+  pub async fn retrieve_activity() -> Option<(SendActivityData, Data<LemmyContext>)> {
     let mut lock = ACTIVITY_CHANNEL.receiver.lock().await;
     lock.recv().await
   }
 
-  pub fn submit_activity(data: SendActivityData, _context: &Data<LemmyContext>) -> LemmyResult<()> {
+  pub fn submit_activity(data: SendActivityData, context: &Data<LemmyContext>) -> LemmyResult<()> {
     // could do `ACTIVITY_CHANNEL.keepalive_sender.lock()` instead and get rid of weak_sender,
     // not sure which way is more efficient
     if let Some(sender) = ACTIVITY_CHANNEL.weak_sender.upgrade() {
-      sender.send(data)?;
+      sender.send((data, context.reset_request_count()))?;
     }
     Ok(())
   }
@@ -156,6 +160,53 @@ impl ActivityChannel {
   pub async fn close(outgoing_activities_task: JoinHandle<()>) -> LemmyResult<()> {
     ACTIVITY_CHANNEL.keepalive_sender.lock().await.take();
     outgoing_activities_task.await?;
+    Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{ActivityChannel, SendActivityData};
+  use crate::context::LemmyContext;
+  use activitypub_federation::config::FederationConfig;
+  use lemmy_db_schema_file::{PersonId, newtypes::CommunityId};
+  use lemmy_utils::error::LemmyResult;
+  use serial_test::serial;
+
+  #[tokio::test]
+  #[serial]
+  async fn outgoing_queue_keeps_request_context() -> LemmyResult<()> {
+    let base = LemmyContext::init_test_context().await;
+    let first = FederationConfig::builder()
+      .domain("first.example")
+      .app_data(base.app_data().clone())
+      .debug(true)
+      .http_fetch_limit(0)
+      .build()
+      .await?
+      .to_request_data();
+    let second = FederationConfig::builder()
+      .domain("second.example")
+      .app_data(base.app_data().clone())
+      .debug(true)
+      .http_fetch_limit(0)
+      .build()
+      .await?
+      .to_request_data();
+    for context in [&first, &second] {
+      ActivityChannel::submit_activity(
+        SendActivityData::PrivateCommunityAcceptFollower {
+          community_id: CommunityId(1),
+          person_id: PersonId(1),
+          follow_activity_id: None,
+        },
+        context,
+      )?;
+    }
+    let (_, first_received) = ActivityChannel::retrieve_activity().await.unwrap();
+    let (_, second_received) = ActivityChannel::retrieve_activity().await.unwrap();
+    assert_eq!(first_received.domain(), "first.example");
+    assert_eq!(second_received.domain(), "second.example");
     Ok(())
   }
 }

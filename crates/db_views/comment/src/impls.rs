@@ -164,7 +164,7 @@ impl CommentView {
       .inner_join(site::table.on(site::id.eq(local_site::site_id)))
       .filter(comment_site::comment_id.eq(comment_id))
       .filter(site::instance_id.eq(local_instance_id))
-      .select(comment_site::removed)
+      .select(comment_site::removed.or(comment_site::ban_removed))
       .first::<bool>(conn)
       .await?;
     view.comment.removed |= site_removed;
@@ -404,7 +404,7 @@ impl CommentQuery<'_> {
     let mut res = pq.load::<CommentView>(conn).await?;
     let locally_removed: Vec<CommentId> = comment_site::table
       .filter(comment_site::local_site_id.eq(local_site.id))
-      .filter(comment_site::removed.eq(true))
+      .filter(comment_site::removed.or(comment_site::ban_removed))
       .select(comment_site::comment_id)
       .load(conn)
       .await?;

@@ -10,7 +10,6 @@ use lemmy_db_views_custom_emoji::{
   api::{CustomEmojiResponse, EditCustomEmoji},
 };
 use lemmy_db_views_local_user::LocalUserView;
-use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::LemmyResult;
 
 pub async fn edit_custom_emoji(
@@ -30,7 +29,13 @@ pub async fn edit_custom_emoji(
     alt_text: data.alt_text.clone(),
     category: data.category.clone(),
   };
-  let emoji = CustomEmoji::update(&mut context.pool(), data.id, &emoji_form).await?;
+  let emoji = CustomEmoji::update_for_site(
+    &mut context.pool(),
+    data.id,
+    local_user_view.local_user.local_site_id,
+    &emoji_form,
+  )
+  .await?;
 
   // Delete the existing keywords, and recreate
   if let Some(keywords) = &data.keywords {
@@ -38,6 +43,11 @@ pub async fn edit_custom_emoji(
     CustomEmojiKeyword::create_from_keywords(&mut context.pool(), emoji.id, keywords).await?;
   }
 
-  let view = CustomEmojiView::get(&mut context.pool(), emoji.id).await?;
+  let view = CustomEmojiView::get(
+    &mut context.pool(),
+    emoji.id,
+    local_user_view.local_user.local_site_id,
+  )
+  .await?;
   Ok(Json(CustomEmojiResponse { custom_emoji: view }))
 }

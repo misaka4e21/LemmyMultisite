@@ -23,8 +23,10 @@ use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
-use reqwest::Body;
-use reqwest::multipart::{Form as MultipartForm, Part};
+use reqwest::{
+  Body,
+  multipart::{Form as MultipartForm, Part},
+};
 use sha2::{Digest, Sha256};
 use std::{
   io,
@@ -283,9 +285,8 @@ async fn do_upload_image(
   let mut pictrs_msg = String::new();
 
   while let Some(field) = multipart.next().await {
-    let mut field = field.map_err(|e| {
-      LemmyErrorType::PictrsInvalidImageUpload(format!("multipart error: {e}"))
-    })?;
+    let mut field = field
+      .map_err(|e| LemmyErrorType::PictrsInvalidImageUpload(format!("multipart error: {e}")))?;
     let (field_name, filename) = match field.content_disposition() {
       Some(disposition) => (
         disposition.get_name().unwrap_or_default().to_string(),
@@ -297,9 +298,8 @@ async fn do_upload_image(
 
     if !field_name.starts_with("images") {
       while let Some(chunk) = field.next().await {
-        chunk.map_err(|e| {
-          LemmyErrorType::PictrsInvalidImageUpload(format!("multipart error: {e}"))
-        })?;
+        chunk
+          .map_err(|e| LemmyErrorType::PictrsInvalidImageUpload(format!("multipart error: {e}")))?;
       }
       continue;
     }
@@ -340,11 +340,12 @@ async fn do_upload_image(
 
     let mut part = Part::stream(Body::wrap_stream(body_stream)).file_name(filename);
     if let Some(content_type) = content_type {
-      part = part
-        .mime_str(&content_type)
-        .with_lemmy_type(LemmyErrorType::PictrsInvalidImageUpload(
-          "invalid image content type".to_string(),
-        ))?;
+      part =
+        part
+          .mime_str(&content_type)
+          .with_lemmy_type(LemmyErrorType::PictrsInvalidImageUpload(
+            "invalid image content type".to_string(),
+          ))?;
     }
     let form = MultipartForm::new().part("images[]", part);
     let mut client_req = context

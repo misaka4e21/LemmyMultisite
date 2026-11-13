@@ -1,6 +1,5 @@
 use activitypub_federation::config::Data;
 use actix_web::web::Json;
-use chrono::Utc;
 use either::Either;
 use lemmy_api_utils::{
   context::LemmyContext,
@@ -8,12 +7,13 @@ use lemmy_api_utils::{
   utils::is_admin,
 };
 use lemmy_db_schema::{
-  source::{
-    person::Person,
-    private_message_report::{PrivateMessageReport, UpdatePrivateMessageReportForm},
-    site::Site,
+  impls::presence::{
+    SiteReportId,
+    combined_report_id,
+    read_report_site_state,
+    resolve_report_for_site,
   },
-  traits::Reportable,
+  source::{person::Person, site::Site},
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_report_combined::{
@@ -33,20 +33,34 @@ pub async fn resolve_pm_report(
   let report_id = data.report_id;
   let person = &local_user_view.person;
 
-  let conclusion = diesel_string_update(data.conclusion.as_deref());
+  let site_id = local_user_view.local_user.local_site_id;
+  let combined_id =
+    combined_report_id(&mut context.pool(), SiteReportId::PrivateMessage(report_id)).await?;
+  resolve_report_for_site(
+    &mut context.pool(),
+    site_id,
+    combined_id,
+    person.id,
+    data.resolved,
+    diesel_string_update(data.conclusion.as_deref()),
+  )
+  .await?;
 
-  let form = UpdatePrivateMessageReportForm {
-    resolver_id: Some(person.id),
-    resolved: Some(data.resolved),
-    conclusion,
-    updated_at: Some(Utc::now()),
-  };
-
-  PrivateMessageReport::update_resolved(&mut context.pool(), report_id, &form).await?;
-
-  let private_message_report_view =
+  let mut private_message_report_view =
     ReportCombinedViewInternal::read_private_message_report(&mut context.pool(), report_id, person)
       .await?;
+  let state = read_report_site_state(&mut context.pool(), site_id, combined_id).await?;
+  private_message_report_view.private_message_report.resolved = state.resolved;
+  private_message_report_view
+    .private_message_report
+    .resolver_id = state.resolver_id;
+  private_message_report_view
+    .private_message_report
+    .conclusion = state.conclusion;
+  private_message_report_view
+    .private_message_report
+    .updated_at = state.updated_at;
+  private_message_report_view.resolver = Some(person.clone());
 
   let recipient = Person::read(
     &mut context.pool(),

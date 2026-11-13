@@ -3,13 +3,14 @@ use actix_web::web::Json;
 use lemmy_api_utils::{
   context::LemmyContext,
   send_activity::{ActivityChannel, SendActivityData},
-  utils::is_mod_or_admin,
+  utils::check_community_global_mod_action,
 };
-use lemmy_db_schema::source::community::CommunityActions;
+use lemmy_db_schema::source::community::{Community, CommunityActions};
 use lemmy_db_schema_file::enums::CommunityFollowerState;
 use lemmy_db_views_community::api::ApproveCommunityPendingFollower;
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::SuccessResponse;
+use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 
 pub async fn post_pending_follows_approve(
@@ -17,7 +18,9 @@ pub async fn post_pending_follows_approve(
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
 ) -> LemmyResult<Json<SuccessResponse>> {
-  is_mod_or_admin(&mut context.pool(), &local_user_view, data.community_id).await?;
+  let community = Community::read(&mut context.pool(), data.community_id).await?;
+  check_community_global_mod_action(&local_user_view, &community, false, &mut context.pool())
+    .await?;
 
   let community_actions =
     CommunityActions::read(&mut context.pool(), data.community_id, data.follower_id).await?;

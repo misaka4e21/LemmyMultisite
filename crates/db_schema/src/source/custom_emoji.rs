@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use lemmy_db_schema_file::newtypes::CustomEmojiId;
+use lemmy_db_schema_file::newtypes::{CustomEmojiId, LocalSiteId};
 #[cfg(feature = "full")]
 use lemmy_db_schema_file::schema::custom_emoji;
 use lemmy_diesel_utils::dburl::DbUrl;
@@ -22,12 +22,14 @@ pub struct CustomEmoji {
   pub category: String,
   pub published_at: DateTime<Utc>,
   pub updated_at: Option<DateTime<Utc>>,
+  pub local_site_id: LocalSiteId,
 }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "full", derive(Insertable, AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = custom_emoji))]
 pub struct CustomEmojiInsertForm {
+  pub local_site_id: LocalSiteId,
   pub shortcode: String,
   pub image_url: DbUrl,
   pub alt_text: String,

@@ -282,7 +282,7 @@ impl PostView {
             .inner_join(site::table.on(site::id.eq(local_site::site_id)))
             .filter(post_site::post_id.eq(post::id))
             .filter(site::instance_id.eq(local_instance_id))
-            .filter(post_site::removed.eq(true)),
+            .filter(post_site::removed.or(post_site::ban_removed)),
         )))
         .filter(
           community::removed
@@ -321,7 +321,11 @@ impl PostView {
       .inner_join(site::table.on(site::id.eq(local_site::site_id)))
       .filter(post_site::post_id.eq(post_id))
       .filter(site::instance_id.eq(local_instance_id))
-      .select((post_site::removed, post_site::locked, post_site::featured))
+      .select((
+        post_site::removed.or(post_site::ban_removed),
+        post_site::locked,
+        post_site::featured,
+      ))
       .first::<(bool, bool, bool)>(conn)
       .await?;
     view.post.removed |= site_removed;
@@ -615,7 +619,7 @@ impl PostQuery<'_> {
           post_site::table
             .filter(post_site::post_id.eq(post::id))
             .filter(post_site::local_site_id.eq(local_site.id))
-            .filter(post_site::removed.eq(true)),
+            .filter(post_site::removed.or(post_site::ban_removed)),
         )))
         .filter(filter_private_or_followed())
         // only show removed posts to admin
@@ -799,7 +803,7 @@ impl PostQuery<'_> {
       .filter(post_site::local_site_id.eq(local_site.id))
       .select((
         post_site::post_id,
-        post_site::removed,
+        post_site::removed.or(post_site::ban_removed),
         post_site::locked,
         post_site::featured,
       ))

@@ -9,7 +9,6 @@ use lemmy_api_utils::{
 use lemmy_db_schema::source::tagline::{Tagline, TaglineUpdateForm};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::{EditTagline, TaglineResponse};
-use lemmy_diesel_utils::traits::Crud;
 use lemmy_utils::error::LemmyError;
 
 pub async fn edit_tagline(
@@ -38,7 +37,14 @@ pub async fn edit_tagline(
     updated_at: Some(Some(Utc::now())),
   };
 
-  let tagline = Tagline::update(&mut context.pool(), data.id, &tagline_form).await?;
+  let tagline = Tagline::update_for_site(
+    &mut context.pool(),
+    data.id,
+    tenant.local_site().id,
+    &tagline_form,
+  )
+  .await?;
+  crate::site::read::invalidate_site_response(tenant.local_site().id).await;
 
   Ok(Json(TaglineResponse { tagline }))
 }

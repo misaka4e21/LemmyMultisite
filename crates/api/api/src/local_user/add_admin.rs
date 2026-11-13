@@ -21,6 +21,10 @@ pub async fn add_admin(
   // Make sure user is an admin
   is_admin(&local_user_view)?;
 
+  let site_id = local_user_view.local_user.local_site_id;
+  let added_local_user =
+    LocalUserView::read_person_for_site(&mut context.pool(), data.person_id, site_id).await?;
+
   // Check that you're a higher admin.
   // Do this even if you're adding an admin (so that lower admins can't re-order higher ones)
   LocalUser::is_higher_admin_check(&mut context.pool(), my_person_id, vec![data.person_id]).await?;
@@ -39,12 +43,10 @@ pub async fn add_admin(
     }
   }
 
-  // Make sure that the person_id added is local
-  let added_local_user = LocalUserView::read_person(&mut context.pool(), data.person_id).await?;
-
-  LocalUser::update(
+  LocalUser::update_for_site(
     &mut context.pool(),
     added_local_user.local_user.id,
+    site_id,
     &LocalUserUpdateForm {
       admin: Some(data.added),
       ..Default::default()

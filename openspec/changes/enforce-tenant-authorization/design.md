@@ -40,6 +40,10 @@ Explicit mapping prevents credentials or configuration from being assigned to th
 
 Inventory registered routes, background tasks, and federation entry points. Record the actor, target, action, site, permission conditions, rejection behavior, and side effects for anonymous users, ordinary users, community moderators, site administrators, and installation administrators, including v3 forwarding paths. Trace queries, caches, and jobs individually; a missing explicit tenant parameter alone is not proof of a vulnerability. Fix confirmed findings and add regression tests before marking their audit items complete.
 
+### Federated reports
+
+Associate each report with every site that receives it and keep resolution, resolver, conclusion, and update time independently for each association. A remote reporter has no local account, so the reporter's site cannot identify the receiving site. Record the destination tenant when processing an incoming activity and the request tenant when a local user creates a report. Reads, counts, updates, bulk resolution, and notifications use the association for the active site. Preserve legacy reports and require explicit operator review when historical receiving sites cannot be established safely; do not infer access from the reported object's presence alone.
+
 ## Risks / Trade-offs
 
 - [Stricter permissions affect existing administration] Test authorized same-site and rejected cross-site operations and document the behavior change.

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use lemmy_db_schema_file::newtypes::OAuthProviderId;
+use lemmy_db_schema_file::newtypes::{LocalSiteId, OAuthProviderId};
 #[cfg(feature = "full")]
 use lemmy_db_schema_file::schema::oauth_provider;
 use lemmy_diesel_utils::{dburl::DbUrl, sensitive::SensitiveString};
@@ -59,6 +59,7 @@ pub struct AdminOAuthProvider {
   /// The OAuth 2.0 claim whose value becomes the username of a new user. If set, users can't
   /// choose their own name.
   pub username_claim: Option<String>,
+  pub local_site_id: LocalSiteId,
 }
 
 #[skip_serializing_none]
@@ -89,6 +90,7 @@ pub struct PublicOAuthProvider {
 #[cfg_attr(feature = "full", derive(Insertable, AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = oauth_provider))]
 pub struct OAuthProviderInsertForm {
+  pub local_site_id: LocalSiteId,
   pub display_name: String,
   pub issuer: DbUrl,
   pub authorization_endpoint: DbUrl,
@@ -105,7 +107,7 @@ pub struct OAuthProviderInsertForm {
   pub username_claim: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "full", derive(Insertable, AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = oauth_provider))]
 pub struct OAuthProviderUpdateForm {

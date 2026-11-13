@@ -17,8 +17,10 @@ use lemmy_db_schema::{
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_person::api::PurgePerson;
 use lemmy_db_views_site::api::SuccessResponse;
-use lemmy_diesel_utils::traits::Crud;
-use lemmy_utils::{error::LemmyResult, spawn_try_task};
+use lemmy_utils::{
+  error::{LemmyErrorType, LemmyResult},
+  spawn_try_task,
+};
 
 pub async fn purge_person(
   Json(data): Json<PurgePerson>,
@@ -29,6 +31,9 @@ pub async fn purge_person(
 
   // Only let admin purge an item
   is_admin(&local_user_view)?;
+  if context.site_view()?.local_site.id != local_user_view.local_user.local_site_id {
+    return Err(LemmyErrorType::NotFound.into());
+  }
 
   // Also check that you're a higher admin
   LocalUser::is_higher_admin_check(
@@ -38,7 +43,12 @@ pub async fn purge_person(
   )
   .await?;
 
-  let person = Person::read(&mut context.pool(), data.person_id).await?;
+  let person = Person::read_owned_by_site(
+    &mut context.pool(),
+    data.person_id,
+    local_user_view.local_user.local_site_id,
+  )
+  .await?;
 
   ActivityChannel::submit_activity(
     SendActivityData::BanFromSite {
@@ -54,7 +64,9 @@ pub async fn purge_person(
 
   // Clear profile data.
   let context_clone = context.clone();
+  let site_id = local_user_view.local_user.local_site_id;
   spawn_try_task(async move {
+    Person::read_owned_by_site(&mut context_clone.pool(), data.person_id, site_id).await?;
     purge_user_account(data.person_id, local_instance_id, &context_clone).await
   });
 

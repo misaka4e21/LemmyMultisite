@@ -70,6 +70,21 @@ impl LocalUserView {
       .with_lemmy_type(LemmyErrorType::NotFound)
   }
 
+  pub async fn read_person_for_site(
+    pool: &mut DbPool<'_>,
+    person_id: PersonId,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Self> {
+    let conn = &mut get_conn(pool).await?;
+    Self::joins()
+      .filter(person::id.eq(person_id))
+      .filter(local_user::local_site_id.eq(local_site_id))
+      .select(Self::as_select())
+      .first(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)
+  }
+
   pub async fn read_from_name(pool: &mut DbPool<'_>, name: &str) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
     Self::joins()

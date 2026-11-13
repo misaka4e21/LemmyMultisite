@@ -14,6 +14,7 @@ use activitypub_federation::{
   kinds::activity::FlagType,
   traits::{Activity, Object},
 };
+use diesel_async::AsyncConnection;
 use either::Either;
 use lemmy_api_utils::{
   context::LemmyContext,
@@ -34,6 +35,13 @@ use lemmy_apub_objects::{
   utils::functions::{verify_person_in_community, verify_person_in_site_or_community},
 };
 use lemmy_db_schema::{
+  impls::presence::{
+    SiteReportId,
+    combined_report_id,
+    ensure_report_site,
+    lock_report_activity,
+    record_report_activity,
+  },
   source::{
     comment_report::{CommentReport, CommentReportForm},
     community::Community,
@@ -44,7 +52,8 @@ use lemmy_db_schema::{
   },
   traits::Reportable,
 };
-use lemmy_diesel_utils::traits::Crud;
+use lemmy_db_schema_file::newtypes::ReportCombinedId;
+use lemmy_diesel_utils::{connection::get_conn, traits::Crud};
 use lemmy_utils::error::{LemmyError, LemmyResult};
 use url::Url;
 
@@ -75,9 +84,11 @@ impl Report {
     actor: &ApubPerson,
     receiver: &Either<ApubSite, ApubCommunity>,
     reason: String,
+    report_id: ReportCombinedId,
     context: Data<LemmyContext>,
   ) -> LemmyResult<()> {
     let report = Self::new(&object_id, actor, receiver, Some(reason), &context)?;
+    record_report_activity(&mut context.pool(), report.id.as_str(), report_id).await?;
     let inboxes = report_inboxes(object_id, receiver, actor, &context).await?;
 
     send_lemmy_activity(&context, report, actor, inboxes, false).await
@@ -129,53 +140,70 @@ impl Activity for Report {
   async fn receive(self, context: &Data<Self::DataType>) -> LemmyResult<()> {
     let actor = self.actor.dereference(context).await?;
     let reason = self.reason()?;
-    match self.object.dereference(context).await? {
-      ReportableObjects::Left(PostOrComment::Left(post)) => {
-        let report_form = PostReportForm {
-          creator_id: actor.id,
-          post_id: post.id,
-          original_post_name: post.name.clone(),
-          original_post_url: post.url.clone(),
-          reason,
-          original_post_body: post.body.clone(),
-          violates_instance_rules: false,
+    let object = self.object.dereference(context).await?;
+    let site_id = context.site_view()?.local_site.id;
+    let pool = &mut context.pool();
+    let conn = &mut get_conn(pool).await?;
+    conn
+      .transaction::<_, LemmyError, _>(async |conn| {
+        let pool = &mut conn.into();
+        if let Some(existing_id) = lock_report_activity(pool, self.id.as_str()).await? {
+          ensure_report_site(pool, site_id, existing_id).await?;
+          return Ok(());
+        }
+        let report_id = match object {
+          ReportableObjects::Left(PostOrComment::Left(post)) => {
+            let report_form = PostReportForm {
+              creator_id: actor.id,
+              post_id: post.id,
+              original_post_name: post.name.clone(),
+              original_post_url: post.url.clone(),
+              reason,
+              original_post_body: post.body.clone(),
+              violates_instance_rules: false,
+            };
+            SiteReportId::Post(PostReport::report(pool, &report_form).await?.id)
+          }
+          ReportableObjects::Left(PostOrComment::Right(comment)) => {
+            let report_form = CommentReportForm {
+              creator_id: actor.id,
+              comment_id: comment.id,
+              original_comment_text: comment.content.clone(),
+              reason,
+              violates_instance_rules: false,
+            };
+            SiteReportId::Comment(CommentReport::report(pool, &report_form).await?.id)
+          }
+          ReportableObjects::Right(Either::Left(community)) => {
+            let report_form = CommunityReportForm {
+              creator_id: actor.id,
+              community_id: community.id,
+              reason,
+              original_community_name: community.name.clone(),
+              original_community_title: community.title.clone(),
+              original_community_banner: community.banner.clone(),
+              original_community_icon: community.icon.clone(),
+              original_community_summary: community.summary.clone(),
+              original_community_sidebar: community.sidebar.clone(),
+            };
+            SiteReportId::Community(CommunityReport::report(pool, &report_form).await?.id)
+          }
+          ReportableObjects::Right(Either::Right(private_message)) => {
+            let form = PrivateMessageReportForm {
+              creator_id: actor.id,
+              private_message_id: private_message.id,
+              original_pm_text: private_message.content.clone(),
+              reason,
+            };
+            SiteReportId::PrivateMessage(PrivateMessageReport::report(pool, &form).await?.id)
+          }
         };
-        PostReport::report(&mut context.pool(), &report_form).await?;
-      }
-      ReportableObjects::Left(PostOrComment::Right(comment)) => {
-        let report_form = CommentReportForm {
-          creator_id: actor.id,
-          comment_id: comment.id,
-          original_comment_text: comment.content.clone(),
-          reason,
-          violates_instance_rules: false,
-        };
-        CommentReport::report(&mut context.pool(), &report_form).await?;
-      }
-      ReportableObjects::Right(Either::Left(community)) => {
-        let report_form = CommunityReportForm {
-          creator_id: actor.id,
-          community_id: community.id,
-          reason,
-          original_community_name: community.name.clone(),
-          original_community_title: community.title.clone(),
-          original_community_banner: community.banner.clone(),
-          original_community_icon: community.icon.clone(),
-          original_community_summary: community.summary.clone(),
-          original_community_sidebar: community.sidebar.clone(),
-        };
-        CommunityReport::report(&mut context.pool(), &report_form).await?;
-      }
-      ReportableObjects::Right(Either::Right(private_message)) => {
-        let form = PrivateMessageReportForm {
-          creator_id: actor.id,
-          private_message_id: private_message.id,
-          original_pm_text: private_message.content.clone(),
-          reason,
-        };
-        PrivateMessageReport::report(&mut context.pool(), &form).await?;
-      }
-    };
+        let combined_id = combined_report_id(pool, report_id).await?;
+        record_report_activity(pool, self.id.as_str(), combined_id).await?;
+        ensure_report_site(pool, site_id, combined_id).await?;
+        Ok(())
+      })
+      .await?;
 
     let receiver = self.to[0].dereference(context).await?;
     if let Some(community) = local_community(&receiver) {

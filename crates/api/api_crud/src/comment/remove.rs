@@ -8,14 +8,12 @@ use lemmy_api_utils::{
   utils::check_community_mod_action,
 };
 use lemmy_db_schema::{
-  impls::presence::set_comment_site_removed,
+  impls::presence::{SiteReportObject, resolve_reports_for_site, set_comment_site_removed},
   source::{
     comment::{Comment, CommentUpdateForm},
-    comment_report::CommentReport,
     local_user::LocalUser,
     modlog::{Modlog, ModlogInsertForm},
   },
-  traits::Reportable,
 };
 use lemmy_db_views_comment::{
   CommentView,
@@ -95,12 +93,16 @@ pub async fn remove_comment(
       })
       .collect();
 
-    CommentReport::resolve_all_for_thread(
-      &mut context.pool(),
-      &orig_comment.comment.path,
-      local_user_view.person.id,
-    )
-    .await?;
+    for comment in &updated_comments {
+      resolve_reports_for_site(
+        &mut context.pool(),
+        active_site_id,
+        SiteReportObject::Comment(comment.id),
+        None,
+        local_user_view.person.id,
+      )
+      .await?;
+    }
 
     (updated_comment, forms)
   } else {
@@ -121,9 +123,11 @@ pub async fn remove_comment(
       orig_comment.comment.clone()
     };
 
-    CommentReport::resolve_all_for_object(
+    resolve_reports_for_site(
       &mut context.pool(),
-      comment_id,
+      active_site_id,
+      SiteReportObject::Comment(comment_id),
+      None,
       local_user_view.person.id,
     )
     .await?;

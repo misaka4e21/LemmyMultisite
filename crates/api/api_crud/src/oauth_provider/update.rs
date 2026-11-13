@@ -38,8 +38,14 @@ pub async fn edit_oauth_provider(
     username_claim: diesel_string_update(data.username_claim.as_deref()),
   };
 
-  let update_result =
-    AdminOAuthProvider::update(&mut context.pool(), data.id, &oauth_provider_form).await?;
-  let oauth_provider = AdminOAuthProvider::read(&mut context.pool(), update_result.id).await?;
+  let update_result = AdminOAuthProvider::update_for_site(
+    &mut context.pool(),
+    data.id,
+    local_user_view.local_user.local_site_id,
+    &oauth_provider_form,
+  )
+  .await?;
+  let oauth_provider = update_result;
+  crate::site::read::invalidate_site_response(local_user_view.local_user.local_site_id).await;
   Ok(Json(oauth_provider))
 }

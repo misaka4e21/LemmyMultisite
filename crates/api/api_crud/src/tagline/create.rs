@@ -32,9 +32,13 @@ pub async fn create_tagline(
   )
   .await?;
 
-  let tagline_form = TaglineInsertForm { content };
+  let tagline_form = TaglineInsertForm {
+    content,
+    local_site_id: tenant.local_site().id,
+  };
 
   let tagline = Tagline::create(&mut context.pool(), &tagline_form).await?;
+  crate::site::read::invalidate_site_response(tenant.local_site().id).await;
 
   Ok(Json(TaglineResponse { tagline }))
 }

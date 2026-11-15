@@ -189,7 +189,9 @@ async fn oauth_provider_is_bound_to_request_site() -> LemmyResult<()> {
     first_tenant,
   )
   .await?;
-  assert!(response.jwt.is_some());
+  let auth_cookie = response.headers().get("set-cookie").unwrap().to_str().unwrap();
+  assert!(auth_cookie.starts_with("jwt="));
+  assert!(auth_cookie.contains("HttpOnly"));
   assert_eq!(hits.load(Ordering::SeqCst), 2);
 
   handle.stop(true).await;

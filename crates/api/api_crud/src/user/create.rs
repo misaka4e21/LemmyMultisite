@@ -3,7 +3,7 @@ use activitypub_federation::{
   fetch::object_id::ObjectId,
   http_signatures::generate_actor_keypair,
 };
-use actix_web::{HttpRequest, rt::time::sleep, web::Json};
+use actix_web::{HttpRequest, HttpResponse, rt::time::sleep, web::Json};
 use diesel_async::{AsyncConnection, AsyncPgConnection};
 use lemmy_api_utils::{
   claims::Claims,
@@ -11,6 +11,7 @@ use lemmy_api_utils::{
   plugins::{LemmyPlugins, plugin_hook_after, plugin_hook_before, plugin_validate_captcha},
   tenant::TenantContext,
   utils::{
+    auth_cookie,
     check_email_verified,
     check_local_user_banned_or_deleted,
     check_registration_application,
@@ -278,7 +279,7 @@ pub async fn authenticate_with_oauth(
   req: HttpRequest,
   context: Data<LemmyContext>,
   tenant: TenantContext,
-) -> LemmyResult<Json<LoginResponse>> {
+) -> LemmyResult<HttpResponse> {
   let pool = &mut context.pool();
   let site_view = tenant.site_view.clone();
   let local_site = site_view.local_site.clone();
@@ -547,7 +548,15 @@ pub async fn authenticate_with_oauth(
     login_response.jwt = Some(jwt);
   }
 
-  Ok(Json(login_response))
+  let mut response = HttpResponse::Ok();
+  if let Some(jwt) = &login_response.jwt {
+    response.cookie(auth_cookie(
+      jwt,
+      tenant.scheme == "https",
+      data.stay_logged_in.unwrap_or_default(),
+    ));
+  }
+  Ok(response.json(login_response))
 }
 
 async fn create_person(

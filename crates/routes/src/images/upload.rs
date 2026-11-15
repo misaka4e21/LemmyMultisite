@@ -218,6 +218,7 @@ pub async fn upload_site_icon(
     ..Default::default()
   };
   Site::update(&mut context.pool(), site.id, &form).await?;
+  SiteView::invalidate(local_site.id).await;
 
   Ok(Json(image))
 }
@@ -250,6 +251,7 @@ pub async fn upload_site_banner(
     ..Default::default()
   };
   Site::update(&mut context.pool(), site.id, &form).await?;
+  SiteView::invalidate(local_site.id).await;
 
   Ok(Json(image))
 }

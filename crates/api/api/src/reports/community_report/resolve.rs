@@ -8,10 +8,7 @@ use lemmy_api_utils::{
 };
 use lemmy_db_schema::{
   impls::presence::{
-    SiteReportId,
-    combined_report_id,
-    read_report_site_state,
-    resolve_report_for_site,
+    SiteReportId, combined_report_id, read_report_site_state, resolve_report_for_site,
   },
   source::site::Site,
 };

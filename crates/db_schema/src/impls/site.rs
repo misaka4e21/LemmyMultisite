@@ -1,9 +1,10 @@
 use crate::source::{
   actor_language::SiteLanguage,
+  media::MediaReference,
   site::{Site, SiteUpdateForm, SiteUpsertForm},
 };
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, dsl::insert_into};
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use lemmy_db_schema_file::{InstanceId, newtypes::SiteId, schema::site};
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
@@ -11,7 +12,7 @@ use lemmy_diesel_utils::{
   traits::Crud,
   utils::functions::lower,
 };
-use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
+use lemmy_utils::error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult};
 use url::Url;
 
 impl Crud for Site {
@@ -30,22 +31,31 @@ impl Crud for Site {
       None => true,
     };
     let conn = &mut get_conn(pool).await?;
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        diesel::sql_query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('media-site-catalog', 0))",
+        )
+        .execute(conn)
+        .await?;
+        // Can't do separate insert/update commands because InsertForm/UpdateForm aren't convertible
+        let site = insert_into(site::table)
+          .values(form)
+          .on_conflict(site::ap_id)
+          .do_update()
+          .set(form)
+          .get_result::<Self>(conn)
+          .await?;
 
-    // Can't do separate insert/update commands because InsertForm/UpdateForm aren't convertible
-    let site = insert_into(site::table)
-      .values(form)
-      .on_conflict(site::ap_id)
-      .do_update()
-      .set(form)
-      .get_result::<Self>(conn)
-      .await?;
-
-    // initialize languages if site is newly created
-    if is_new_site {
-      // initialize with all languages
-      SiteLanguage::update(pool, vec![], &site).await?;
-    }
-    Ok(site)
+        // initialize languages if site is newly created
+        if is_new_site {
+          // initialize with all languages
+          SiteLanguage::update(&mut conn.into(), vec![], &site).await?;
+        }
+        MediaReference::sync_owned_site_content(&mut conn.into(), site.id).await?;
+        Ok(site)
+      })
+      .await
   }
 
   async fn update(
@@ -54,11 +64,22 @@ impl Crud for Site {
     new_site: &Self::UpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(site::table.find(site_id))
-      .set(new_site)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        diesel::sql_query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('media-site-catalog', 0))",
+        )
+        .execute(conn)
+        .await?;
+        let updated = diesel::update(site::table.find(site_id))
+          .set(new_site)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_owned_site_content(&mut conn.into(), site_id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 

@@ -2,21 +2,26 @@ use crate::{
   diesel::{DecoratableTarget, OptionalExtension},
   impls::presence::{default_local_site_id, ensure_private_message_site},
   source::{
+    media::MediaReference,
     person::Person,
     private_message::{PrivateMessage, PrivateMessageInsertForm, PrivateMessageUpdateForm},
   },
 };
 use chrono::{DateTime, Utc};
 use diesel::{ExpressionMethods, QueryDsl, dsl::insert_into};
-use diesel_async::RunQueryDsl;
-use lemmy_db_schema_file::{PersonId, newtypes::PrivateMessageId, schema::private_message};
+use diesel_async::{AsyncConnection, RunQueryDsl};
+use lemmy_db_schema_file::{
+  PersonId,
+  newtypes::{LocalSiteId, PrivateMessageId},
+  schema::private_message,
+};
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
   dburl::DbUrl,
   traits::Crud,
   utils::functions::coalesce,
 };
-use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
+use lemmy_utils::error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult};
 use url::Url;
 
 impl Crud for PrivateMessage {
@@ -26,27 +31,31 @@ impl Crud for PrivateMessage {
 
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    let private_message = insert_into(private_message::table)
-      .values(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let private_message = insert_into(private_message::table)
+          .values(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        if form.local.unwrap_or(true) {
+          let local_site_id = match form.origin_local_site_id {
+            Some(local_site_id) => Some(local_site_id),
+            None => default_local_site_id(&mut conn.into()).await?,
+          };
+          if let Some(local_site_id) = local_site_id {
+            ensure_private_message_site(
+              &mut conn.into(),
+              local_site_id,
+              private_message.id,
+              "sender",
+            )
+            .await?;
+          }
+        }
+        Ok(private_message)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-    if form.local.unwrap_or(true) {
-      let local_site_id = match form.origin_local_site_id {
-        Some(local_site_id) => Some(local_site_id),
-        None => default_local_site_id(&mut conn.into()).await?,
-      };
-      if let Some(local_site_id) = local_site_id {
-        ensure_private_message_site(
-          &mut conn.into(),
-          local_site_id,
-          private_message.id,
-          "sender",
-        )
-        .await?;
-      }
-    }
-    Ok(private_message)
   }
 
   async fn update(
@@ -55,11 +64,18 @@ impl Crud for PrivateMessage {
     form: &Self::UpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(private_message::table.find(private_message_id))
-      .set(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = diesel::update(private_message::table.find(private_message_id))
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_private_message_all_sites(&mut conn.into(), private_message_id)
+          .await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 
@@ -70,17 +86,23 @@ impl PrivateMessage {
     form: &PrivateMessageInsertForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(private_message::table)
-      .values(form)
-      .on_conflict(private_message::ap_id)
-      .filter_target(
-        coalesce(private_message::updated_at, private_message::published_at).lt(timestamp),
-      )
-      .do_update()
-      .set(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = insert_into(private_message::table)
+          .values(form)
+          .on_conflict(private_message::ap_id)
+          .filter_target(
+            coalesce(private_message::updated_at, private_message::published_at).lt(timestamp),
+          )
+          .do_update()
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        MediaReference::sync_private_message_all_sites(&mut conn.into(), updated.id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
   }
 
   pub async fn read_from_apub_id(
@@ -119,6 +141,27 @@ impl PrivateMessage {
       .get_results::<Self>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+
+  pub async fn update_removed_for_creator_in_site(
+    pool: &mut DbPool<'_>,
+    for_creator_id: PersonId,
+    local_site_id: LocalSiteId,
+    removed: bool,
+  ) -> LemmyResult<Vec<Self>> {
+    let conn = &mut get_conn(pool).await?;
+    diesel::update(
+      private_message::table
+        .filter(private_message::creator_id.eq(for_creator_id))
+        .filter(private_message::origin_local_site_id.eq(local_site_id)),
+    )
+    .set((
+      private_message::removed.eq(removed),
+      private_message::updated_at.eq(Utc::now()),
+    ))
+    .get_results::<Self>(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
   /// Dont let creator know that recipient deleted the message

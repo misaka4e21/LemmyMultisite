@@ -3,37 +3,26 @@ use crate::{
   impls::presence::{default_local_site_id, ensure_multi_community_site},
   source::{
     community::Community,
+    media::MediaReference,
     multi_community::{
-      MultiCommunity,
-      MultiCommunityEntry,
-      MultiCommunityEntryForm,
-      MultiCommunityFollow,
-      MultiCommunityFollowForm,
-      MultiCommunityInsertForm,
-      MultiCommunityUpdateForm,
+      MultiCommunity, MultiCommunityEntry, MultiCommunityEntryForm, MultiCommunityFollow,
+      MultiCommunityFollowForm, MultiCommunityInsertForm, MultiCommunityUpdateForm,
     },
   },
   traits::ApubActor,
   utils::format_actor_url,
 };
 use diesel::{
-  ExpressionMethods,
-  QueryDsl,
+  ExpressionMethods, QueryDsl,
   dsl::{delete, exists, insert_into, not},
-  select,
-  update,
+  select, update,
 };
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use lemmy_db_schema_file::{
   PersonId,
   newtypes::{CommunityId, LocalSiteId, MultiCommunityId},
   schema::{
-    community,
-    instance,
-    multi_community,
-    multi_community_entry,
-    multi_community_follow,
-    person,
+    community, instance, multi_community, multi_community_entry, multi_community_follow, person,
   },
 };
 use lemmy_diesel_utils::{
@@ -43,7 +32,7 @@ use lemmy_diesel_utils::{
   utils::functions::lower,
 };
 use lemmy_utils::{
-  error::{LemmyErrorExt, LemmyErrorType, LemmyResult},
+  error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult},
   settings::structs::Settings,
 };
 use url::Url;
@@ -57,22 +46,25 @@ impl Crud for MultiCommunity {
 
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-
-    let multi = insert_into(multi_community::table)
-      .values(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let multi = insert_into(multi_community::table)
+          .values(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        if form.local.unwrap_or(true) {
+          let local_site_id = match form.origin_local_site_id {
+            Some(local_site_id) => Some(local_site_id),
+            None => default_local_site_id(&mut conn.into()).await?,
+          };
+          if let Some(local_site_id) = local_site_id {
+            ensure_multi_community_site(&mut conn.into(), local_site_id, multi.id).await?;
+          }
+        }
+        Ok(multi)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-    if form.local.unwrap_or(true) {
-      let local_site_id = match form.origin_local_site_id {
-        Some(local_site_id) => Some(local_site_id),
-        None => default_local_site_id(&mut conn.into()).await?,
-      };
-      if let Some(local_site_id) = local_site_id {
-        ensure_multi_community_site(&mut conn.into(), local_site_id, multi.id).await?;
-      }
-    }
-    Ok(multi)
   }
 
   async fn update(
@@ -82,11 +74,17 @@ impl Crud for MultiCommunity {
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
 
-    update(multi_community::table.find(id))
-      .set(form)
-      .get_result(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = update(multi_community::table.find(id))
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_multi_community_all_sites(&mut conn.into(), id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 
@@ -94,14 +92,20 @@ impl MultiCommunity {
   pub async fn upsert(pool: &mut DbPool<'_>, form: &MultiCommunityInsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
 
-    insert_into(multi_community::table)
-      .values(form)
-      .on_conflict(multi_community::ap_id)
-      .do_update()
-      .set(form)
-      .get_result(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = insert_into(multi_community::table)
+          .values(form)
+          .on_conflict(multi_community::ap_id)
+          .do_update()
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_multi_community_all_sites(&mut conn.into(), updated.id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
   pub async fn follow(

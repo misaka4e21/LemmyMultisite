@@ -2,8 +2,7 @@ use crate::{
   activity_lists::AnnouncableActivities,
   community::send_activity_in_community,
   protocol::deletion::{delete::Delete, undo_delete::UndoDelete},
-  send_lemmy_activity,
-  verify_person,
+  send_lemmy_activity, verify_person,
 };
 use activitypub_federation::{
   config::Data,
@@ -19,18 +18,12 @@ use lemmy_api_utils::{
 };
 use lemmy_apub_objects::{
   objects::{
-    comment::ApubComment,
-    community::ApubCommunity,
-    person::ApubPerson,
-    post::ApubPost,
+    comment::ApubComment, community::ApubCommunity, person::ApubPerson, post::ApubPost,
     private_message::ApubPrivateMessage,
   },
   utils::{
     functions::{
-      generate_to,
-      verify_is_public,
-      verify_mod_action,
-      verify_person_in_community,
+      generate_to, verify_is_public, verify_mod_action, verify_person_in_community,
       verify_visibility,
     },
     protocol::InCommunity,
@@ -314,6 +307,7 @@ async fn receive_delete_action(
     DeletableObjects::Person(person) => {
       let site_view = context.site_view()?.clone();
       let local_instance_id = site_view.site.instance_id;
+      let site_id = site_view.local_site.id;
 
       let mut form = DeleteUserForm {
         person_id: person.id,
@@ -322,11 +316,17 @@ async fn receive_delete_action(
       form = plugin_hook_before("federated_user_before_delete", form).await?;
       if form.delete_content {
         let context = context.clone();
-        spawn_try_task(
-          async move { purge_user_account(person.id, local_instance_id, &context).await },
-        );
+        spawn_try_task(async move {
+          purge_user_account(person.id, local_instance_id, site_id, &context).await
+        });
       } else {
-        Person::delete_account(&mut context.pool(), person.id, local_instance_id).await?;
+        Person::delete_account(
+          &mut context.pool(),
+          person.id,
+          local_instance_id,
+          site_view.local_site.id,
+        )
+        .await?;
       }
       plugin_hook_after("federated_user_after_delete", &form);
     }

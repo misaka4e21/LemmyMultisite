@@ -4,16 +4,10 @@ use crate::{
   source::{
     actor_language::CommunityLanguage,
     community::{
-      Community,
-      CommunityActions,
-      CommunityBlockForm,
-      CommunityFollowerForm,
-      CommunityInsertForm,
-      CommunityModeratorForm,
-      CommunityPersonBanForm,
-      CommunityUpdateForm,
-      CommunityUpsertForm,
+      Community, CommunityActions, CommunityBlockForm, CommunityFollowerForm, CommunityInsertForm,
+      CommunityModeratorForm, CommunityPersonBanForm, CommunityUpdateForm, CommunityUpsertForm,
     },
+    media::MediaReference,
     post::Post,
   },
   traits::{ApubActor, Bannable, Blockable, Followable},
@@ -21,16 +15,12 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use diesel::{
-  BoolExpressionMethods,
-  ExpressionMethods,
-  NullableExpressionMethods,
-  QueryDsl,
+  BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, QueryDsl,
   dsl::{exists, insert_into, not},
   expression::SelectableHelper,
-  select,
-  update,
+  select, update,
 };
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use diesel_uplete::{UpleteCount, uplete};
 use lemmy_db_schema_file::{
   PersonId,
@@ -45,7 +35,7 @@ use lemmy_diesel_utils::{
   utils::functions::{coalesce, coalesce_2_nullable, lower, random_smallint},
 };
 use lemmy_utils::{
-  error::{LemmyErrorExt, LemmyErrorType, LemmyResult, UntranslatedError},
+  error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult, UntranslatedError},
   settings::structs::Settings,
 };
 use url::Url;
@@ -57,27 +47,30 @@ impl Crud for Community {
 
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let community_ = insert_into(community::table)
+          .values(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
 
-    let community_ = insert_into(community::table)
-      .values(form)
-      .get_result::<Self>(conn)
+        // Initialize languages for new community
+        CommunityLanguage::update(&mut conn.into(), vec![], community_.id).await?;
+
+        if form.local.unwrap_or(true) {
+          let local_site_id = match form.origin_local_site_id {
+            Some(local_site_id) => Some(local_site_id),
+            None => default_local_site_id(&mut conn.into()).await?,
+          };
+          if let Some(local_site_id) = local_site_id {
+            ensure_community_site(&mut conn.into(), local_site_id, community_.id).await?;
+          }
+        }
+
+        Ok(community_)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-
-    // Initialize languages for new community
-    CommunityLanguage::update(pool, vec![], community_.id).await?;
-
-    if form.local.unwrap_or(true) {
-      let local_site_id = match form.origin_local_site_id {
-        Some(local_site_id) => Some(local_site_id),
-        None => default_local_site_id(pool).await?,
-      };
-      if let Some(local_site_id) = local_site_id {
-        ensure_community_site(pool, local_site_id, community_.id).await?;
-      }
-    }
-
-    Ok(community_)
   }
 
   async fn update(
@@ -86,11 +79,17 @@ impl Crud for Community {
     form: &Self::UpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(community::table.find(community_id))
-      .set(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = diesel::update(community::table.find(community_id))
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_community_all_sites(&mut conn.into(), community_id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 
@@ -141,22 +140,26 @@ impl Community {
       None => true,
     };
     let conn = &mut get_conn(pool).await?;
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let community_ = insert_into(community::table)
+          .values(form)
+          .on_conflict(community::ap_id)
+          .filter_target(coalesce(community::updated_at, community::published_at).lt(timestamp))
+          .do_update()
+          .set(form)
+          .get_result::<Self>(conn)
+          .await?;
 
-    let community_ = insert_into(community::table)
-      .values(form)
-      .on_conflict(community::ap_id)
-      .filter_target(coalesce(community::updated_at, community::published_at).lt(timestamp))
-      .do_update()
-      .set(form)
-      .get_result::<Self>(conn)
-      .await?;
+        // Initialize languages for new community
+        if is_new_community {
+          CommunityLanguage::update(&mut conn.into(), vec![], community_.id).await?;
+        }
 
-    // Initialize languages for new community
-    if is_new_community {
-      CommunityLanguage::update(pool, vec![], community_.id).await?;
-    }
-
-    Ok(community_)
+        MediaReference::sync_community_all_sites(&mut conn.into(), community_.id).await?;
+        Ok(community_)
+      })
+      .await
   }
 
   /// Get the community which has a given moderators or featured url, also return the collection
@@ -329,6 +332,27 @@ impl CommunityActions {
       .get_result(conn)
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)
+  }
+
+  /// Removes the person from moderator roles only for communities owned by this site.
+  pub async fn leave_mod_team_for_communities_in_site(
+    pool: &mut DbPool<'_>,
+    for_person_id: PersonId,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<UpleteCount> {
+    let conn = &mut get_conn(pool).await?;
+    let site_communities = community::table
+      .filter(community::origin_local_site_id.eq(local_site_id))
+      .select(community::id);
+    uplete(
+      community_actions::table
+        .filter(community_actions::person_id.eq(for_person_id))
+        .filter(community_actions::community_id.eq_any(site_communities)),
+    )
+    .set_null(community_actions::became_moderator_at)
+    .get_result(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::NotFound)
   }
 
   pub async fn get_person_moderated_communities(
@@ -683,13 +707,8 @@ mod tests {
     source::{
       comment::{Comment, CommentInsertForm},
       community::{
-        Community,
-        CommunityActions,
-        CommunityFollowerForm,
-        CommunityInsertForm,
-        CommunityModeratorForm,
-        CommunityPersonBanForm,
-        CommunityUpdateForm,
+        Community, CommunityActions, CommunityFollowerForm, CommunityInsertForm,
+        CommunityModeratorForm, CommunityPersonBanForm, CommunityUpdateForm,
       },
       instance::Instance,
       local_user::LocalUser,

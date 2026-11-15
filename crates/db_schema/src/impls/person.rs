@@ -1,31 +1,26 @@
 use crate::{
   diesel::{BoolExpressionMethods, NullableExpressionMethods, OptionalExtension},
   impls::presence::{default_local_site_id, ensure_person_site},
-  source::person::{
-    Person,
-    PersonActions,
-    PersonBlockForm,
-    PersonFollowerForm,
-    PersonInsertForm,
-    PersonNoteForm,
-    PersonUpdateForm,
+  source::{
+    media::MediaReference,
+    person::{
+      Person, PersonActions, PersonBlockForm, PersonFollowerForm, PersonInsertForm, PersonNoteForm,
+      PersonUpdateForm,
+    },
   },
   traits::{ApubActor, Blockable, Followable},
   utils::format_actor_url,
 };
 use chrono::Utc;
 use diesel::{
-  ExpressionMethods,
-  JoinOnDsl,
-  QueryDsl,
+  ExpressionMethods, JoinOnDsl, QueryDsl,
   dsl::{exists, insert_into, not, select},
   expression::SelectableHelper,
 };
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use diesel_uplete::{UpleteCount, uplete};
 use lemmy_db_schema_file::{
-  InstanceId,
-  PersonId,
+  InstanceId, PersonId,
   newtypes::{CommunityId, LocalSiteId, LocalUserId},
   schema::{instance, instance_actions, local_user, person, person_actions},
 };
@@ -36,7 +31,7 @@ use lemmy_diesel_utils::{
   utils::functions::lower,
 };
 use lemmy_utils::{
-  error::{LemmyErrorExt, LemmyErrorType, LemmyResult},
+  error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult},
   settings::structs::Settings,
 };
 use url::Url;
@@ -59,21 +54,25 @@ impl Crud for Person {
 
   async fn create(pool: &mut DbPool<'_>, form: &PersonInsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    let person = insert_into(person::table)
-      .values(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let person = insert_into(person::table)
+          .values(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        if form.local.unwrap_or(true) {
+          let local_site_id = match form.origin_local_site_id {
+            Some(local_site_id) => Some(local_site_id),
+            None => default_local_site_id(&mut conn.into()).await?,
+          };
+          if let Some(local_site_id) = local_site_id {
+            ensure_person_site(&mut conn.into(), local_site_id, person.id).await?;
+          }
+        }
+        Ok(person)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-    if form.local.unwrap_or(true) {
-      let local_site_id = match form.origin_local_site_id {
-        Some(local_site_id) => Some(local_site_id),
-        None => default_local_site_id(&mut conn.into()).await?,
-      };
-      if let Some(local_site_id) = local_site_id {
-        ensure_person_site(&mut conn.into(), local_site_id, person.id).await?;
-      }
-    }
-    Ok(person)
   }
   async fn update(
     pool: &mut DbPool<'_>,
@@ -81,11 +80,17 @@ impl Crud for Person {
     form: &PersonUpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(person::table.find(person_id))
-      .set(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = diesel::update(person::table.find(person_id))
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_person_all_sites(&mut conn.into(), person_id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 
@@ -112,59 +117,72 @@ impl Person {
   /// actions.
   pub async fn upsert(pool: &mut DbPool<'_>, form: &PersonInsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(person::table)
-      .values(form)
-      .on_conflict(person::ap_id)
-      .do_update()
-      .set(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = insert_into(person::table)
+          .values(form)
+          .on_conflict(person::ap_id)
+          .do_update()
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_person_all_sites(&mut conn.into(), updated.id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
   pub async fn delete_account(
     pool: &mut DbPool<'_>,
     person_id: PersonId,
     local_instance_id: InstanceId,
+    site_id: LocalSiteId,
   ) -> LemmyResult<Person> {
     let conn = &mut get_conn(pool).await?;
+    conn
+      .transaction::<Person, LemmyError, _>(async |conn| {
+        // Set the local user email to none, only if they aren't banned locally.
+        let instance_actions_join = instance_actions::table.on(
+          instance_actions::person_id
+            .eq(person_id)
+            .and(instance_actions::instance_id.eq(local_instance_id)),
+        );
 
-    // Set the local user email to none, only if they aren't banned locally.
-    let instance_actions_join = instance_actions::table.on(
-      instance_actions::person_id
-        .eq(person_id)
-        .and(instance_actions::instance_id.eq(local_instance_id)),
-    );
+        let not_banned_local_user_id = local_user::table
+          .left_join(instance_actions_join)
+          .filter(local_user::person_id.eq(person_id))
+          .filter(local_user::local_site_id.eq(site_id))
+          .filter(instance_actions::received_ban_at.nullable().is_null())
+          .select(local_user::id)
+          .first::<LocalUserId>(conn)
+          .await
+          .optional()?;
 
-    let not_banned_local_user_id = local_user::table
-      .left_join(instance_actions_join)
-      .filter(local_user::person_id.eq(person_id))
-      .filter(instance_actions::received_ban_at.nullable().is_null())
-      .select(local_user::id)
-      .first::<LocalUserId>(conn)
+        if let Some(local_user_id) = not_banned_local_user_id {
+          diesel::update(local_user::table.find(local_user_id))
+            .set(local_user::email.eq::<Option<String>>(None))
+            .execute(conn)
+            .await?;
+        };
+
+        let updated = diesel::update(person::table.find(person_id))
+          .set((
+            person::display_name.eq::<Option<String>>(None),
+            person::avatar.eq::<Option<String>>(None),
+            person::banner.eq::<Option<String>>(None),
+            person::bio.eq::<Option<String>>(None),
+            person::matrix_user_id.eq::<Option<String>>(None),
+            person::deleted.eq(true),
+            person::updated_at.eq(Utc::now()),
+          ))
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_person_all_sites(&mut conn.into(), person_id).await?;
+        Ok(updated)
+      })
       .await
-      .optional()?;
-
-    if let Some(local_user_id) = not_banned_local_user_id {
-      diesel::update(local_user::table.find(local_user_id))
-        .set(local_user::email.eq::<Option<String>>(None))
-        .execute(conn)
-        .await?;
-    };
-
-    diesel::update(person::table.find(person_id))
-      .set((
-        person::display_name.eq::<Option<String>>(None),
-        person::avatar.eq::<Option<String>>(None),
-        person::banner.eq::<Option<String>>(None),
-        person::bio.eq::<Option<String>>(None),
-        person::matrix_user_id.eq::<Option<String>>(None),
-        person::deleted.eq(true),
-        person::updated_at.eq(Utc::now()),
-      ))
-      .get_result::<Self>(conn)
-      .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
   pub async fn check_username_taken(
@@ -372,15 +390,37 @@ impl PersonActions {
 
   pub async fn note(pool: &mut DbPool<'_>, form: &PersonNoteForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(person_actions::table)
-      .values(form)
-      .on_conflict((person_actions::person_id, person_actions::target_id))
-      .do_update()
-      .set(form)
-      .returning(Self::as_select())
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let result = insert_into(person_actions::table)
+          .values(form)
+          .on_conflict((person_actions::person_id, person_actions::target_id))
+          .do_update()
+          .set(form)
+          .returning(Self::as_select())
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::NotFound)?;
+        let local_site = local_user::table
+          .filter(local_user::person_id.eq(form.person_id))
+          .select(local_user::local_site_id)
+          .first::<LocalSiteId>(conn)
+          .await
+          .optional()?;
+        if let Some(site_id) = local_site {
+          MediaReference::sync_content(
+            &mut conn.into(),
+            site_id,
+            "person_note",
+            &format!("{}:{}", form.person_id.0, form.target_id.0),
+            result.note.as_deref(),
+            &[],
+          )
+          .await?;
+        }
+        Ok(result)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::NotFound)
   }
 
   pub async fn delete_note(
@@ -389,12 +429,33 @@ impl PersonActions {
     target_id: PersonId,
   ) -> LemmyResult<UpleteCount> {
     let conn = &mut get_conn(pool).await?;
-    uplete(person_actions::table.find((person_id, target_id)))
-      .set_null(person_actions::note)
-      .set_null(person_actions::noted_at)
-      .get_result(conn)
+    conn
+      .transaction::<UpleteCount, LemmyError, _>(async |conn| {
+        let local_site = local_user::table
+          .filter(local_user::person_id.eq(person_id))
+          .select(local_user::local_site_id)
+          .first::<LocalSiteId>(conn)
+          .await
+          .optional()?;
+        let result = uplete(person_actions::table.find((person_id, target_id)))
+          .set_null(person_actions::note)
+          .set_null(person_actions::noted_at)
+          .get_result(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::NotFound)?;
+        if let Some(site_id) = local_site {
+          MediaReference::replace_for_content(
+            &mut conn.into(),
+            site_id,
+            "person_note",
+            &format!("{}:{}", person_id.0, target_id.0),
+            &[],
+          )
+          .await?;
+        }
+        Ok(result)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::NotFound)
   }
 
   pub async fn like(
@@ -450,6 +511,7 @@ mod tests {
     source::{
       comment::{Comment, CommentActions, CommentInsertForm, CommentLikeForm, CommentUpdateForm},
       community::{Community, CommunityInsertForm},
+      local_user::{LocalUser, LocalUserInsertForm},
       person::{Person, PersonActions, PersonFollowerForm, PersonInsertForm, PersonUpdateForm},
       post::{Post, PostActions, PostInsertForm, PostLikeForm},
     },
@@ -513,6 +575,43 @@ mod tests {
 
     data.delete(pool).await?;
     Ok(())
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn delete_account_clears_only_the_site_bound_login() -> LemmyResult<()> {
+    use diesel::QueryDsl;
+    use diesel_async::RunQueryDsl;
+    use lemmy_db_schema_file::schema::local_user;
+
+    let pool = &build_db_pool_for_tests();
+    let pool = &mut pool.into();
+    let data = TestData::create(pool).await?;
+    let local_user = LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        local_site_id: data.local_site.id,
+        email: Some("delete-account@example.com".into()),
+        ..LocalUserInsertForm::test_form(data.person.id)
+      },
+      vec![],
+    )
+    .await?;
+
+    let deleted =
+      Person::delete_account(pool, data.person.id, data.instance.id, data.local_site.id).await?;
+    assert!(deleted.deleted);
+    assert!(deleted.avatar.is_none());
+    assert!(deleted.bio.is_none());
+    let conn = &mut lemmy_diesel_utils::connection::get_conn(pool).await?;
+    let email = local_user::table
+      .find(local_user.id)
+      .select(local_user::email)
+      .first::<Option<String>>(conn)
+      .await?;
+    assert!(email.is_none());
+
+    data.delete(pool).await
   }
 
   #[tokio::test]

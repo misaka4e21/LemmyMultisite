@@ -1,32 +1,28 @@
 use crate::{
   diesel::{DecoratableTarget, OptionalExtension},
   impls::presence::{default_local_site_id, ensure_comment_site, set_comment_site_removed},
-  source::comment::{
-    Comment,
-    CommentActions,
-    CommentInsertForm,
-    CommentLikeForm,
-    CommentSavedForm,
-    CommentUpdateForm,
+  source::{
+    comment::{
+      Comment, CommentActions, CommentInsertForm, CommentLikeForm, CommentSavedForm,
+      CommentUpdateForm,
+    },
+    media::MediaReference,
   },
   traits::{Likeable, Saveable},
   utils::DELETED_REPLACEMENT_TEXT,
 };
 use chrono::{DateTime, Utc};
 use diesel::{
-  ExpressionMethods,
-  JoinOnDsl,
-  QueryDsl,
+  ExpressionMethods, JoinOnDsl, QueryDsl,
   dsl::{insert_into, not},
   expression::SelectableHelper,
   update,
 };
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use diesel_ltree::{Ltree, dsl::LtreeExtensions};
 use diesel_uplete::{UpleteCount, uplete};
 use lemmy_db_schema_file::{
-  InstanceId,
-  PersonId,
+  InstanceId, PersonId,
   newtypes::{CommentId, CommunityId, LocalSiteId, PostId},
   schema::{comment, comment_actions, community, post},
 };
@@ -36,25 +32,40 @@ use lemmy_diesel_utils::{
   traits::Crud,
   utils::functions::{coalesce, hot_rank},
 };
-use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult, UntranslatedError};
+use lemmy_utils::error::{
+  LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult, UntranslatedError,
+};
 use url::Url;
 
 impl Comment {
   pub async fn permadelete_for_creator(
     pool: &mut DbPool<'_>,
     creator_id: PersonId,
+    local_site_id: LocalSiteId,
   ) -> LemmyResult<Vec<Self>> {
     let conn = &mut get_conn(pool).await?;
 
-    diesel::update(comment::table.filter(comment::creator_id.eq(creator_id)))
-      .set((
-        comment::content.eq(DELETED_REPLACEMENT_TEXT),
-        comment::deleted.eq(true),
-        comment::updated_at.eq(Utc::now()),
-      ))
-      .get_results::<Self>(conn)
+    conn
+      .transaction::<Vec<Self>, LemmyError, _>(async |conn| {
+        let changed = diesel::update(
+          comment::table
+            .filter(comment::creator_id.eq(creator_id))
+            .filter(comment::origin_local_site_id.eq(local_site_id)),
+        )
+        .set((
+          comment::content.eq(DELETED_REPLACEMENT_TEXT),
+          comment::deleted.eq(true),
+          comment::updated_at.eq(Utc::now()),
+        ))
+        .get_results::<Self>(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        for comment in &changed {
+          MediaReference::sync_comment_all_sites(&mut conn.into(), comment.id).await?;
+        }
+        Ok(changed)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
   pub async fn update_removed_for_creator(
@@ -71,6 +82,27 @@ impl Comment {
       .get_results(conn)
       .await
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+
+  pub async fn update_removed_for_creator_in_site(
+    pool: &mut DbPool<'_>,
+    creator_id: PersonId,
+    local_site_id: LocalSiteId,
+    removed: bool,
+  ) -> LemmyResult<Vec<Self>> {
+    let conn = &mut get_conn(pool).await?;
+    diesel::update(
+      comment::table
+        .filter(comment::creator_id.eq(creator_id))
+        .filter(comment::origin_local_site_id.eq(local_site_id)),
+    )
+    .set((
+      comment::removed.eq(removed),
+      comment::updated_at.eq(Utc::now()),
+    ))
+    .get_results(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
   /// Diesel can't update from join unfortunately, so you'll need to loop over these
@@ -161,17 +193,22 @@ impl Comment {
     comment_form: &CommentInsertForm,
     parent_path: Option<&Ltree>,
   ) -> LemmyResult<Comment> {
-    let comment = Self::upsert_apub(pool, None, comment_form, parent_path).await?;
-    if comment_form.local.unwrap_or(comment_form.ap_id.is_none()) {
-      let local_site_id = match comment_form.origin_local_site_id {
-        Some(local_site_id) => Some(local_site_id),
-        None => default_local_site_id(pool).await?,
-      };
-      if let Some(local_site_id) = local_site_id {
-        ensure_comment_site(pool, local_site_id, comment.id).await?;
-      }
-    }
-    Ok(comment)
+    let conn = &mut get_conn(pool).await?;
+    conn
+      .transaction::<Comment, LemmyError, _>(async |conn| {
+        let comment = Self::upsert_apub(&mut conn.into(), None, comment_form, parent_path).await?;
+        if comment_form.local.unwrap_or(comment_form.ap_id.is_none()) {
+          let local_site_id = match comment_form.origin_local_site_id {
+            Some(local_site_id) => Some(local_site_id),
+            None => default_local_site_id(&mut conn.into()).await?,
+          };
+          if let Some(local_site_id) = local_site_id {
+            ensure_comment_site(&mut conn.into(), local_site_id, comment.id).await?;
+          }
+        }
+        Ok(comment)
+      })
+      .await
   }
 
   pub async fn upsert_apub(
@@ -182,23 +219,28 @@ impl Comment {
   ) -> LemmyResult<Comment> {
     let conn = &mut get_conn(pool).await?;
     let comment_form = (comment_form, parent_path.map(|p| comment::path.eq(p)));
-
-    if let Some(timestamp) = timestamp {
-      insert_into(comment::table)
-        .values(comment_form)
-        .on_conflict(comment::ap_id)
-        .filter_target(coalesce(comment::updated_at, comment::published_at).lt(timestamp))
-        .do_update()
-        .set(comment_form)
-        .get_result::<Self>(conn)
-        .await
-    } else {
-      insert_into(comment::table)
-        .values(comment_form)
-        .get_result::<Self>(conn)
-        .await
-    }
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)
+    conn
+      .transaction::<Comment, LemmyError, _>(async |conn| {
+        let updated = if let Some(timestamp) = timestamp {
+          insert_into(comment::table)
+            .values(comment_form)
+            .on_conflict(comment::ap_id)
+            .filter_target(coalesce(comment::updated_at, comment::published_at).lt(timestamp))
+            .do_update()
+            .set(comment_form)
+            .get_result::<Self>(conn)
+            .await
+        } else {
+          insert_into(comment::table)
+            .values(comment_form)
+            .get_result::<Self>(conn)
+            .await
+        }
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        MediaReference::sync_comment_all_sites(&mut conn.into(), updated.id).await?;
+        Ok(updated)
+      })
+      .await
   }
 
   pub async fn read_from_apub_id(
@@ -410,11 +452,40 @@ impl Crud for Comment {
     comment_form: &Self::UpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(comment::table.find(comment_id))
-      .set(comment_form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = diesel::update(comment::table.find(comment_id))
+          .set(comment_form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_comment_all_sites(&mut conn.into(), comment_id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+}
+
+impl CommentActions {
+  pub async fn remove_all_likes_in_site(
+    pool: &mut DbPool<'_>,
+    person_id: PersonId,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<UpleteCount> {
+    let conn = &mut get_conn(pool).await?;
+    let site_comments = comment::table
+      .filter(comment::origin_local_site_id.eq(local_site_id))
+      .select(comment::id);
+    uplete(
+      comment_actions::table
+        .filter(comment_actions::person_id.eq(person_id))
+        .filter(comment_actions::comment_id.eq_any(site_comments)),
+    )
+    .set_null(comment_actions::vote_is_upvote)
+    .set_null(comment_actions::voted_at)
+    .get_result(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 

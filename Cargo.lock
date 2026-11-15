@@ -3413,6 +3413,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "derive-new",
+ "diesel",
+ "diesel-async",
  "diesel_ltree",
  "either",
  "encoding_rs",

@@ -25,6 +25,10 @@ Resolve the request tenant and verify the administrator belongs to it. Inside on
 
 Give site administrators a site-scoped reference removal operation. Serialize reference creation and last-reference deletion by media identity, with a durable deletion state or equivalent protocol that also covers the external pict-rs call. New uploads must wait or safely retry while deletion is in progress. Retain retryable cleanup state after a storage error. Review every caller of low-level alias deletion, including profile and community images, so none can bypass the protocol. A reference count followed by an unlocked network call permits an upload to acquire an alias being deleted.
 
+Track local media URLs in posts, comments and other persisted content that can embed images, including edits, deletion and federated ingestion. References identify both the content and each site where it is present. Resolve only URLs belonging to this installation and known aliases; do not treat arbitrary external URLs with matching filenames as local media. Backfill existing content and site presence before enabling final deletion. The backfill must be repeatable and block final deletion until complete; retain media conservatively when an existing use cannot be classified. Reconcile content and references atomically, including concurrent edits and creation of new site presence.
+
+A content reference also records the site hostname that serves its URL. While the reference exists, that hostname may continue serving the alias under its own private-site policy, even after its upload reference is removed. Creating a content reference must not grant an alias to a serving site that could not already serve it; unresolved historical cases keep final cleanup blocked. This preserves cross-site links without making a guessed alias available on a new site.
+
 ### Permanent deletion
 
 Check ownership and the full deletion graph before logging, federation, or task submission. Preserve protected canonical rows and site state when possible. If a cascade or global mutation cannot safely preserve another site's content or state, reject the purge before side effects. Perform dependency checks and mutations with transaction isolation or locking that prevents new protected dependencies from appearing between them. Keep the existing origin authorization checks.
@@ -40,4 +44,4 @@ Pass the verified site explicitly to asynchronous cleanup and recheck authority 
 
 ## Migration Plan
 
-Add any required durable cleanup state with a reversible migration and a safe default for existing media. Deploy the migration before enabling the new deletion path; retry pending cleanup after restart. Roll back application code and schema only after resolving pending deletions. No historical data repair is included.
+Add any required durable cleanup and content reference state with a reversible migration and a safe default for existing media. Backfill existing uses before enabling final deletion; retry pending cleanup after restart. Roll back application code and schema only after resolving pending deletions. Historical unauthorized approval and purge changes are not repaired.

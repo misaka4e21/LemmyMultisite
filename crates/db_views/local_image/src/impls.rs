@@ -19,11 +19,7 @@ use lemmy_db_schema_file::{
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
   pagination::{
-    CursorData,
-    PagedResponse,
-    PaginationCursor,
-    PaginationCursorConversion,
-    paginate_response,
+    CursorData, PagedResponse, PaginationCursor, PaginationCursorConversion, paginate_response,
   },
 };
 use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
@@ -127,6 +123,21 @@ impl LocalImageView {
     let conn = &mut get_conn(pool).await?;
     let rows = media_query!()
       .filter(media_reference::owner_person_id.eq(Some(person_id)))
+      .load::<MediaReferenceRow>(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+    Ok(rows.into_iter().map(LocalImageView::from).collect())
+  }
+
+  pub async fn get_all_by_person_id_and_site(
+    pool: &mut DbPool<'_>,
+    person_id: PersonId,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Vec<Self>> {
+    let conn = &mut get_conn(pool).await?;
+    let rows = media_query!()
+      .filter(media_reference::owner_person_id.eq(Some(person_id)))
+      .filter(media_reference::local_site_id.eq(local_site_id))
       .load::<MediaReferenceRow>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::NotFound)?;

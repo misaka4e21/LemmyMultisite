@@ -3,47 +3,38 @@ use activitypub_federation::config::Data;
 use chrono::{DateTime, TimeZone, Utc};
 use clokwerk::{AsyncScheduler, TimeUnits as CTimeUnits};
 use diesel::{
-  BoolExpressionMethods,
-  ExpressionMethods,
-  NullableExpressionMethods,
-  QueryDsl,
-  QueryableByName,
+  BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, QueryDsl, QueryableByName,
   SelectableHelper,
   dsl::{IntervalDsl, count, count_star, exists, not, update},
   query_builder::AsQuery,
   sql_query,
   sql_types::{BigInt, Integer, SmallInt, Timestamptz},
 };
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use diesel_uplete::uplete;
 use lemmy_api_utils::{
   context::LemmyContext,
   plugins::plugin_hook_after,
+  request::delete_queued_image_alias,
   send_activity::{ActivityChannel, SendActivityData},
 };
 use lemmy_db_schema::{
+  impls::media_backfill::backfill_media_content,
   source::{
     instance::{Instance, InstanceForm},
     local_user::LocalUser,
+    media::{MediaObject, MediaReference},
     post::{Post, PostUpdateForm},
   },
   utils::DELETED_REPLACEMENT_TEXT,
 };
-use lemmy_db_schema_file::schema::{
-  comment,
-  community,
-  community_actions,
-  federation_blocklist,
-  instance,
-  instance_actions,
-  local_site,
-  local_user,
-  local_user_invite,
-  person,
-  post,
-  received_activity,
-  sent_activity,
-  site,
+use lemmy_db_schema_file::{
+  newtypes::{CommentId, PostId},
+  schema::{
+    comment, community, community_actions, federation_blocklist, instance, instance_actions,
+    local_site, local_user, local_user_invite, person, post, received_activity, sent_activity,
+    site,
+  },
 };
 use lemmy_db_views_site::{FederatedInstanceView, SiteView};
 use lemmy_diesel_utils::{
@@ -53,7 +44,7 @@ use lemmy_diesel_utils::{
 };
 use lemmy_utils::{
   DB_BATCH_SIZE,
-  error::{LemmyErrorType, LemmyResult},
+  error::{LemmyError, LemmyErrorType, LemmyResult},
 };
 use std::time::Duration;
 use tracing::{info, warn};
@@ -63,6 +54,13 @@ use url::Url;
 pub async fn setup(context: Data<LemmyContext>) -> LemmyResult<()> {
   // https://github.com/mdsherry/clokwerk/issues/38
   let mut scheduler = AsyncScheduler::with_tz(Utc);
+
+  retry_pending_media_deletions(&context).await;
+  let media_context = context.clone();
+  scheduler.every(CTimeUnits::minutes(1)).run(move || {
+    let context = media_context.clone();
+    async move { retry_pending_media_deletions(&context).await }
+  });
 
   // Every 1 minute run plugin hooks
   scheduler.every(CTimeUnits::minutes(1)).run(async move || {
@@ -186,6 +184,23 @@ pub async fn setup(context: Data<LemmyContext>) -> LemmyResult<()> {
   loop {
     scheduler.run_pending().await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
+  }
+}
+
+async fn retry_pending_media_deletions(context: &LemmyContext) {
+  if let Err(error) = backfill_media_content(&mut context.pool()).await {
+    warn!("Failed to backfill media references; media deletion remains disabled: {error}");
+    return;
+  }
+  match MediaObject::queued_aliases(&mut context.pool()).await {
+    Ok(aliases) => {
+      for alias in aliases {
+        if let Err(error) = delete_queued_image_alias(&alias, context).await {
+          warn!("Failed to delete queued media alias {alias}: {error}");
+        }
+      }
+    }
+    Err(error) => warn!("Failed to list queued media aliases: {error}"),
   }
 }
 
@@ -345,32 +360,43 @@ async fn delete_old_denied_users(pool: &mut DbPool<'_>) -> LemmyResult<()> {
 async fn overwrite_deleted_posts_and_comments(pool: &mut DbPool<'_>) -> LemmyResult<()> {
   info!("Overwriting deleted posts...");
   let conn = &mut get_conn(pool).await?;
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      let posts = diesel::update(
+        post::table
+          .filter(post::deleted.eq(true))
+          .filter(post::updated_at.lt(now().nullable() - 1.months()))
+          .filter(post::body.ne(DELETED_REPLACEMENT_TEXT)),
+      )
+      .set((
+        post::body.eq(DELETED_REPLACEMENT_TEXT),
+        post::name.eq(DELETED_REPLACEMENT_TEXT),
+      ))
+      .returning(post::id)
+      .get_results::<PostId>(conn)
+      .await?;
+      for post_id in posts {
+        MediaReference::sync_post_all_sites(&mut conn.into(), post_id).await?;
+      }
 
-  diesel::update(
-    post::table
-      .filter(post::deleted.eq(true))
-      .filter(post::updated_at.lt(now().nullable() - 1.months()))
-      .filter(post::body.ne(DELETED_REPLACEMENT_TEXT)),
-  )
-  .set((
-    post::body.eq(DELETED_REPLACEMENT_TEXT),
-    post::name.eq(DELETED_REPLACEMENT_TEXT),
-  ))
-  .execute(conn)
-  .await?;
-
-  info!("Overwriting deleted comments...");
-  diesel::update(
-    comment::table
-      .filter(comment::deleted.eq(true))
-      .filter(comment::updated_at.lt(now().nullable() - 1.months()))
-      .filter(comment::content.ne(DELETED_REPLACEMENT_TEXT)),
-  )
-  .set(comment::content.eq(DELETED_REPLACEMENT_TEXT))
-  .execute(conn)
-  .await?;
-  info!("Done.");
-  Ok(())
+      info!("Overwriting deleted comments...");
+      let comments = diesel::update(
+        comment::table
+          .filter(comment::deleted.eq(true))
+          .filter(comment::updated_at.lt(now().nullable() - 1.months()))
+          .filter(comment::content.ne(DELETED_REPLACEMENT_TEXT)),
+      )
+      .set(comment::content.eq(DELETED_REPLACEMENT_TEXT))
+      .returning(comment::id)
+      .get_results::<CommentId>(conn)
+      .await?;
+      for comment_id in comments {
+        MediaReference::sync_comment_all_sites(&mut conn.into(), comment_id).await?;
+      }
+      info!("Done.");
+      Ok(())
+    })
+    .await
 }
 
 const ONE_DAY: (&str, &str) = ("1 day", "day");

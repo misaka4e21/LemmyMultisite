@@ -1,9 +1,7 @@
 use crate::hide_modlog_names;
 use actix_web::web::{Data, Json, Query};
 use lemmy_api_utils::{
-  context::LemmyContext,
-  tenant::TenantContext,
-  utils::check_private_instance,
+  context::LemmyContext, tenant::TenantContext, utils::check_private_instance,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_modlog::{ModlogView, api::GetModlog, impls::ModlogQuery};
@@ -187,8 +185,16 @@ mod tests {
     let ban_form = ModlogInsertForm::admin_ban(&john, sara.id, true, None, "a remove reason");
     let ban_action = Modlog::create(pool, &[ban_form]).await?;
     let ban_id = ban_action.first().ok_or(LemmyErrorType::NotFound)?.id;
-    remove_or_restore_user_data(john.id, sara.id, true, "a remove reason", ban_id, &context)
-      .await?;
+    remove_or_restore_user_data(
+      john.id,
+      sara.id,
+      true,
+      "a remove reason",
+      ban_id,
+      None,
+      &context,
+    )
+    .await?;
 
     // Verify that their posts and comments are removed.
     // Posts
@@ -292,6 +298,7 @@ mod tests {
       false,
       "a restore reason",
       unban_id,
+      None,
       &context,
     )
     .await?;
@@ -469,6 +476,7 @@ mod tests {
       true,
       "bulk remove reason",
       ban_id,
+      None,
       &context,
     )
     .await?;

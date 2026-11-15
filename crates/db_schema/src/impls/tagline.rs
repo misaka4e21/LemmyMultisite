@@ -1,9 +1,12 @@
 use crate::{
-  source::tagline::{Tagline, TaglineInsertForm, TaglineUpdateForm, tagline_keys as key},
+  source::{
+    media::MediaReference,
+    tagline::{Tagline, TaglineInsertForm, TaglineUpdateForm, tagline_keys as key},
+  },
   utils::limit_fetch,
 };
 use diesel::{ExpressionMethods, QueryDsl, insert_into};
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use i_love_jesus::SortDirection;
 use lemmy_db_schema_file::{
   newtypes::{LocalSiteId, TaglineId},
@@ -12,16 +15,12 @@ use lemmy_db_schema_file::{
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
   pagination::{
-    CursorData,
-    PagedResponse,
-    PaginationCursor,
-    PaginationCursorConversion,
-    paginate_response,
+    CursorData, PagedResponse, PaginationCursor, PaginationCursorConversion, paginate_response,
   },
   traits::Crud,
   utils::functions::random,
 };
-use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
+use lemmy_utils::error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult};
 
 impl Crud for Tagline {
   type InsertForm = TaglineInsertForm;
@@ -30,11 +29,25 @@ impl Crud for Tagline {
 
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(tagline::table)
-      .values(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let result = insert_into(tagline::table)
+          .values(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        MediaReference::sync_content(
+          &mut conn.into(),
+          result.local_site_id,
+          "tagline",
+          &result.id.0.to_string(),
+          Some(&result.content),
+          &[],
+        )
+        .await?;
+        Ok(result)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
   }
 
   async fn update(
@@ -43,11 +56,25 @@ impl Crud for Tagline {
     form: &Self::UpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(tagline::table.find(tagline_id))
-      .set(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let result = diesel::update(tagline::table.find(tagline_id))
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_content(
+          &mut conn.into(),
+          result.local_site_id,
+          "tagline",
+          &result.id.0.to_string(),
+          Some(&result.content),
+          &[],
+        )
+        .await?;
+        Ok(result)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 
@@ -109,15 +136,29 @@ impl Tagline {
     form: &TaglineUpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(
-      tagline::table
-        .find(id)
-        .filter(tagline::local_site_id.eq(site_id)),
-    )
-    .set(form)
-    .get_result(conn)
-    .await
-    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let result = diesel::update(
+          tagline::table
+            .find(id)
+            .filter(tagline::local_site_id.eq(site_id)),
+        )
+        .set(form)
+        .get_result::<Self>(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_content(
+          &mut conn.into(),
+          site_id,
+          "tagline",
+          &id.0.to_string(),
+          Some(&result.content),
+          &[],
+        )
+        .await?;
+        Ok(result)
+      })
+      .await
   }
 
   pub async fn delete_for_site(
@@ -126,17 +167,29 @@ impl Tagline {
     site_id: LocalSiteId,
   ) -> LemmyResult<usize> {
     let conn = &mut get_conn(pool).await?;
-    let count = diesel::delete(
-      tagline::table
-        .find(id)
-        .filter(tagline::local_site_id.eq(site_id)),
-    )
-    .execute(conn)
-    .await
-    .with_lemmy_type(LemmyErrorType::Deleted)?;
-    if count == 0 {
-      return Err(LemmyErrorType::NotFound.into());
-    }
-    Ok(count)
+    conn
+      .transaction::<usize, LemmyError, _>(async |conn| {
+        let count = diesel::delete(
+          tagline::table
+            .find(id)
+            .filter(tagline::local_site_id.eq(site_id)),
+        )
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::Deleted)?;
+        if count == 0 {
+          return Err(LemmyErrorType::NotFound.into());
+        }
+        MediaReference::replace_for_content(
+          &mut conn.into(),
+          site_id,
+          "tagline",
+          &id.0.to_string(),
+          &[],
+        )
+        .await?;
+        Ok(count)
+      })
+      .await
   }
 }

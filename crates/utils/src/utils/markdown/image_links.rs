@@ -1,8 +1,7 @@
 use super::link_rule::Link;
 use crate::utils::markdown::link_rule;
 use markdown_it::{
-  MarkdownIt,
-  NodeValue,
+  MarkdownIt, NodeValue,
   parser::linkfmt::LinkFormatter,
   plugins::{
     cmark::{
@@ -70,6 +69,112 @@ pub fn markdown_find_links(src: &str) -> Vec<(usize, usize)> {
   res.extend(find_urls::<Linkified>(src));
   res.extend(find_urls::<Link>(src));
   res
+}
+
+/// Finds image URL ranges using the same Markdown parser as image rewriting.
+pub fn markdown_find_image_links(src: &str) -> Vec<(usize, usize)> {
+  find_urls::<Image>(src)
+}
+
+/// Resolves local image and proxy URLs without treating an external alias as local.
+pub fn local_image_alias(url: &Url, site_origins: &[Url]) -> Option<String> {
+  local_image_source(url, site_origins).map(|(alias, _)| alias)
+}
+
+/// Returns the alias and the origin which actually serves it, including through local proxies.
+pub fn local_image_source(url: &Url, site_origins: &[Url]) -> Option<(String, String)> {
+  let mut current = url.clone();
+  for _ in 0..4 {
+    if !site_origins
+      .iter()
+      .any(|site| site.origin() == current.origin())
+    {
+      return None;
+    }
+    if matches!(
+      current.path(),
+      "/api/v4/image/proxy" | "/api/v3/image_proxy"
+    ) {
+      let nested = current.query_pairs().find(|(key, _)| key == "url")?.1;
+      current = Url::parse(&nested).ok()?;
+      continue;
+    }
+    let path = current.path();
+    let encoded = path
+      .strip_prefix("/api/v4/image/")
+      .or_else(|| path.strip_prefix("/pictrs/image/"))?;
+    let alias = urlencoding::decode(encoded).ok()?;
+    if alias.is_empty() || alias.contains(['/', '\\']) {
+      return None;
+    }
+    return Some((alias.into_owned(), current.origin().ascii_serialization()));
+  }
+  None
+}
+
+/// Flags local-looking media URLs whose serving site or alias cannot be determined safely.
+pub fn unresolved_local_media_url(raw: &str, site_origins: &[Url]) -> bool {
+  let media_path = |path: &str| {
+    path.starts_with("/api/v4/image/")
+      || path.starts_with("/pictrs/image/")
+      || path == "/api/v3/image_proxy"
+  };
+  let Ok(mut current) = Url::parse(raw) else {
+    return media_path(raw);
+  };
+  for _ in 0..4 {
+    let same_host = site_origins
+      .iter()
+      .any(|site| site.host_str() == current.host_str());
+    if !same_host {
+      return false;
+    }
+    let known_origin = site_origins
+      .iter()
+      .any(|site| site.origin() == current.origin());
+    if !known_origin {
+      return media_path(current.path());
+    }
+    if matches!(
+      current.path(),
+      "/api/v4/image/proxy" | "/api/v3/image_proxy"
+    ) {
+      let Some(nested) = current.query_pairs().find(|(key, _)| key == "url") else {
+        return true;
+      };
+      let Ok(url) = Url::parse(&nested.1) else {
+        return true;
+      };
+      current = url;
+      continue;
+    }
+    return media_path(current.path()) && local_image_source(&current, site_origins).is_none();
+  }
+  true
+}
+
+/// Collects locally hosted media links from Markdown without fetching any URL.
+pub fn markdown_local_media_aliases(src: &str, site_origins: &[Url]) -> Vec<String> {
+  let mut aliases: Vec<String> = markdown_local_media_sources(src, site_origins)
+    .into_iter()
+    .map(|(alias, _)| alias)
+    .collect();
+  aliases.sort_unstable();
+  aliases.dedup();
+  aliases
+}
+
+pub fn markdown_local_media_sources(src: &str, site_origins: &[Url]) -> Vec<(String, String)> {
+  let mut ranges = markdown_find_links(src);
+  ranges.extend(markdown_find_image_links(src));
+  let mut aliases: Vec<(String, String)> = ranges
+    .into_iter()
+    .filter_map(|(start, end)| Url::parse(markdown_handle_title(src, start, end).0).ok())
+    .filter_map(|url| local_image_source(&url, site_origins))
+    .collect();
+  aliases.sort_unstable();
+  aliases.dedup();
+  aliases
 }
 
 // Walk the syntax tree to find positions of image or link urls
@@ -169,7 +274,7 @@ mod tests {
     let links = markdown_find_links("[test](https://example.com)");
     assert_eq!(vec![(7, 26)], links);
 
-    let links = find_urls::<Image>("![test](https://example.com)");
+    let links = markdown_find_image_links("![test](https://example.com)");
     assert_eq!(vec![(8, 27)], links);
 
     let links = find_urls::<Image>("![ითხოვს](https://example.com/ითხოვს)");
@@ -177,6 +282,67 @@ mod tests {
 
     let links = find_urls::<Image>("![test](https://example.com/%C3%A4%C3%B6%C3%BC.jpg)");
     assert_eq!(vec![(8, 50)], links);
+  }
+
+  #[test]
+  fn find_embedded_images_excludes_code_and_plain_links() {
+    let markdown = "![photo](https://a.example/api/v4/image/alias.png \"caption\")\n\
+      [link](https://a.example/api/v4/image/other.png)\n\
+      ```\n![code](https://a.example/api/v4/image/code.png)\n```";
+    let urls = markdown_find_image_links(markdown)
+      .into_iter()
+      .map(|(start, end)| markdown_handle_title(markdown, start, end).0)
+      .collect::<Vec<_>>();
+    assert_eq!(urls, vec!["https://a.example/api/v4/image/alias.png"]);
+  }
+
+  #[test]
+  fn resolve_local_image_alias_requires_owned_origin() {
+    let sites = [
+      Url::parse("https://a.example").unwrap(),
+      Url::parse("https://b.example").unwrap(),
+    ];
+    let resolve = |value| local_image_alias(&Url::parse(value).unwrap(), &sites);
+    assert_eq!(
+      resolve("https://a.example/api/v4/image/a.png"),
+      Some("a.png".into())
+    );
+    assert_eq!(
+      resolve("https://b.example/pictrs/image/a.png"),
+      Some("a.png".into())
+    );
+    assert_eq!(
+      resolve(
+        "https://b.example/api/v4/image/proxy?url=https%3A%2F%2Fa.example%2Fapi%2Fv4%2Fimage%2Fa.png"
+      ),
+      Some("a.png".into())
+    );
+    assert_eq!(resolve("https://foreign.example/api/v4/image/a.png"), None);
+    assert_eq!(
+      resolve(
+        "https://a.example/api/v4/image/proxy?url=https%3A%2F%2Fforeign.example%2Fapi%2Fv4%2Fimage%2Fa.png"
+      ),
+      None
+    );
+    assert_eq!(resolve("https://a.example/api/v4/image/a%2Fb.png"), None);
+    assert!(unresolved_local_media_url(
+      "http://a.example/api/v4/image/a.png",
+      &sites
+    ));
+    assert!(unresolved_local_media_url("/api/v4/image/a.png", &sites));
+    assert!(!unresolved_local_media_url(
+      "https://foreign.example/api/v4/image/a.png",
+      &sites
+    ));
+  }
+
+  #[test]
+  fn collect_local_media_from_markdown() {
+    let sites = [Url::parse("https://a.example").unwrap()];
+    let content = "![photo](https://a.example/api/v4/image/a.png) \
+      [link](https://a.example/api/v4/image/a.png) \
+      ![foreign](https://foreign.example/api/v4/image/a.png)";
+    assert_eq!(markdown_local_media_aliases(content, &sites), vec!["a.png"]);
   }
 
   #[test]

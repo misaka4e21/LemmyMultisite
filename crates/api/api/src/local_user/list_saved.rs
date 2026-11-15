@@ -1,9 +1,7 @@
 use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
 use lemmy_api_utils::{
-  context::LemmyContext,
-  tenant::TenantContext,
-  utils::check_private_instance,
+  context::LemmyContext, tenant::TenantContext, utils::check_private_instance,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_person_saved_combined::{ListPersonSaved, impls::PersonSavedCombinedQuery};

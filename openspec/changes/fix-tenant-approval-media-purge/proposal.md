@@ -6,6 +6,7 @@ Registration approval can modify another site's application before checking its 
 
 - Authorize registration decisions against the request site before any update or email.
 - Restrict site administrator media deletion to the current site's references and protect shared aliases during concurrent operations.
+- Track local media used by content and backfill existing content references before allowing final deletion.
 - Protect other sites' content, state, and media when purging an owned person, community, post, or comment, including asynchronous and federated side effects.
 - Add two-site regression tests for authorized actions, rejected targets, shared dependencies, and failure paths.
 

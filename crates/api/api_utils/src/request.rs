@@ -6,28 +6,33 @@ use activitypub_federation::{config::Data, resolver::ValidatingDnsResolver};
 use chrono::{DateTime, Utc};
 use encoding_rs::{Encoding, UTF_8};
 use futures::StreamExt;
-use lemmy_db_schema::source::{
-  images::{ImageDetails, ImageDetailsInsertForm},
-  local_site::LocalSite,
-  media::{MediaObject, MediaObjectInsertForm, MediaReference, MediaReferenceInsertForm},
-  post::{Post, PostUpdateForm},
-  post_thumbnail::{PostThumbnailSource, PostThumbnailSourceForm},
+use lemmy_db_schema::{
+  impls::media::UploadRegistration,
+  source::{
+    images::{ImageDetails, ImageDetailsInsertForm},
+    local_site::LocalSite,
+    media::{MediaObject, MediaObjectInsertForm, MediaReference},
+    post::{Post, PostUpdateForm},
+    post_thumbnail::{PostThumbnailSource, PostThumbnailSourceForm},
+  },
 };
-use lemmy_db_schema_file::enums::ImageMode;
+use lemmy_db_schema_file::{
+  PersonId,
+  enums::ImageMode,
+  newtypes::{LocalSiteId, PostId},
+  schema::media_object,
+};
 use lemmy_db_views_post::api::{LinkMetadata, OpenGraphData};
 use lemmy_db_views_site::SiteView;
-use lemmy_diesel_utils::traits::Crud;
+use lemmy_diesel_utils::{connection::get_conn, traits::Crud};
 use lemmy_utils::{
-  REQWEST_TIMEOUT,
-  VERSION,
+  REQWEST_TIMEOUT, VERSION,
   error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult, UntranslatedError},
   settings::structs::Settings,
 };
 use mime::{Mime, TEXT_HTML};
 use reqwest::{
-  Client,
-  ClientBuilder,
-  Response,
+  Client, ClientBuilder, Response,
   header::{CONTENT_TYPE, LOCATION, RANGE},
   redirect::Policy,
 };
@@ -399,12 +404,6 @@ impl PictrsFileDetails {
   }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-struct PictrsPurgeResponse {
-  msg: String,
-  aliases: Vec<String>,
-}
-
 /// Purges an image from pictrs
 /// Note: This should often be coerced from a Result to .ok() in order to fail softly, because:
 /// - It might fail due to image being not local
@@ -427,35 +426,7 @@ pub async fn purge_image_from_pictrs_url(
 }
 
 pub async fn purge_image_from_pictrs(alias: &str, context: &LemmyContext) -> LemmyResult<()> {
-  let pictrs_config = context.settings().pictrs()?;
-  let purge_url = format!("{}internal/purge?alias={}", pictrs_config.url, alias);
-
-  let pictrs_api_key = pictrs_config
-    .api_key
-    .ok_or(LemmyErrorType::PictrsApiKeyNotProvided)?;
-  let response = context
-    .pictrs_client()
-    .post(&purge_url)
-    .timeout(REQWEST_TIMEOUT)
-    .header("x-api-token", pictrs_api_key)
-    .send()
-    .await?
-    .error_for_status()?;
-
-  let response: PictrsPurgeResponse = response.json().await.map_err(LemmyError::from)?;
-
-  // Pictrs purges return all aliases.
-  let aliases = response.aliases;
-
-  // Delete db rows of aliases.
-  MediaObject::delete_by_aliases(&mut context.pool(), &aliases)
-    .await
-    .ok();
-
-  match response.msg.as_str() {
-    "ok" => Ok(()),
-    _ => Err(LemmyErrorType::PictrsPurgeResponseError(response.msg).into()),
-  }
+  delete_queued_image_alias(alias, context).await
 }
 
 /// Deletes an alias for an image from the local db and pictrs. If it's not the last / only alias,
@@ -466,24 +437,106 @@ pub async fn purge_image_from_pictrs(alias: &str, context: &LemmyContext) -> Lem
 /// alias. Callers MUST check if the user has permission to delete the alias
 /// before calling this function (the user is an admin or the image belongs to the user).
 pub async fn delete_image_alias(alias: &str, context: &LemmyContext) -> LemmyResult<()> {
+  delete_image_alias_inner(alias, context, false).await
+}
+
+/// Deletes an alias which was queued after its last tracked reference disappeared.
+pub async fn delete_queued_image_alias(alias: &str, context: &LemmyContext) -> LemmyResult<()> {
+  delete_image_alias_inner(alias, context, true).await
+}
+
+/// Registers an upload without reusing an alias that is being deleted.
+pub async fn register_uploaded_media(
+  form: &MediaObjectInsertForm,
+  site_id: LocalSiteId,
+  owner: Option<PersonId>,
+  post_id: Option<PostId>,
+  purpose: &str,
+  context: &LemmyContext,
+) -> LemmyResult<(MediaObject, bool)> {
+  for _ in 0..8 {
+    match MediaReference::register_upload(
+      &mut context.pool(),
+      form,
+      site_id,
+      owner,
+      post_id,
+      purpose,
+    )
+    .await?
+    {
+      UploadRegistration::Ready(media, created) => return Ok((media, created)),
+      UploadRegistration::Retry(Some(alias)) => delete_queued_image_alias(&alias, context).await?,
+      UploadRegistration::Retry(None) => tokio::task::yield_now().await,
+    }
+  }
+  Err(LemmyErrorType::CouldntUpdate.into())
+}
+
+async fn delete_image_alias_inner(
+  alias: &str,
+  context: &LemmyContext,
+  require_queue: bool,
+) -> LemmyResult<()> {
+  use diesel::{ExpressionMethods, OptionalExtension, QueryDsl};
+  use diesel_async::{AsyncConnection, RunQueryDsl};
+  #[derive(diesel::QueryableByName)]
+  struct Queued {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    value: bool,
+  }
   let pictrs_config = context.settings().pictrs()?;
   let url = format!("{}internal/delete?alias={}", pictrs_config.url, alias);
-
-  // Send the delete request to pictrs.
-  context
-    .pictrs_client()
-    .post(&url)
-    .header("X-Api-Token", pictrs_config.api_key.unwrap_or_default())
-    .timeout(REQWEST_TIMEOUT)
-    .send()
-    .await?
-    .error_for_status()?;
-
-  // Delete db row if any (old Lemmy versions didn't generate this).
-  MediaObject::delete_by_alias(&mut context.pool(), alias)
+  let mut pool = context.pool();
+  let conn = &mut get_conn(&mut pool).await?;
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      let registered = media_object::table
+        .filter(media_object::canonical_pictrs_alias.eq(alias))
+        .for_update()
+        .first::<MediaObject>(conn)
+        .await
+        .optional()?;
+      if registered.is_none() && require_queue {
+        return Ok(());
+      }
+      if let Some(media) = &registered {
+        let ready = diesel::sql_query(
+          "SELECT completed AS value FROM media_reference_backfill_state WHERE singleton = true",
+        )
+        .get_result::<Queued>(conn)
+        .await?;
+        if !ready.value {
+          return Err(LemmyErrorType::CouldntUpdate.into());
+        }
+        let queued = diesel::sql_query(
+          "SELECT EXISTS(SELECT 1 FROM media_deletion_queue WHERE media_id = $1) AS value",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(media.id)
+        .get_result::<Queued>(conn)
+        .await?;
+        if !queued.value {
+          return Err(LemmyErrorType::CouldntUpdate.into());
+        }
+      }
+      let response = context
+        .pictrs_client()
+        .post(&url)
+        .header("X-Api-Token", pictrs_config.api_key.unwrap_or_default())
+        .timeout(REQWEST_TIMEOUT)
+        .send()
+        .await?;
+      if response.status() != reqwest::StatusCode::NOT_FOUND {
+        response.error_for_status()?;
+      }
+      if let Some(media) = registered {
+        diesel::delete(media_object::table.find(media.id))
+          .execute(conn)
+          .await?;
+      }
+      Ok(())
+    })
     .await
-    .ok();
-  Ok(())
 }
 
 /// Retrieves the image with local pict-rs and generates a thumbnail. Returns the thumbnail url.
@@ -534,21 +587,18 @@ async fn generate_pictrs_thumbnail(
     content_type: image.details.content_type.clone(),
     blurhash: image.details.blurhash.clone(),
   };
-  let (media, created) = MediaObject::create_or_read(&mut context.pool(), &media_form).await?;
+  let (media, created) = register_uploaded_media(
+    &media_form,
+    local_site.id,
+    Some(post.creator_id),
+    Some(post.id),
+    "post_thumbnail",
+    context,
+  )
+  .await?;
   if !created && media.canonical_pictrs_alias != image.file {
     delete_image_alias(&image.file, context).await.ok();
   }
-  MediaReference::ensure(
-    &mut context.pool(),
-    &MediaReferenceInsertForm {
-      local_site_id: local_site.id,
-      media_id: media.id,
-      owner_person_id: Some(post.creator_id),
-      post_id: Some(post.id),
-      purpose: "post_thumbnail".to_string(),
-    },
-  )
-  .await?;
   let details_form = image
     .details
     .build_image_details_form(image_url, Some(source_hash.clone()));
@@ -626,11 +676,28 @@ mod tests {
 
   use crate::{
     context::LemmyContext,
-    request::{extract_opengraph_data, fetch_link_metadata},
+    request::{delete_queued_image_alias, extract_opengraph_data, fetch_link_metadata},
   };
+  use diesel_async::RunQueryDsl;
+  use lemmy_db_schema::{
+    source::{
+      media::{MediaObject, MediaObjectInsertForm, MediaReference, MediaReferenceInsertForm},
+      person::Person,
+    },
+    test_data::TestData,
+  };
+  use lemmy_diesel_utils::{connection::get_conn, traits::Crud};
   use lemmy_utils::error::LemmyResult;
   use pretty_assertions::assert_eq;
   use serial_test::serial;
+  use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+  };
+  use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+  };
   use url::Url;
 
   // These helped with testing
@@ -717,5 +784,90 @@ mod tests {
     assert_eq!(metadata.image, None);
 
     Ok(())
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn queued_media_deletion_survives_storage_failure() -> LemmyResult<()> {
+    let Ok(port) = std::env::var("LEMMY_TEST_PICTRS_PORT") else {
+      return Ok(());
+    };
+    let port: u16 = port.parse()?;
+    let should_fail = Arc::new(AtomicBool::new(true));
+    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    let listener_fail = should_fail.clone();
+    tokio::spawn(async move {
+      loop {
+        let Ok((mut socket, _)) = listener.accept().await else {
+          break;
+        };
+        let fail = listener_fail.clone();
+        tokio::spawn(async move {
+          let mut request = [0u8; 2048];
+          let _ = socket.read(&mut request).await;
+          let response = if AtomicBool::load(&fail, Ordering::SeqCst) {
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+          } else {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+          };
+          let _ = socket.write_all(response.as_bytes()).await;
+        });
+      }
+    });
+
+    let context = LemmyContext::init_test_context().await;
+    let pool = &mut context.pool();
+    let data = TestData::create(pool).await?;
+    let unique = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let conn = &mut get_conn(pool).await?;
+    diesel::sql_query("UPDATE media_reference_backfill_state SET completed = true")
+      .execute(conn)
+      .await?;
+    let alias = format!("storage-failure-{unique}.png");
+    let media = MediaObject::create_or_read(
+      pool,
+      &MediaObjectInsertForm {
+        content_hash: format!("storage-failure-{unique}"),
+        canonical_pictrs_alias: alias.clone(),
+        size_bytes: 1,
+        width: 1,
+        height: 1,
+        content_type: "image/png".into(),
+        blurhash: None,
+      },
+    )
+    .await?
+    .0;
+    MediaReference::ensure(
+      pool,
+      &MediaReferenceInsertForm {
+        local_site_id: data.local_site.id,
+        media_id: media.id,
+        owner_person_id: Some(data.person.id),
+        post_id: None,
+        purpose: "other".into(),
+      },
+    )
+    .await?;
+    assert!(
+      MediaReference::delete_for_site(pool, &alias, data.local_site.id, Some(data.person.id))
+        .await?
+    );
+    assert!(delete_queued_image_alias(&alias, &context).await.is_err());
+    assert!(MediaObject::deletion_queued(pool, media.id).await?);
+    assert!(MediaObject::read_by_alias(pool, &alias).await?.is_some());
+
+    should_fail.store(false, Ordering::SeqCst);
+    let restarted = LemmyContext::init_test_context().await;
+    delete_queued_image_alias(&alias, &restarted).await?;
+    assert!(MediaObject::read_by_alias(pool, &alias).await?.is_none());
+    assert!(!MediaObject::deletion_queued(pool, media.id).await?);
+
+    let conn = &mut get_conn(pool).await?;
+    diesel::sql_query("UPDATE media_reference_backfill_state SET completed = false")
+      .execute(conn)
+      .await?;
+    Person::delete(pool, data.person.id).await?;
+    data.delete(pool).await
   }
 }

@@ -4,10 +4,7 @@ use lemmy_api_utils::{
   context::LemmyContext,
   tenant::TenantContext,
   utils::{
-    check_local_user_banned_or_deleted,
-    get_url_blocklist,
-    process_markdown_opt,
-    slur_regex,
+    check_local_user_banned_or_deleted, get_url_blocklist, process_markdown_opt, slur_regex,
   },
 };
 use lemmy_db_schema::{
@@ -29,9 +26,7 @@ use lemmy_email::account::send_verification_email;
 use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
   utils::validation::{
-    check_blocking_keywords_are_valid,
-    is_valid_bio_field,
-    is_valid_display_name,
+    check_blocking_keywords_are_valid, is_valid_bio_field, is_valid_display_name,
     is_valid_matrix_id,
   },
 };

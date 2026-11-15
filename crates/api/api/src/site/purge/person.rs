@@ -67,7 +67,7 @@ pub async fn purge_person(
   let site_id = local_user_view.local_user.local_site_id;
   spawn_try_task(async move {
     Person::read_owned_by_site(&mut context_clone.pool(), data.person_id, site_id).await?;
-    purge_user_account(data.person_id, local_instance_id, &context_clone).await
+    purge_user_account(data.person_id, local_instance_id, site_id, &context_clone).await
   });
 
   // Keep person record, but mark as banned to prevent login or refetching from home instance.

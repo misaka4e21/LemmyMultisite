@@ -1,9 +1,10 @@
 use crate::source::{
   custom_emoji::{CustomEmoji, CustomEmojiInsertForm, CustomEmojiUpdateForm},
   custom_emoji_keyword::{CustomEmojiKeyword, CustomEmojiKeywordInsertForm},
+  media::MediaReference,
 };
 use diesel::{ExpressionMethods, QueryDsl, dsl::insert_into};
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use lemmy_db_schema_file::{
   newtypes::{CustomEmojiId, LocalSiteId},
   schema::{
@@ -15,7 +16,7 @@ use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
   traits::Crud,
 };
-use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
+use lemmy_utils::error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult};
 
 impl Crud for CustomEmoji {
   type InsertForm = CustomEmojiInsertForm;
@@ -24,11 +25,25 @@ impl Crud for CustomEmoji {
 
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(custom_emoji)
-      .values(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let result = insert_into(custom_emoji)
+          .values(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        MediaReference::sync_content(
+          &mut conn.into(),
+          result.local_site_id,
+          "custom_emoji",
+          &result.id.0.to_string(),
+          None,
+          &[result.image_url.as_str()],
+        )
+        .await?;
+        Ok(result)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
   }
 
   async fn update(
@@ -37,11 +52,25 @@ impl Crud for CustomEmoji {
     new_custom_emoji: &Self::UpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(custom_emoji.find(emoji_id))
-      .set(new_custom_emoji)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let result = diesel::update(custom_emoji.find(emoji_id))
+          .set(new_custom_emoji)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_content(
+          &mut conn.into(),
+          result.local_site_id,
+          "custom_emoji",
+          &result.id.0.to_string(),
+          None,
+          &[result.image_url.as_str()],
+        )
+        .await?;
+        Ok(result)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 
@@ -53,15 +82,29 @@ impl CustomEmoji {
     form: &CustomEmojiUpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(
-      custom_emoji
-        .find(emoji_id)
-        .filter(emoji_table::local_site_id.eq(site_id)),
-    )
-    .set(form)
-    .get_result(conn)
-    .await
-    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let result = diesel::update(
+          custom_emoji
+            .find(emoji_id)
+            .filter(emoji_table::local_site_id.eq(site_id)),
+        )
+        .set(form)
+        .get_result::<Self>(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_content(
+          &mut conn.into(),
+          site_id,
+          "custom_emoji",
+          &emoji_id.0.to_string(),
+          None,
+          &[result.image_url.as_str()],
+        )
+        .await?;
+        Ok(result)
+      })
+      .await
   }
 
   pub async fn delete_for_site(
@@ -70,18 +113,30 @@ impl CustomEmoji {
     site_id: LocalSiteId,
   ) -> LemmyResult<usize> {
     let conn = &mut get_conn(pool).await?;
-    let count = diesel::delete(
-      custom_emoji
-        .find(emoji_id)
-        .filter(emoji_table::local_site_id.eq(site_id)),
-    )
-    .execute(conn)
-    .await
-    .with_lemmy_type(LemmyErrorType::Deleted)?;
-    if count == 0 {
-      return Err(LemmyErrorType::NotFound.into());
-    }
-    Ok(count)
+    conn
+      .transaction::<usize, LemmyError, _>(async |conn| {
+        let count = diesel::delete(
+          custom_emoji
+            .find(emoji_id)
+            .filter(emoji_table::local_site_id.eq(site_id)),
+        )
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::Deleted)?;
+        if count == 0 {
+          return Err(LemmyErrorType::NotFound.into());
+        }
+        MediaReference::replace_for_content(
+          &mut conn.into(),
+          site_id,
+          "custom_emoji",
+          &emoji_id.0.to_string(),
+          &[],
+        )
+        .await?;
+        Ok(count)
+      })
+      .await
   }
 }
 

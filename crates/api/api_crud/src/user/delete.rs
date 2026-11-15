@@ -8,10 +8,7 @@ use lemmy_api_utils::{
   utils::purge_user_account,
 };
 use lemmy_db_schema::source::{
-  community::CommunityActions,
-  login_token::LoginToken,
-  oauth_account::OAuthAccount,
-  person::Person,
+  community::CommunityActions, login_token::LoginToken, oauth_account::OAuthAccount, person::Person,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::{DeleteAccount, DeleteUserForm, SuccessResponse};
@@ -47,7 +44,13 @@ pub async fn delete_account(
   if form.delete_content {
     let context = context.clone();
     spawn_try_task(async move {
-      purge_user_account(local_user_view.person.id, local_instance_id, &context).await
+      purge_user_account(
+        local_user_view.person.id,
+        local_instance_id,
+        local_user_view.local_user.local_site_id,
+        &context,
+      )
+      .await
     });
   } else {
     // These are already run in purge_user_account,
@@ -62,6 +65,7 @@ pub async fn delete_account(
       &mut context.pool(),
       local_user_view.person.id,
       local_instance_id,
+      local_user_view.local_user.local_site_id,
     )
     .await?;
   }

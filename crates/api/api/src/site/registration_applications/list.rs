@@ -3,8 +3,7 @@ use actix_web::web::{Json, Query};
 use lemmy_api_utils::{context::LemmyContext, tenant::TenantContext, utils::is_admin};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_registration_applications::{
-  RegistrationApplicationView,
-  api::ListRegistrationApplications,
+  RegistrationApplicationView, api::ListRegistrationApplications,
   impls::RegistrationApplicationQuery,
 };
 use lemmy_diesel_utils::pagination::PagedResponse;

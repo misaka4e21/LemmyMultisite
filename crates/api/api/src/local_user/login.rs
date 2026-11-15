@@ -8,9 +8,7 @@ use lemmy_api_utils::{
   context::LemmyContext,
   tenant::TenantContext,
   utils::{
-    check_email_verified,
-    check_local_user_deleted,
-    check_registration_application,
+    check_email_verified, check_local_user_deleted, check_registration_application,
     check_totp_2fa_valid,
   },
 };

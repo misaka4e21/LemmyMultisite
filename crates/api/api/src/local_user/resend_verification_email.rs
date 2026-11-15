@@ -1,8 +1,6 @@
 use actix_web::web::{Data, Json};
 use lemmy_api_utils::{
-  context::LemmyContext,
-  tenant::TenantContext,
-  utils::check_local_user_banned_or_deleted,
+  context::LemmyContext, tenant::TenantContext, utils::check_local_user_banned_or_deleted,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::{ResendVerificationEmail, SuccessResponse};

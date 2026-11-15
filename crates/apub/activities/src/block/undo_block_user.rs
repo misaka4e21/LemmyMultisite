@@ -132,6 +132,7 @@ impl Activity for UndoBlockUser {
                 false,
                 &reason,
                 parent_id,
+                None,
                 &context,
               )
               .await

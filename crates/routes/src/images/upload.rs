@@ -5,7 +5,7 @@ use actix_web::{self, HttpRequest, web::*};
 use futures::StreamExt;
 use lemmy_api_utils::{
   context::LemmyContext,
-  request::{PictrsResponse, delete_image_alias},
+  request::{PictrsResponse, delete_image_alias, register_uploaded_media},
   tenant::TenantContext,
   utils::{is_admin, is_mod_or_admin},
 };
@@ -13,7 +13,7 @@ use lemmy_db_schema::source::{
   community::{Community, CommunityUpdateForm},
   images::ImageDetails,
   local_site::LocalSite,
-  media::{MediaObject, MediaObjectInsertForm, MediaReference, MediaReferenceInsertForm},
+  media::MediaObjectInsertForm,
   person::{Person, PersonUpdateForm},
   site::{Site, SiteUpdateForm},
 };
@@ -409,7 +409,15 @@ async fn do_upload_image(
         content_type: image.details.content_type.clone(),
         blurhash: image.details.blurhash.clone(),
       };
-      let (media, created) = MediaObject::create_or_read(&mut context.pool(), &media_form).await?;
+      let (media, created) = register_uploaded_media(
+        &media_form,
+        local_site.id,
+        Some(local_user_view.person.id),
+        None,
+        upload_type.purpose(),
+        context,
+      )
+      .await?;
       if !created && media.canonical_pictrs_alias != image.file {
         // The uploaded bytes already exist. Drop the duplicate pict-rs alias and keep using the
         // canonical one.
@@ -418,18 +426,6 @@ async fn do_upload_image(
 
       let alias = media.canonical_pictrs_alias.clone();
       let thumbnail_url = Url::parse(&format!("{protocol_and_hostname}/api/v4/image/{alias}"))?;
-
-      MediaReference::ensure(
-        &mut context.pool(),
-        &MediaReferenceInsertForm {
-          local_site_id: local_site.id,
-          media_id: media.id,
-          owner_person_id: Some(local_user_view.person.id),
-          post_id: None,
-          purpose: upload_type.purpose().to_string(),
-        },
-      )
-      .await?;
 
       if created {
         let details_form = image

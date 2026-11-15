@@ -8,9 +8,7 @@ use lemmy_api_utils::{
   send_activity::{ActivityChannel, SendActivityData},
   tenant::TenantContext,
   utils::{
-    check_community_global_mod_action,
-    check_community_user_action,
-    check_nsfw_allowed,
+    check_community_global_mod_action, check_community_user_action, check_nsfw_allowed,
     update_post_tags,
   },
 };

@@ -1,16 +1,12 @@
 use crate::federation::{
-  comment_sort_type_with_default,
-  fetch_limit_with_default,
+  comment_sort_type_with_default, fetch_limit_with_default,
   fetcher::{resolve_community_identifier, resolve_person_identifier},
-  listing_type_with_default,
-  post_time_range_seconds_with_default,
+  listing_type_with_default, post_time_range_seconds_with_default,
 };
 use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
 use lemmy_api_utils::{
-  context::LemmyContext,
-  tenant::TenantContext,
-  utils::check_private_instance,
+  context::LemmyContext, tenant::TenantContext, utils::check_private_instance,
 };
 use lemmy_db_schema::source::comment::Comment;
 use lemmy_db_views_comment::{CommentSlimView, CommentView, api::GetComments, impls::CommentQuery};

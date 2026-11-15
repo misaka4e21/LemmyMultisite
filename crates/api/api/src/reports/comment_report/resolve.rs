@@ -7,10 +7,7 @@ use lemmy_api_utils::{
   utils::check_community_mod_action,
 };
 use lemmy_db_schema::impls::presence::{
-  SiteReportId,
-  combined_report_id,
-  read_report_site_state,
-  resolve_report_for_site,
+  SiteReportId, combined_report_id, read_report_site_state, resolve_report_for_site,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_report_combined::{

@@ -4,35 +4,13 @@ use diesel_async::{AsyncConnection, RunQueryDsl};
 use lemmy_db_schema_file::{
   PersonId,
   newtypes::{
-    CommentId,
-    CommentReportId,
-    CommunityId,
-    CommunityReportId,
-    LocalSiteId,
-    MultiCommunityId,
-    PostId,
-    PostReportId,
-    PrivateMessageId,
-    PrivateMessageReportId,
-    ReportCombinedId,
+    CommentId, CommentReportId, CommunityId, CommunityReportId, LocalSiteId, MultiCommunityId,
+    PostId, PostReportId, PrivateMessageId, PrivateMessageReportId, ReportCombinedId,
   },
   schema::{
-    comment,
-    comment_site,
-    community,
-    community_site,
-    local_user,
-    local_site,
-    multi_community_site,
-    person,
-    person_site,
-    post,
-    post_site,
-    private_message,
-    private_message_site,
-    report_activity,
-    report_combined,
-    report_site,
+    comment, comment_site, community, community_site, local_site, local_user, multi_community,
+    multi_community_site, person, person_site, post, post_site, private_message,
+    private_message_site, report_activity, report_combined, report_site,
   },
 };
 use lemmy_diesel_utils::connection::{DbPool, get_conn};
@@ -61,15 +39,25 @@ pub async fn delete_post_for_site(
   id: PostId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  diesel::delete(
-    post::table
-      .find(id)
-      .filter(post::origin_local_site_id.eq(Some(site_id))),
-  )
-  .get_result::<crate::source::post::Post>(conn)
-  .await
-  .with_lemmy_type(LemmyErrorType::NotFound)?;
-  Ok(())
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      crate::impls::purge_guard::lock_and_check_purge(
+        &mut conn.into(),
+        site_id,
+        crate::impls::purge_guard::PurgeTarget::Post(id.0),
+      )
+      .await?;
+      diesel::delete(
+        post::table
+          .find(id)
+          .filter(post::origin_local_site_id.eq(Some(site_id))),
+      )
+      .get_result::<crate::source::post::Post>(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+      Ok(())
+    })
+    .await
 }
 
 pub async fn delete_comment_for_site(
@@ -78,15 +66,25 @@ pub async fn delete_comment_for_site(
   id: CommentId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  diesel::delete(
-    comment::table
-      .find(id)
-      .filter(comment::origin_local_site_id.eq(Some(site_id))),
-  )
-  .get_result::<crate::source::comment::Comment>(conn)
-  .await
-  .with_lemmy_type(LemmyErrorType::NotFound)?;
-  Ok(())
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      crate::impls::purge_guard::lock_and_check_purge(
+        &mut conn.into(),
+        site_id,
+        crate::impls::purge_guard::PurgeTarget::Comment(id.0),
+      )
+      .await?;
+      diesel::delete(
+        comment::table
+          .find(id)
+          .filter(comment::origin_local_site_id.eq(Some(site_id))),
+      )
+      .get_result::<crate::source::comment::Comment>(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+      Ok(())
+    })
+    .await
 }
 
 pub async fn delete_community_for_site(
@@ -95,15 +93,25 @@ pub async fn delete_community_for_site(
   id: CommunityId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  diesel::delete(
-    community::table
-      .find(id)
-      .filter(community::origin_local_site_id.eq(Some(site_id))),
-  )
-  .get_result::<crate::source::community::Community>(conn)
-  .await
-  .with_lemmy_type(LemmyErrorType::NotFound)?;
-  Ok(())
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      crate::impls::purge_guard::lock_and_check_purge(
+        &mut conn.into(),
+        site_id,
+        crate::impls::purge_guard::PurgeTarget::Community(id.0),
+      )
+      .await?;
+      diesel::delete(
+        community::table
+          .find(id)
+          .filter(community::origin_local_site_id.eq(Some(site_id))),
+      )
+      .get_result::<crate::source::community::Community>(conn)
+      .await
+      .with_lemmy_type(LemmyErrorType::NotFound)?;
+      Ok(())
+    })
+    .await
 }
 
 /// Resolves matching reports only for the receiving site.
@@ -321,34 +329,43 @@ pub async fn resolve_report_for_site(
 ) -> LemmyResult<()> {
   // Allow resolving legacy local reports by creating their site association first.
   read_report_site_state(pool, local_site_id, report_id).await?;
-  ensure_report_site(pool, local_site_id, report_id).await?;
   let conn = &mut get_conn(pool).await?;
-  let target = report_site::table.find((local_site_id, report_id));
-  let changed = if let Some(conclusion) = conclusion {
-    update(target)
-      .set((
-        report_site::resolved.eq(resolved),
-        report_site::resolver_id.eq(Some(resolver_id)),
-        report_site::conclusion.eq(conclusion),
-        report_site::updated_at.eq(Some(Utc::now())),
-      ))
-      .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      ensure_report_site(&mut conn.into(), local_site_id, report_id).await?;
+      let target = report_site::table.find((local_site_id, report_id));
+      let changed = if let Some(conclusion) = conclusion {
+        update(target)
+          .set((
+            report_site::resolved.eq(resolved),
+            report_site::resolver_id.eq(Some(resolver_id)),
+            report_site::conclusion.eq(conclusion),
+            report_site::updated_at.eq(Some(Utc::now())),
+          ))
+          .execute(conn)
+          .await
+      } else {
+        update(target)
+          .set((
+            report_site::resolved.eq(resolved),
+            report_site::resolver_id.eq(Some(resolver_id)),
+            report_site::updated_at.eq(Some(Utc::now())),
+          ))
+          .execute(conn)
+          .await
+      }
+      .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+      if changed != 1 {
+        return Err(LemmyErrorType::NotFound.into());
+      }
+      crate::source::media::MediaReference::sync_report_content(
+        &mut conn.into(),
+        local_site_id,
+        report_id,
+      )
       .await
-  } else {
-    update(target)
-      .set((
-        report_site::resolved.eq(resolved),
-        report_site::resolver_id.eq(Some(resolver_id)),
-        report_site::updated_at.eq(Some(Utc::now())),
-      ))
-      .execute(conn)
-      .await
-  }
-  .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
-  if changed != 1 {
-    return Err(LemmyErrorType::NotFound.into());
-  }
-  Ok(())
+    })
+    .await
 }
 
 /// Records that a site received a report without changing another site's resolution state.
@@ -358,16 +375,31 @@ pub async fn ensure_report_site(
   report_id: ReportCombinedId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(report_site::table)
-    .values((
-      report_site::local_site_id.eq(local_site_id),
-      report_site::report_combined_id.eq(report_id),
-    ))
-    .on_conflict_do_nothing()
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      report_combined::table
+        .find(report_id)
+        .for_update()
+        .select(report_combined::id)
+        .first::<ReportCombinedId>(conn)
+        .await?;
+      insert_into(report_site::table)
+        .values((
+          report_site::local_site_id.eq(local_site_id),
+          report_site::report_combined_id.eq(report_id),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+      crate::source::media::MediaReference::sync_report_content(
+        &mut conn.into(),
+        local_site_id,
+        report_id,
+      )
+      .await
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-  Ok(())
 }
 
 /// Returns the only local site when the installation has exactly one site.
@@ -396,16 +428,31 @@ pub async fn ensure_person_site(
   person_id: PersonId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(person_site::table)
-    .values((
-      person_site::local_site_id.eq(local_site_id),
-      person_site::person_id.eq(person_id),
-    ))
-    .on_conflict_do_nothing()
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      person::table
+        .find(person_id)
+        .for_update()
+        .select(person::id)
+        .first::<PersonId>(conn)
+        .await?;
+      insert_into(person_site::table)
+        .values((
+          person_site::local_site_id.eq(local_site_id),
+          person_site::person_id.eq(person_id),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+      crate::source::media::MediaReference::sync_person_content(
+        &mut conn.into(),
+        local_site_id,
+        person_id,
+      )
+      .await
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-  Ok(())
 }
 
 /// Marks a local Person as belonging to a site and makes that site see the Person.
@@ -419,22 +466,37 @@ pub async fn ensure_local_person_site(
   person_id: PersonId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  update(person::table.find(person_id))
-    .filter(person::origin_local_site_id.is_null())
-    .set(person::origin_local_site_id.eq(local_site_id))
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      person::table
+        .find(person_id)
+        .for_update()
+        .select(person::id)
+        .first::<PersonId>(conn)
+        .await?;
+      update(person::table.find(person_id))
+        .filter(person::origin_local_site_id.is_null())
+        .set(person::origin_local_site_id.eq(local_site_id))
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+      insert_into(person_site::table)
+        .values((
+          person_site::local_site_id.eq(local_site_id),
+          person_site::person_id.eq(person_id),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+      crate::source::media::MediaReference::sync_person_content(
+        &mut conn.into(),
+        local_site_id,
+        person_id,
+      )
+      .await
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
-  insert_into(person_site::table)
-    .values((
-      person_site::local_site_id.eq(local_site_id),
-      person_site::person_id.eq(person_id),
-    ))
-    .on_conflict_do_nothing()
-    .execute(conn)
-    .await
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-  Ok(())
 }
 
 pub async fn ensure_community_site(
@@ -443,16 +505,31 @@ pub async fn ensure_community_site(
   community_id: CommunityId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(community_site::table)
-    .values((
-      community_site::local_site_id.eq(local_site_id),
-      community_site::community_id.eq(community_id),
-    ))
-    .on_conflict_do_nothing()
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      community::table
+        .find(community_id)
+        .for_update()
+        .select(community::id)
+        .first::<CommunityId>(conn)
+        .await?;
+      insert_into(community_site::table)
+        .values((
+          community_site::local_site_id.eq(local_site_id),
+          community_site::community_id.eq(community_id),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+      crate::source::media::MediaReference::sync_community_content(
+        &mut conn.into(),
+        local_site_id,
+        community_id,
+      )
+      .await
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-  Ok(())
 }
 
 pub async fn ensure_post_site(
@@ -461,16 +538,31 @@ pub async fn ensure_post_site(
   post_id: PostId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(post_site::table)
-    .values((
-      post_site::local_site_id.eq(local_site_id),
-      post_site::post_id.eq(post_id),
-    ))
-    .on_conflict_do_nothing()
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      post::table
+        .find(post_id)
+        .for_update()
+        .select(post::id)
+        .first::<PostId>(conn)
+        .await?;
+      insert_into(post_site::table)
+        .values((
+          post_site::local_site_id.eq(local_site_id),
+          post_site::post_id.eq(post_id),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+      crate::source::media::MediaReference::sync_post_content(
+        &mut conn.into(),
+        local_site_id,
+        post_id,
+      )
+      .await
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-  Ok(())
 }
 
 pub async fn ensure_comment_site(
@@ -479,16 +571,31 @@ pub async fn ensure_comment_site(
   comment_id: CommentId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(comment_site::table)
-    .values((
-      comment_site::local_site_id.eq(local_site_id),
-      comment_site::comment_id.eq(comment_id),
-    ))
-    .on_conflict_do_nothing()
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      comment::table
+        .find(comment_id)
+        .for_update()
+        .select(comment::id)
+        .first::<CommentId>(conn)
+        .await?;
+      insert_into(comment_site::table)
+        .values((
+          comment_site::local_site_id.eq(local_site_id),
+          comment_site::comment_id.eq(comment_id),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+      crate::source::media::MediaReference::sync_comment_content(
+        &mut conn.into(),
+        local_site_id,
+        comment_id,
+      )
+      .await
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-  Ok(())
 }
 
 pub async fn ensure_multi_community_site(
@@ -497,16 +604,31 @@ pub async fn ensure_multi_community_site(
   multi_community_id: MultiCommunityId,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(multi_community_site::table)
-    .values((
-      multi_community_site::local_site_id.eq(local_site_id),
-      multi_community_site::multi_community_id.eq(multi_community_id),
-    ))
-    .on_conflict_do_nothing()
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      multi_community::table
+        .find(multi_community_id)
+        .for_update()
+        .select(multi_community::id)
+        .first::<MultiCommunityId>(conn)
+        .await?;
+      insert_into(multi_community_site::table)
+        .values((
+          multi_community_site::local_site_id.eq(local_site_id),
+          multi_community_site::multi_community_id.eq(multi_community_id),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+      crate::source::media::MediaReference::sync_multi_community_content(
+        &mut conn.into(),
+        local_site_id,
+        multi_community_id,
+      )
+      .await
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-  Ok(())
 }
 
 pub async fn ensure_private_message_site(
@@ -516,17 +638,32 @@ pub async fn ensure_private_message_site(
   role: &str,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(private_message_site::table)
-    .values((
-      private_message_site::local_site_id.eq(local_site_id),
-      private_message_site::private_message_id.eq(private_message_id),
-      private_message_site::role.eq(role),
-    ))
-    .on_conflict_do_nothing()
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      private_message::table
+        .find(private_message_id)
+        .for_update()
+        .select(private_message::id)
+        .first::<PrivateMessageId>(conn)
+        .await?;
+      insert_into(private_message_site::table)
+        .values((
+          private_message_site::local_site_id.eq(local_site_id),
+          private_message_site::private_message_id.eq(private_message_id),
+          private_message_site::role.eq(role),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+      crate::source::media::MediaReference::sync_private_message_content(
+        &mut conn.into(),
+        local_site_id,
+        private_message_id,
+      )
+      .await
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-  Ok(())
 }
 
 pub async fn set_post_site_removed(
@@ -536,19 +673,24 @@ pub async fn set_post_site_removed(
   removed: bool,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(post_site::table)
-    .values((
-      post_site::local_site_id.eq(local_site_id),
-      post_site::post_id.eq(post_id),
-      post_site::removed.eq(removed),
-    ))
-    .on_conflict((post_site::local_site_id, post_site::post_id))
-    .do_update()
-    .set(post_site::removed.eq(removed))
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      ensure_post_site(&mut conn.into(), local_site_id, post_id).await?;
+      insert_into(post_site::table)
+        .values((
+          post_site::local_site_id.eq(local_site_id),
+          post_site::post_id.eq(post_id),
+          post_site::removed.eq(removed),
+        ))
+        .on_conflict((post_site::local_site_id, post_site::post_id))
+        .do_update()
+        .set(post_site::removed.eq(removed))
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+      Ok(())
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
-  Ok(())
 }
 
 /// Change only the selected site's existing visibility records for a creator's content.
@@ -621,19 +763,24 @@ pub async fn set_comment_site_removed(
   removed: bool,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(comment_site::table)
-    .values((
-      comment_site::local_site_id.eq(local_site_id),
-      comment_site::comment_id.eq(comment_id),
-      comment_site::removed.eq(removed),
-    ))
-    .on_conflict((comment_site::local_site_id, comment_site::comment_id))
-    .do_update()
-    .set(comment_site::removed.eq(removed))
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      ensure_comment_site(&mut conn.into(), local_site_id, comment_id).await?;
+      insert_into(comment_site::table)
+        .values((
+          comment_site::local_site_id.eq(local_site_id),
+          comment_site::comment_id.eq(comment_id),
+          comment_site::removed.eq(removed),
+        ))
+        .on_conflict((comment_site::local_site_id, comment_site::comment_id))
+        .do_update()
+        .set(comment_site::removed.eq(removed))
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+      Ok(())
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
-  Ok(())
 }
 
 pub async fn set_community_site_removed(
@@ -643,19 +790,24 @@ pub async fn set_community_site_removed(
   removed: bool,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(community_site::table)
-    .values((
-      community_site::local_site_id.eq(local_site_id),
-      community_site::community_id.eq(community_id),
-      community_site::removed.eq(removed),
-    ))
-    .on_conflict((community_site::local_site_id, community_site::community_id))
-    .do_update()
-    .set(community_site::removed.eq(removed))
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      ensure_community_site(&mut conn.into(), local_site_id, community_id).await?;
+      insert_into(community_site::table)
+        .values((
+          community_site::local_site_id.eq(local_site_id),
+          community_site::community_id.eq(community_id),
+          community_site::removed.eq(removed),
+        ))
+        .on_conflict((community_site::local_site_id, community_site::community_id))
+        .do_update()
+        .set(community_site::removed.eq(removed))
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+      Ok(())
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
-  Ok(())
 }
 
 pub async fn set_post_site_locked(
@@ -665,19 +817,24 @@ pub async fn set_post_site_locked(
   locked: bool,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(post_site::table)
-    .values((
-      post_site::local_site_id.eq(local_site_id),
-      post_site::post_id.eq(post_id),
-      post_site::locked.eq(locked),
-    ))
-    .on_conflict((post_site::local_site_id, post_site::post_id))
-    .do_update()
-    .set(post_site::locked.eq(locked))
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      ensure_post_site(&mut conn.into(), local_site_id, post_id).await?;
+      insert_into(post_site::table)
+        .values((
+          post_site::local_site_id.eq(local_site_id),
+          post_site::post_id.eq(post_id),
+          post_site::locked.eq(locked),
+        ))
+        .on_conflict((post_site::local_site_id, post_site::post_id))
+        .do_update()
+        .set(post_site::locked.eq(locked))
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+      Ok(())
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
-  Ok(())
 }
 
 pub async fn set_post_site_featured(
@@ -687,19 +844,24 @@ pub async fn set_post_site_featured(
   featured: bool,
 ) -> LemmyResult<()> {
   let conn = &mut get_conn(pool).await?;
-  insert_into(post_site::table)
-    .values((
-      post_site::local_site_id.eq(local_site_id),
-      post_site::post_id.eq(post_id),
-      post_site::featured.eq(featured),
-    ))
-    .on_conflict((post_site::local_site_id, post_site::post_id))
-    .do_update()
-    .set(post_site::featured.eq(featured))
-    .execute(conn)
+  conn
+    .transaction::<(), LemmyError, _>(async |conn| {
+      ensure_post_site(&mut conn.into(), local_site_id, post_id).await?;
+      insert_into(post_site::table)
+        .values((
+          post_site::local_site_id.eq(local_site_id),
+          post_site::post_id.eq(post_id),
+          post_site::featured.eq(featured),
+        ))
+        .on_conflict((post_site::local_site_id, post_site::post_id))
+        .do_update()
+        .set(post_site::featured.eq(featured))
+        .execute(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+      Ok(())
+    })
     .await
-    .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
-  Ok(())
 }
 
 #[cfg(test)]

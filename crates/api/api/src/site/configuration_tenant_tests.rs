@@ -1,17 +1,15 @@
 use super::oauth_tenant_tests::site_context;
 use crate::{
   local_user::{add_admin::add_admin, ban_person::ban_from_site},
-  site::purge::{
-    comment::purge_comment,
-    community::purge_community,
-    person::purge_person,
-    post::purge_post,
+  site::{
+    purge::{
+      comment::purge_comment, community::purge_community, person::purge_person, post::purge_post,
+    },
+    registration_applications::approve::approve_registration_application_with_notifier,
   },
 };
 use actix_web::{
-  App,
-  HttpMessage,
-  HttpResponse,
+  App, HttpMessage, HttpResponse,
   dev::Service,
   test,
   web::{self, Json, Query},
@@ -20,15 +18,11 @@ use diesel::{ExpressionMethods, QueryDsl};
 use diesel_async::RunQueryDsl;
 use lemmy_api_crud::{
   custom_emoji::{
-    create::create_custom_emoji,
-    delete::delete_custom_emoji,
-    list::list_custom_emojis,
+    create::create_custom_emoji, delete::delete_custom_emoji, list::list_custom_emojis,
     update::edit_custom_emoji,
   },
   oauth_provider::{
-    create::create_oauth_provider,
-    delete::delete_oauth_provider,
-    update::edit_oauth_provider,
+    create::create_oauth_provider, delete::delete_oauth_provider, update::edit_oauth_provider,
   },
   site::{
     create::create_site,
@@ -36,38 +30,30 @@ use lemmy_api_crud::{
     update::edit_site,
   },
   tagline::{
-    create::create_tagline,
-    delete::delete_tagline,
-    list::list_taglines,
-    update::edit_tagline,
+    create::create_tagline, delete::delete_tagline, list::list_taglines, update::edit_tagline,
   },
   user::create::register,
 };
 use lemmy_api_utils::{
-  context::LemmyContext,
-  send_activity::ActivityChannel,
+  context::LemmyContext, send_activity::ActivityChannel,
   utils::local_site_rate_limit_to_rate_limit_config,
 };
 use lemmy_db_schema::{
   impls::presence::{
-    ensure_comment_site,
-    ensure_community_site,
-    ensure_person_site,
-    ensure_post_site,
+    ensure_comment_site, ensure_community_site, ensure_person_site, ensure_post_site,
   },
   source::{
     comment::{Comment, CommentInsertForm},
-    community::{Community, CommunityInsertForm},
+    community::{Community, CommunityActions, CommunityInsertForm, CommunityModeratorForm},
     instance::{Instance, InstanceActions},
     local_site::{LocalSite, LocalSiteInsertForm, LocalSiteUpdateForm},
     local_site_rate_limit::{
-      LocalSiteRateLimit,
-      LocalSiteRateLimitInsertForm,
-      LocalSiteRateLimitUpdateForm,
+      LocalSiteRateLimit, LocalSiteRateLimitInsertForm, LocalSiteRateLimitUpdateForm,
     },
     local_user::{LocalUser, LocalUserInsertForm},
     person::{Person, PersonInsertForm},
     post::{Post, PostInsertForm},
+    registration_application::{RegistrationApplication, RegistrationApplicationInsertForm},
     site::{Site, SiteUpsertForm},
   },
   test_data::TestData,
@@ -80,29 +66,20 @@ use lemmy_db_schema_file::{
 use lemmy_db_views_comment::api::PurgeComment;
 use lemmy_db_views_community::api::PurgeCommunity;
 use lemmy_db_views_custom_emoji::api::{
-  CreateCustomEmoji,
-  DeleteCustomEmoji,
-  EditCustomEmoji,
-  ListCustomEmojis,
+  CreateCustomEmoji, DeleteCustomEmoji, EditCustomEmoji, ListCustomEmojis,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_person::api::{AddAdmin, BanPerson, PurgePerson};
 use lemmy_db_views_post::api::PurgePost;
-use lemmy_db_views_registration_applications::api::Register;
+use lemmy_db_views_registration_applications::api::{ApproveRegistrationApplication, Register};
 use lemmy_db_views_site::api::{
-  CreateOAuthProvider,
-  CreateSite,
-  CreateTagline,
-  DeleteOAuthProvider,
-  DeleteTagline,
-  EditOAuthProvider,
-  EditSite,
-  EditTagline,
-  ListTaglines,
+  CreateOAuthProvider, CreateSite, CreateTagline, DeleteOAuthProvider, DeleteTagline,
+  EditOAuthProvider, EditSite, EditTagline, ListTaglines,
 };
 use lemmy_diesel_utils::{connection::get_conn, traits::Crud};
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 use serial_test::serial;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use url::Url;
 
 async fn runtime_post_limit(context: &LemmyContext, site_id: LocalSiteId) -> u32 {
@@ -125,6 +102,155 @@ async fn runtime_post_limit(context: &LemmyContext, site_id: LocalSiteId) -> u32
     .unwrap()
     .parse()
     .unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn registration_decisions_are_site_scoped() -> LemmyResult<()> {
+  let base = LemmyContext::init_test_context().await;
+  let pool = &mut base.pool();
+  let first = TestData::create(pool).await?;
+  let first_user = LocalUser::create(
+    pool,
+    &LocalUserInsertForm {
+      local_site_id: first.local_site.id,
+      accepted_application: Some(false),
+      email: Some("approval-first@example.com".into()),
+      ..LocalUserInsertForm::test_form_admin(first.person.id)
+    },
+    vec![],
+  )
+  .await?;
+  let admin = LocalUserView::read_person(pool, first.person.id).await?;
+  let instance = Instance::read_or_create(pool, "approval-isolation.example").await?;
+  let site = Site::create(pool, &SiteUpsertForm::new("other".into(), instance.id)).await?;
+  let person = Person::create(pool, &PersonInsertForm::test_form(instance.id, "applicant")).await?;
+  let second = LocalSite::create(
+    pool,
+    &LocalSiteInsertForm::new(site.id, person.id, "approval-isolation.example".into()),
+  )
+  .await?;
+  LocalSiteRateLimit::create(pool, &LocalSiteRateLimitInsertForm::new(second.id)).await?;
+  let second_user = LocalUser::create(
+    pool,
+    &LocalUserInsertForm {
+      local_site_id: second.id,
+      accepted_application: Some(false),
+      email: Some("approval-second@example.com".into()),
+      ..LocalUserInsertForm::test_form(person.id)
+    },
+    vec![],
+  )
+  .await?;
+  let app = RegistrationApplication::create(
+    pool,
+    &RegistrationApplicationInsertForm {
+      local_user_id: second_user.id,
+      answer: "test".into(),
+    },
+  )
+  .await?;
+  let (first_context, _) = site_context(&base, first.local_site.id).await?;
+  let (second_context, _) = site_context(&base, second.id).await?;
+  let notifications = AtomicUsize::new(0);
+  let notify = |_: &LocalUserView, _: &ApproveRegistrationApplication, context: &LemmyContext| {
+    assert_eq!(context.site_view()?.local_site.id, first.local_site.id);
+    notifications.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+  };
+  for context in [first_context.clone(), second_context] {
+    assert!(
+      approve_registration_application_with_notifier(
+        Json(ApproveRegistrationApplication {
+          id: app.id,
+          approve: true,
+          deny_reason: None
+        }),
+        context,
+        admin.clone(),
+        &notify,
+      )
+      .await
+      .is_err()
+    );
+  }
+  assert_eq!(AtomicUsize::load(&notifications, Ordering::SeqCst), 0);
+  assert_eq!(
+    RegistrationApplication::read(pool, app.id).await?.admin_id,
+    None
+  );
+  assert!(
+    !LocalUserView::read(pool, second_user.id)
+      .await?
+      .local_user
+      .accepted_application
+  );
+  let own_app = RegistrationApplication::create(
+    pool,
+    &RegistrationApplicationInsertForm {
+      local_user_id: first_user.id,
+      answer: "test".into(),
+    },
+  )
+  .await?;
+  for approve in [true, false] {
+    approve_registration_application_with_notifier(
+      Json(ApproveRegistrationApplication {
+        id: own_app.id,
+        approve,
+        deny_reason: None,
+      }),
+      first_context.clone(),
+      admin.clone(),
+      &notify,
+    )
+    .await?;
+    assert_eq!(
+      LocalUserView::read(pool, first_user.id)
+        .await?
+        .local_user
+        .accepted_application,
+      approve
+    );
+  }
+  assert_eq!(AtomicUsize::load(&notifications, Ordering::SeqCst), 2);
+  let before_failure = RegistrationApplication::read(pool, own_app.id).await?;
+  let conn = &mut get_conn(pool).await?;
+  diesel::sql_query(format!(
+    "ALTER TABLE local_user ADD CONSTRAINT test_approval_rollback CHECK (id <> {} OR accepted_application = false) NOT VALID",
+    first_user.id.0
+  ))
+  .execute(conn)
+  .await?;
+  let failure = approve_registration_application_with_notifier(
+    Json(ApproveRegistrationApplication {
+      id: own_app.id,
+      approve: true,
+      deny_reason: None,
+    }),
+    first_context,
+    admin,
+    &notify,
+  )
+  .await;
+  let conn = &mut get_conn(pool).await?;
+  diesel::sql_query("ALTER TABLE local_user DROP CONSTRAINT test_approval_rollback")
+    .execute(conn)
+    .await?;
+  assert!(failure.is_err());
+  assert_eq!(AtomicUsize::load(&notifications, Ordering::SeqCst), 2);
+  let after_failure = RegistrationApplication::read(pool, own_app.id).await?;
+  assert_eq!(after_failure.admin_id, before_failure.admin_id);
+  assert_eq!(after_failure.updated_at, before_failure.updated_at);
+  assert!(
+    !LocalUserView::read(pool, first_user.id)
+      .await?
+      .local_user
+      .accepted_application
+  );
+  LocalUser::delete(pool, first_user.id).await?;
+  Instance::delete(pool, instance.id).await?;
+  first.delete(pool).await
 }
 
 #[tokio::test]
@@ -628,6 +754,48 @@ async fn site_configuration_is_isolated_and_cache_is_invalidated() -> LemmyResul
     },
   )
   .await?;
+  let protected_comment = Comment::create(
+    pool,
+    &CommentInsertForm {
+      origin_local_site_id: Some(second.id),
+      ..CommentInsertForm::new(
+        other_author.id,
+        own_post.id,
+        own_community.id,
+        "foreign dependency".into(),
+      )
+    },
+    None,
+  )
+  .await?;
+  assert!(
+    purge_post(
+      Json(PurgePost {
+        post_id: own_post.id,
+        reason: "test".into()
+      }),
+      first_context.clone(),
+      first_admin.clone(),
+    )
+    .await
+    .is_err()
+  );
+  Post::read(pool, own_post.id).await?;
+  Comment::read(pool, protected_comment.id).await?;
+  let conn = &mut get_conn(pool).await?;
+  assert_eq!(
+    modlog::table.count().get_result::<i64>(conn).await?,
+    initial_modlog_count
+  );
+  assert!(
+    tokio::time::timeout(
+      std::time::Duration::from_millis(50),
+      ActivityChannel::retrieve_activity(),
+    )
+    .await
+    .is_err()
+  );
+  Comment::delete(pool, protected_comment.id).await?;
   let own_comment = Comment::create(
     pool,
     &CommentInsertForm {
@@ -640,6 +808,38 @@ async fn site_configuration_is_isolated_and_cache_is_invalidated() -> LemmyResul
       )
     },
     None,
+  )
+  .await?;
+  let cross_site_post = Post::create(
+    pool,
+    &PostInsertForm {
+      origin_local_site_id: Some(second.id),
+      body: Some("cross site body".into()),
+      ..PostInsertForm::new("cross site post".into(), own_author.id, other_community.id)
+    },
+  )
+  .await?;
+  ensure_post_site(pool, second.id, cross_site_post.id).await?;
+  ensure_post_site(pool, first.local_site.id, cross_site_post.id).await?;
+  let cross_site_comment = Comment::create(
+    pool,
+    &CommentInsertForm {
+      origin_local_site_id: Some(second.id),
+      ..CommentInsertForm::new(
+        own_author.id,
+        cross_site_post.id,
+        other_community.id,
+        "cross site comment".into(),
+      )
+    },
+    None,
+  )
+  .await?;
+  ensure_comment_site(pool, second.id, cross_site_comment.id).await?;
+  ensure_comment_site(pool, first.local_site.id, cross_site_comment.id).await?;
+  CommunityActions::join(
+    pool,
+    &CommunityModeratorForm::new(other_community.id, own_author.id),
   )
   .await?;
   purge_comment(
@@ -706,6 +906,20 @@ async fn site_configuration_is_isolated_and_cache_is_invalidated() -> LemmyResul
   })
   .await
   .expect("purge task did not finish")?;
+  assert_eq!(
+    Post::read(pool, cross_site_post.id).await?.body.as_deref(),
+    Some("cross site body")
+  );
+  assert_eq!(
+    Comment::read(pool, cross_site_comment.id).await?.content,
+    "cross site comment"
+  );
+  assert!(
+    CommunityActions::read(pool, other_community.id, own_author.id)
+      .await?
+      .became_moderator_at
+      .is_some()
+  );
   for ban in [true, false] {
     assert!(
       ban_from_site(
@@ -1167,6 +1381,152 @@ async fn site_configuration_is_isolated_and_cache_is_invalidated() -> LemmyResul
     .custom_emojis
     .is_empty()
   );
+
+  Instance::delete(pool, second_instance.id).await?;
+  first.delete(pool).await
+}
+
+#[tokio::test]
+#[serial]
+async fn site_ban_removal_is_scoped_to_the_banned_site() -> LemmyResult<()> {
+  let base = LemmyContext::init_test_context().await;
+  let pool = &mut base.pool();
+  let first = TestData::create(pool).await?;
+  LocalUser::create(
+    pool,
+    &LocalUserInsertForm {
+      local_site_id: first.local_site.id,
+      ..LocalUserInsertForm::test_form_admin(first.person.id)
+    },
+    vec![],
+  )
+  .await?;
+  let first_admin = LocalUserView::read_person(pool, first.person.id).await?;
+
+  let second_instance = Instance::read_or_create(pool, "ban-scope.example").await?;
+  let second_site = Site::create(
+    pool,
+    &SiteUpsertForm::new("second ban site".into(), second_instance.id),
+  )
+  .await?;
+  let second_person = Person::create(
+    pool,
+    &PersonInsertForm::test_form(second_instance.id, "ban_scope_admin"),
+  )
+  .await?;
+  let second = LocalSite::create(
+    pool,
+    &LocalSiteInsertForm::new(second_site.id, second_person.id, "ban-scope.example".into()),
+  )
+  .await?;
+  let (first_context, _) = site_context(&base, first.local_site.id).await?;
+
+  let banned_author = Person::create(
+    pool,
+    &PersonInsertForm {
+      origin_local_site_id: Some(first.local_site.id),
+      ..PersonInsertForm::test_form(first.instance.id, "ban_scope_author")
+    },
+  )
+  .await?;
+  let own_community = Community::create(
+    pool,
+    &CommunityInsertForm {
+      origin_local_site_id: Some(first.local_site.id),
+      ..CommunityInsertForm::new(first.instance.id, "ban_scope_own".into(), "key".into())
+    },
+  )
+  .await?;
+  let cross_community = Community::create(
+    pool,
+    &CommunityInsertForm {
+      origin_local_site_id: Some(second.id),
+      ..CommunityInsertForm::new(second_instance.id, "ban_scope_cross".into(), "key".into())
+    },
+  )
+  .await?;
+  let own_post = Post::create(
+    pool,
+    &PostInsertForm {
+      origin_local_site_id: Some(first.local_site.id),
+      ..PostInsertForm::new("own ban post".into(), banned_author.id, own_community.id)
+    },
+  )
+  .await?;
+  let cross_post = Post::create(
+    pool,
+    &PostInsertForm {
+      origin_local_site_id: Some(second.id),
+      ..PostInsertForm::new(
+        "cross ban post".into(),
+        banned_author.id,
+        cross_community.id,
+      )
+    },
+  )
+  .await?;
+  ensure_post_site(pool, second.id, cross_post.id).await?;
+  ensure_post_site(pool, first.local_site.id, cross_post.id).await?;
+  let own_comment = Comment::create(
+    pool,
+    &CommentInsertForm {
+      origin_local_site_id: Some(first.local_site.id),
+      ..CommentInsertForm::new(
+        banned_author.id,
+        own_post.id,
+        own_community.id,
+        "own ban comment".into(),
+      )
+    },
+    None,
+  )
+  .await?;
+  let cross_comment = Comment::create(
+    pool,
+    &CommentInsertForm {
+      origin_local_site_id: Some(second.id),
+      ..CommentInsertForm::new(
+        banned_author.id,
+        cross_post.id,
+        cross_community.id,
+        "cross ban comment".into(),
+      )
+    },
+    None,
+  )
+  .await?;
+  ensure_comment_site(pool, second.id, cross_comment.id).await?;
+  ensure_comment_site(pool, first.local_site.id, cross_comment.id).await?;
+
+  ban_from_site(
+    Json(BanPerson {
+      person_id: banned_author.id,
+      ban: true,
+      remove_or_restore_data: Some(true),
+      reason: "scoped ban".into(),
+      expires_at: None,
+    }),
+    first_context,
+    first_admin,
+  )
+  .await?;
+  tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    loop {
+      if Post::read(pool, own_post.id).await?.removed
+        && Comment::read(pool, own_comment.id).await?.removed
+      {
+        break Ok::<(), lemmy_utils::error::LemmyError>(());
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+  })
+  .await
+  .expect("scoped ban task did not finish")?;
+
+  assert!(Post::read(pool, own_post.id).await?.removed);
+  assert!(Comment::read(pool, own_comment.id).await?.removed);
+  assert!(!Post::read(pool, cross_post.id).await?.removed);
+  assert!(!Comment::read(pool, cross_comment.id).await?.removed);
 
   Instance::delete(pool, second_instance.id).await?;
   first.delete(pool).await

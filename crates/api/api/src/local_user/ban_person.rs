@@ -84,6 +84,7 @@ pub async fn ban_from_site(
     let reason = data.reason.clone();
     let ban_id = action.first().ok_or(LemmyErrorType::NotFound)?.id;
     let context = context.clone();
+    let site_id = local_user_view.local_user.local_site_id;
     spawn_try_task(async move {
       remove_or_restore_user_data(
         my_person_id,
@@ -91,6 +92,7 @@ pub async fn ban_from_site(
         removed,
         &reason,
         ban_id,
+        Some(site_id),
         &context,
       )
       .await

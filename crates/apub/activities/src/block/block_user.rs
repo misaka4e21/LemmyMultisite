@@ -19,8 +19,7 @@ use lemmy_api_utils::{
   context::LemmyContext,
   notify::notify_mod_action,
   utils::{
-    check_community_deleted_removed,
-    remove_or_restore_user_data,
+    check_community_deleted_removed, remove_or_restore_user_data,
     remove_or_restore_user_data_in_community,
   },
 };
@@ -164,6 +163,7 @@ impl Activity for BlockUser {
                 true,
                 &reason,
                 parent_id,
+                None,
                 &context,
               )
               .await

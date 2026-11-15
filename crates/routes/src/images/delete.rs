@@ -2,7 +2,7 @@ use super::utils::delete_old_image;
 use actix_web::web::*;
 use lemmy_api_utils::{
   context::LemmyContext,
-  request::{delete_image_alias, purge_image_from_pictrs},
+  request::delete_queued_image_alias,
   tenant::TenantContext,
   utils::{is_admin, is_mod_or_admin},
 };
@@ -17,7 +17,7 @@ use lemmy_db_views_local_image::api::DeleteImageParams;
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::SuccessResponse;
 use lemmy_diesel_utils::traits::Crud;
-use lemmy_utils::error::LemmyResult;
+use lemmy_utils::error::{LemmyErrorType, LemmyResult};
 
 pub async fn delete_site_icon(
   context: Data<LemmyContext>,
@@ -190,22 +190,26 @@ pub async fn delete_image(
   )
   .await?;
   if delete_alias {
-    delete_image_alias(&data.filename, &context).await?;
+    delete_queued_image_alias(&data.filename, &context).await?;
   }
 
   Ok(Json(SuccessResponse::default()))
 }
 
-/// Deletes any image, only for admins.
+/// Deletes an image reference from the current site, only for admins.
 pub async fn delete_image_admin(
   Json(data): Json<DeleteImageParams>,
   context: Data<LemmyContext>,
   local_user_view: LocalUserView,
 ) -> LemmyResult<Json<SuccessResponse>> {
   is_admin(&local_user_view)?;
-
-  // Use purge, since it should remove any other aliases.
-  purge_image_from_pictrs(&data.filename, &context).await?;
+  let site_id = local_user_view.local_user.local_site_id;
+  if context.site_view()?.local_site.id != site_id {
+    return Err(LemmyErrorType::NotFound.into());
+  }
+  if MediaReference::delete_for_site(&mut context.pool(), &data.filename, site_id, None).await? {
+    delete_queued_image_alias(&data.filename, &context).await?;
+  }
 
   Ok(Json(SuccessResponse::default()))
 }

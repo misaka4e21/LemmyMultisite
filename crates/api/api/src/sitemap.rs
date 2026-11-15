@@ -5,9 +5,7 @@ use actix_web::{
 };
 use jiff_chrono_conversions::TryToJiff;
 use lemmy_api_utils::{
-  context::LemmyContext,
-  tenant::TenantContext,
-  utils::check_private_instance,
+  context::LemmyContext, tenant::TenantContext, utils::check_private_instance,
 };
 use lemmy_db_schema::source::post::Post;
 use lemmy_diesel_utils::dburl::DbUrl;

@@ -1,7 +1,9 @@
 use crate::{
   claims::Claims,
   context::LemmyContext,
-  request::{delete_image_alias, fetch_pictrs_proxied_image_details, purge_image_from_pictrs_url},
+  request::{
+    delete_queued_image_alias, fetch_pictrs_proxied_image_details, purge_image_from_pictrs_url,
+  },
 };
 use activitypub_federation::config::Data;
 use actix_web::{
@@ -35,8 +37,7 @@ use lemmy_db_schema::{
   traits::Likeable,
 };
 use lemmy_db_schema_file::{
-  InstanceId,
-  PersonId,
+  InstanceId, PersonId,
   enums::{CommunityFollowerState, ImageMode, RegistrationMode, VoteSettings},
   newtypes::{CommunityId, CommunityTagId, LocalSiteId, ModlogId, PostId, PostOrCommentId},
 };
@@ -47,22 +48,15 @@ use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::{connection::DbPool, dburl::DbUrl, traits::Crud};
 use lemmy_utils::{
-  CACHE_DURATION_FEDERATION,
-  MAX_COMMENT_DEPTH_LIMIT,
+  CACHE_DURATION_FEDERATION, MAX_COMMENT_DEPTH_LIMIT,
   error::{
-    LemmyError,
-    LemmyErrorExt,
-    LemmyErrorExt2,
-    LemmyErrorType,
-    LemmyResult,
-    UntranslatedError,
+    LemmyError, LemmyErrorExt, LemmyErrorExt2, LemmyErrorType, LemmyResult, UntranslatedError,
   },
   rate_limit::{ActionType, BucketConfig},
   spawn_try_task,
   utils::{
     markdown::{
-      code_links::clean_urls_skip_code_links,
-      image_links::markdown_rewrite_image_links,
+      code_links::clean_urls_skip_code_links, image_links::markdown_rewrite_image_links,
       markdown_check_for_blocked_urls,
     },
     slurs::remove_slurs,
@@ -598,19 +592,19 @@ pub async fn purge_post_images(
 }
 
 /// Delete local images attributed to a person
-fn delete_local_user_images(person_id: PersonId, context: &LemmyContext) {
+fn delete_local_user_images(person_id: PersonId, site_id: LocalSiteId, context: &LemmyContext) {
   let context_ = context.clone();
   spawn_try_task(async move {
-    let site_id = context_.site_view()?.local_site.id;
     let pictrs_uploads =
-      LocalImageView::get_all_by_person_id(&mut context_.pool(), person_id).await?;
+      LocalImageView::get_all_by_person_id_and_site(&mut context_.pool(), person_id, site_id)
+        .await?;
 
     for upload in pictrs_uploads {
       let alias = &upload.local_image.pictrs_alias;
       if MediaReference::delete_for_site_and_user(&mut context_.pool(), alias, site_id, person_id)
         .await?
       {
-        delete_image_alias(alias, &context_).await.ok();
+        delete_queued_image_alias(alias, &context_).await.ok();
       }
     }
     Ok(())
@@ -624,13 +618,22 @@ pub async fn remove_or_restore_user_data(
   removed: bool,
   reason: &str,
   bulk_action_parent_id: ModlogId,
+  local_site_id: Option<LocalSiteId>,
   context: &LemmyContext,
 ) -> LemmyResult<()> {
   let pool = &mut context.pool();
+  let image_site_id = local_site_id.or_else(|| {
+    context
+      .site_view()
+      .ok()
+      .map(|site_view| site_view.local_site.id)
+  });
 
   // These actions are only possible when removing, not restoring
   if removed {
-    delete_local_user_images(banned_person_id, context);
+    if let Some(site_id) = image_site_id {
+      delete_local_user_images(banned_person_id, site_id, context);
+    }
 
     // Update the fields to None
     Person::update(
@@ -653,7 +656,12 @@ pub async fn remove_or_restore_user_data(
     // Filter to only this banned users top communities
     let banned_user_first_communities: Vec<CommunityModeratorView> = first_mod_communities
       .into_iter()
-      .filter(|fmc| fmc.moderator.id == banned_person_id)
+      .filter(|fmc| {
+        fmc.moderator.id == banned_person_id
+          && local_site_id.map_or(true, |site| {
+            fmc.community.origin_local_site_id == Some(site)
+          })
+      })
       .collect();
 
     for first_mod_community in banned_user_first_communities {
@@ -682,13 +690,21 @@ pub async fn remove_or_restore_user_data(
     }
 
     // Remove post and comment votes
-    PostActions::remove_all_likes(pool, banned_person_id).await?;
-    CommentActions::remove_all_likes(pool, banned_person_id).await?;
+    if let Some(site_id) = local_site_id {
+      PostActions::remove_all_likes_in_site(pool, banned_person_id, site_id).await?;
+      CommentActions::remove_all_likes_in_site(pool, banned_person_id, site_id).await?;
+    } else {
+      PostActions::remove_all_likes(pool, banned_person_id).await?;
+      CommentActions::remove_all_likes(pool, banned_person_id).await?;
+    }
   }
 
   // Posts
-  let removed_or_restored_posts =
-    Post::update_removed_for_creator(pool, banned_person_id, removed).await?;
+  let removed_or_restored_posts = if let Some(site_id) = local_site_id {
+    Post::update_removed_for_creator_in_site(pool, banned_person_id, site_id, removed).await?
+  } else {
+    Post::update_removed_for_creator(pool, banned_person_id, removed).await?
+  };
   create_modlog_entries_for_removed_or_restored_posts(
     pool,
     mod_person_id,
@@ -700,8 +716,11 @@ pub async fn remove_or_restore_user_data(
   .await?;
 
   // Comments
-  let removed_or_restored_comments =
-    Comment::update_removed_for_creator(pool, banned_person_id, removed).await?;
+  let removed_or_restored_comments = if let Some(site_id) = local_site_id {
+    Comment::update_removed_for_creator_in_site(pool, banned_person_id, site_id, removed).await?
+  } else {
+    Comment::update_removed_for_creator(pool, banned_person_id, removed).await?
+  };
   create_modlog_entries_for_removed_or_restored_comments(
     pool,
     mod_person_id,
@@ -713,7 +732,12 @@ pub async fn remove_or_restore_user_data(
   .await?;
 
   // Private messages
-  PrivateMessage::update_removed_for_creator(pool, banned_person_id, removed).await?;
+  if let Some(site_id) = local_site_id {
+    PrivateMessage::update_removed_for_creator_in_site(pool, banned_person_id, site_id, removed)
+      .await?;
+  } else {
+    PrivateMessage::update_removed_for_creator(pool, banned_person_id, removed).await?;
+  }
 
   Ok(())
 }
@@ -857,34 +881,35 @@ pub async fn remove_or_restore_user_data_in_community(
 pub async fn purge_user_account(
   person_id: PersonId,
   local_instance_id: InstanceId,
+  site_id: LocalSiteId,
   context: &LemmyContext,
 ) -> LemmyResult<()> {
   let pool = &mut context.pool();
 
   // Delete their local images, if they're a local user
   // No need to update avatar and banner, those are handled in Person::delete_account
-  delete_local_user_images(person_id, context);
+  delete_local_user_images(person_id, site_id, context);
 
   // Comments
-  Comment::permadelete_for_creator(pool, person_id)
+  Comment::permadelete_for_creator(pool, person_id, site_id)
     .await
     .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
 
   // Posts
-  Post::permadelete_for_creator(pool, person_id)
+  Post::permadelete_for_creator(pool, person_id, site_id)
     .await
     .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
 
   // Leave communities they mod
-  CommunityActions::leave_mod_team_for_all_communities(pool, person_id).await?;
+  CommunityActions::leave_mod_team_for_communities_in_site(pool, person_id, site_id).await?;
 
   // Delete the oauth accounts linked to the local user
-  if let Ok(local_user) = LocalUserView::read_person(pool, person_id).await {
+  if let Ok(local_user) = LocalUserView::read_person_for_site(pool, person_id, site_id).await {
     OAuthAccount::delete_user_accounts(pool, local_user.local_user.id).await?;
     LoginToken::invalidate_all(pool, local_user.local_user.id).await?;
   }
 
-  Person::delete_account(pool, person_id, local_instance_id).await?;
+  Person::delete_account(pool, person_id, local_instance_id, site_id).await?;
 
   Ok(())
 }

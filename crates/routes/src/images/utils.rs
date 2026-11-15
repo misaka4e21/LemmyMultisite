@@ -8,7 +8,7 @@ use actix_web::{
 };
 use diesel::NotFound;
 use http::HeaderValue;
-use lemmy_api_utils::{context::LemmyContext, request::delete_image_alias};
+use lemmy_api_utils::{context::LemmyContext, request::delete_queued_image_alias};
 use lemmy_db_schema::source::media::MediaReference;
 use lemmy_db_schema_file::{PersonId, newtypes::LocalSiteId};
 use lemmy_diesel_utils::dburl::DbUrl;
@@ -83,7 +83,7 @@ pub(super) async fn delete_old_image(
     )
     .await?;
     if delete_object {
-      delete_image_alias(old_alias, context).await?;
+      delete_queued_image_alias(old_alias, context).await?;
     }
   }
   Ok(())

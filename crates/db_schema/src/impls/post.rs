@@ -1,37 +1,26 @@
 use crate::{
   impls::presence::{default_local_site_id, ensure_post_site, set_post_site_featured},
-  source::post::{
-    Post,
-    PostActions,
-    PostHideForm,
-    PostInsertForm,
-    PostLikeForm,
-    PostReadCommentsForm,
-    PostReadForm,
-    PostSavedForm,
-    PostUpdateForm,
-    PostUpsertForm,
+  source::{
+    media::MediaReference,
+    post::{
+      Post, PostActions, PostHideForm, PostInsertForm, PostLikeForm, PostReadCommentsForm,
+      PostReadForm, PostSavedForm, PostUpdateForm, PostUpsertForm,
+    },
   },
   traits::{Likeable, Saveable},
   utils::{DELETED_REPLACEMENT_TEXT, FETCH_LIMIT_MAX, SITEMAP_DAYS, SITEMAP_LIMIT},
 };
 use chrono::{DateTime, Utc};
 use diesel::{
-  BoolExpressionMethods,
-  DecoratableTarget,
-  ExpressionMethods,
-  JoinOnDsl,
-  NullableExpressionMethods,
-  OptionalExtension,
-  QueryDsl,
+  BoolExpressionMethods, DecoratableTarget, ExpressionMethods, JoinOnDsl,
+  NullableExpressionMethods, OptionalExtension, QueryDsl,
   dsl::{count, insert_into, not, update},
   expression::SelectableHelper,
 };
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use diesel_uplete::{UpleteCount, uplete};
 use lemmy_db_schema_file::{
-  InstanceId,
-  PersonId,
+  InstanceId, PersonId,
   enums::{CommunityVisibility, PostNotificationsMode},
   newtypes::{CommunityId, LocalSiteId, PostId},
   schema::{community, local_user, person, post, post_actions},
@@ -45,7 +34,7 @@ use lemmy_diesel_utils::{
     now,
   },
 };
-use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
+use lemmy_utils::error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult};
 use url::Url;
 
 impl Crud for Post {
@@ -55,24 +44,28 @@ impl Crud for Post {
 
   async fn create(pool: &mut DbPool<'_>, form: &Self::InsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    let post = insert_into(post::table)
-      .values(form)
-      .get_result::<Self>(conn)
-      .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
-    if form.local.unwrap_or(form.ap_id.is_none()) {
-      let local_site_id = match form.origin_local_site_id {
-        Some(local_site_id) => Some(local_site_id),
-        None => default_local_site_id(&mut conn.into()).await?,
-      };
-      if let Some(local_site_id) = local_site_id {
-        ensure_post_site(&mut conn.into(), local_site_id, post.id).await?;
-        if form.featured_local.unwrap_or(false) {
-          set_post_site_featured(&mut conn.into(), local_site_id, post.id, true).await?;
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let post = insert_into(post::table)
+          .values(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        if form.local.unwrap_or(form.ap_id.is_none()) {
+          let local_site_id = match form.origin_local_site_id {
+            Some(local_site_id) => Some(local_site_id),
+            None => default_local_site_id(&mut conn.into()).await?,
+          };
+          if let Some(local_site_id) = local_site_id {
+            ensure_post_site(&mut conn.into(), local_site_id, post.id).await?;
+            if form.featured_local.unwrap_or(false) {
+              set_post_site_featured(&mut conn.into(), local_site_id, post.id, true).await?;
+            }
+          }
         }
-      }
-    }
-    Ok(post)
+        Ok(post)
+      })
+      .await
   }
 
   async fn update(
@@ -81,11 +74,17 @@ impl Crud for Post {
     new_post: &Self::UpdateForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    diesel::update(post::table.find(post_id))
-      .set(new_post)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = diesel::update(post::table.find(post_id))
+          .set(new_post)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        MediaReference::sync_post_all_sites(&mut conn.into(), post_id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
   async fn read(pool: &mut DbPool<'_>, id: PostId) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
@@ -104,15 +103,21 @@ impl Post {
     form: &PostUpsertForm,
   ) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(post::table)
-      .values(form)
-      .on_conflict(post::ap_id)
-      .filter_target(coalesce(post::updated_at, post::published_at).lt(timestamp))
-      .do_update()
-      .set(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        let updated = insert_into(post::table)
+          .values(form)
+          .on_conflict(post::ap_id)
+          .filter_target(coalesce(post::updated_at, post::published_at).lt(timestamp))
+          .do_update()
+          .set(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        MediaReference::sync_post_all_sites(&mut conn.into(), updated.id).await?;
+        Ok(updated)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
   }
 
   pub async fn list_featured_for_community(
@@ -162,20 +167,33 @@ impl Post {
   pub async fn permadelete_for_creator(
     pool: &mut DbPool<'_>,
     for_creator_id: PersonId,
+    local_site_id: LocalSiteId,
   ) -> LemmyResult<Vec<Self>> {
     let conn = &mut get_conn(pool).await?;
 
-    diesel::update(post::table.filter(post::creator_id.eq(for_creator_id)))
-      .set((
-        post::name.eq(DELETED_REPLACEMENT_TEXT),
-        post::url.eq(Option::<&str>::None),
-        post::body.eq(DELETED_REPLACEMENT_TEXT),
-        post::deleted.eq(true),
-        post::updated_at.eq(Utc::now()),
-      ))
-      .get_results::<Self>(conn)
+    conn
+      .transaction::<Vec<Self>, LemmyError, _>(async |conn| {
+        let changed = diesel::update(
+          post::table
+            .filter(post::creator_id.eq(for_creator_id))
+            .filter(post::origin_local_site_id.eq(local_site_id)),
+        )
+        .set((
+          post::name.eq(DELETED_REPLACEMENT_TEXT),
+          post::url.eq(Option::<&str>::None),
+          post::body.eq(DELETED_REPLACEMENT_TEXT),
+          post::deleted.eq(true),
+          post::updated_at.eq(Utc::now()),
+        ))
+        .get_results::<Self>(conn)
+        .await
+        .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+        for post in &changed {
+          MediaReference::sync_post_all_sites(&mut conn.into(), post.id).await?;
+        }
+        Ok(changed)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
   async fn creator_post_ids_in_community(
@@ -261,6 +279,24 @@ impl Post {
       .get_results(conn)
       .await
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+
+  pub async fn update_removed_for_creator_in_site(
+    pool: &mut DbPool<'_>,
+    creator_id: PersonId,
+    local_site_id: LocalSiteId,
+    removed: bool,
+  ) -> LemmyResult<Vec<Self>> {
+    let conn = &mut get_conn(pool).await?;
+    update(
+      post::table
+        .filter(post::creator_id.eq(creator_id))
+        .filter(post::origin_local_site_id.eq(local_site_id)),
+    )
+    .set((post::removed.eq(removed), post::updated_at.eq(Utc::now())))
+    .get_results::<Self>(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 
   pub fn is_post_creator(person_id: PersonId, post_creator_id: PersonId) -> bool {
@@ -366,6 +402,29 @@ impl Post {
       Post::update(pool, self.id, &form).await?;
     }
     Ok(())
+  }
+}
+
+impl PostActions {
+  pub async fn remove_all_likes_in_site(
+    pool: &mut DbPool<'_>,
+    person_id: PersonId,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<UpleteCount> {
+    let conn = &mut get_conn(pool).await?;
+    let site_posts = post::table
+      .filter(post::origin_local_site_id.eq(local_site_id))
+      .select(post::id);
+    uplete(
+      post_actions::table
+        .filter(post_actions::person_id.eq(person_id))
+        .filter(post_actions::post_id.eq_any(site_posts)),
+    )
+    .set_null(post_actions::vote_is_upvote)
+    .set_null(post_actions::voted_at)
+    .get_result(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)
   }
 }
 

@@ -2,9 +2,7 @@ use crate::federation::fetcher::resolve_multi_community_identifier;
 use activitypub_federation::config::Data;
 use actix_web::web::{Json, Query};
 use lemmy_api_utils::{
-  context::LemmyContext,
-  tenant::TenantContext,
-  utils::check_private_instance,
+  context::LemmyContext, tenant::TenantContext, utils::check_private_instance,
 };
 use lemmy_db_views_community::{
   MultiCommunityView,

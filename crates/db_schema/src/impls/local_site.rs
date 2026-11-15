@@ -1,18 +1,56 @@
-use crate::source::local_site::{LocalSite, LocalSiteInsertForm, LocalSiteUpdateForm};
+use crate::source::{
+  local_site::{LocalSite, LocalSiteInsertForm, LocalSiteUpdateForm},
+  media::MediaReference,
+};
 use diesel::{QueryDsl, dsl::insert_into};
-use diesel_async::RunQueryDsl;
-use lemmy_db_schema_file::{newtypes::LocalSiteId, schema::local_site};
+use diesel_async::{AsyncConnection, RunQueryDsl};
+use lemmy_db_schema_file::{
+  newtypes::{LocalSiteId, SiteId},
+  schema::{local_site, site},
+};
 use lemmy_diesel_utils::connection::{DbPool, get_conn};
-use lemmy_utils::error::{LemmyErrorExt, LemmyErrorType, LemmyResult};
+use lemmy_utils::error::{LemmyError, LemmyErrorExt, LemmyErrorType, LemmyResult};
 
 impl LocalSite {
   pub async fn create(pool: &mut DbPool<'_>, form: &LocalSiteInsertForm) -> LemmyResult<Self> {
     let conn = &mut get_conn(pool).await?;
-    insert_into(local_site::table)
-      .values(form)
-      .get_result::<Self>(conn)
+    conn
+      .transaction::<Self, LemmyError, _>(async |conn| {
+        diesel::sql_query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('media-site-catalog', 0))",
+        )
+        .execute(conn)
+        .await?;
+        site::table
+          .find(form.site_id)
+          .for_update()
+          .select(site::id)
+          .first::<SiteId>(conn)
+          .await?;
+        let local = insert_into(local_site::table)
+          .values(form)
+          .get_result::<Self>(conn)
+          .await
+          .with_lemmy_type(LemmyErrorType::CouldntCreate)?;
+        MediaReference::sync_owned_site_content(&mut conn.into(), local.site_id).await?;
+        #[derive(diesel::QueryableByName)]
+        struct RemoteSite {
+          #[diesel(sql_type = diesel::sql_types::Integer)]
+          id: i32,
+        }
+        let remote_sites = diesel::sql_query(
+          "SELECT site.id FROM site LEFT JOIN local_site ON local_site.site_id = site.id \
+         WHERE local_site.id IS NULL ORDER BY site.id FOR UPDATE OF site",
+        )
+        .load::<RemoteSite>(conn)
+        .await?;
+        for remote in remote_sites {
+          MediaReference::sync_local_site_content(&mut conn.into(), local.id, SiteId(remote.id))
+            .await?;
+        }
+        Ok(local)
+      })
       .await
-      .with_lemmy_type(LemmyErrorType::CouldntCreate)
   }
 
   pub async fn update(

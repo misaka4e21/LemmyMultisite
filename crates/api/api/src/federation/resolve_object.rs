@@ -5,9 +5,7 @@ use activitypub_federation::{
 use actix_web::web::{Json, Query};
 use either::Either::*;
 use lemmy_api_utils::{
-  context::LemmyContext,
-  tenant::TenantContext,
-  utils::check_private_instance,
+  context::LemmyContext, tenant::TenantContext, utils::check_private_instance,
 };
 use lemmy_apub_objects::{
   objects::{SearchableObjects, UserOrCommunity},

@@ -126,7 +126,7 @@ Deleting a file SHALL remove only the current site's reference. The stored objec
 - **AND** it does not contain site B references or other users' files
 
 ### Requirement: Limits, configuration, and failure behavior
-Per-site settings SHALL control whether document uploads are enabled and the maximum document size. Exceeding the limit MUST reject the request without storing a partial object. When S3 is unavailable or unconfigured, uploads MUST fail with a storage or disabled error and MUST NOT create a local fallback.
+Per-site settings SHALL control whether document uploads are enabled, the maximum document size, and the allowed detected MIME types. An empty allowlist SHALL permit any non-image, non-video type; a non-empty allowlist SHALL accept only exact MIME type matches. Image and video types SHALL remain rejected by the document endpoint regardless of the allowlist. Exceeding the size limit or violating the allowlist MUST reject the request without storing an object or reference. When S3 is unavailable or unconfigured, uploads MUST fail with a storage or disabled error and MUST NOT create a local fallback.
 
 #### Scenario: Upload exceeds the size limit
 - **WHEN** a user uploads a document larger than the current site's limit
@@ -137,6 +137,12 @@ Per-site settings SHALL control whether document uploads are enabled and the max
 - **WHEN** a site administrator disables document uploads
 - **THEN** `POST /api/v4/file` returns a disabled error
 - **AND** existing documents remain readable
+
+#### Scenario: Site restricts file formats
+- **WHEN** a site administrator configures an allowed MIME type list
+- **AND** a user uploads bytes whose detected MIME type is not in that list
+- **THEN** the request is rejected without creating an object or reference
+- **AND** a matching detected type is accepted, subject to size and image/video restrictions
 
 #### Scenario: S3 unavailable
 - **WHEN** the S3 service is down during upload

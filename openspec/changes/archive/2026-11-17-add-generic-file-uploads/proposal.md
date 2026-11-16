@@ -8,10 +8,10 @@ This change depends on `migrate-media-storage-to-s3` for the RustFS service and 
 
 - Add `POST /api/v4/file` for authenticated multipart document uploads, with per-site size limits, SHA-256 hashing, and deduplication.
 - Add `GET /api/v4/file/{public_id}/{filename}`, `DELETE /api/v4/file/{public_id}`, and `GET /api/v4/file/list` for download, deletion, and listing.
-- Add `file_object` and `file_reference` tables, plus per-site file upload policy fields.
+- Add `file_object` and `file_reference` tables, plus per-site file upload policy fields, including an administrator-configurable allowed MIME type list.
 - Add a Lemmy S3 client configured with endpoint, bucket, region, access key, secret key, and path-style settings. Use a separate bucket from the pict-rs image store.
 - Serve documents through Lemmy with `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and safe filename encoding. Keep the bucket private.
-- Reject image and video content types in the document endpoint; those continue through the existing pict-rs endpoints.
+- Reject image and video content types in the document endpoint; those continue through the existing pict-rs endpoints. Validate other uploads against the current site's configurable allowed MIME type list.
 - Initialize the document bucket in the Docker stack and document provider overrides.
 
 Out of scope: frontend upload controls, per-file ACLs, virus scanning, and ActivityPub attachment federation.

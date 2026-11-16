@@ -71,13 +71,13 @@ file_reference
   owner_person_id, original_filename, created_at
 ```
 
-Add `file_upload_disabled` and `file_max_upload_size_bytes` to `local_site`, with a default limit of 25 MiB. `file_reference` is the site-scoped unit; `file_object` is installation-wide. Index `(local_site_id, owner_person_id, created_at)`, `file_id`, and `content_hash`.
+Add `file_upload_disabled`, `file_max_upload_size_bytes`, and `file_allowed_mime_types` to `local_site`, with a default limit of 25 MiB and an empty MIME allowlist by default. An empty list permits any detected type except images and videos; a non-empty list is an exact allowlist matched against the content-sniffed MIME type, never the client-supplied header or filename extension. Site administrators can change all three policy fields through site settings. `file_reference` is the site-scoped unit; `file_object` is installation-wide. Index `(local_site_id, owner_person_id, created_at)`, `file_id`, and `content_hash`.
 
 A UUID public identifier avoids exposing sequential row counts and gives each site reference a stable, unguessable URL component. `original_filename` lives on the reference because identical bytes may be uploaded under different names.
 
 ### Upload flow
 
-Stream the multipart body to a temporary file under a configured temp directory while enforcing the site limit and computing SHA-256. Sniff the content type from the bytes, using the filename extension only as a fallback. Reject detected image and video types before any storage write.
+Stream the multipart body to a temporary file under a configured temp directory while enforcing the site limit and computing SHA-256. Detect the content type from file bytes only; unknown data is classified as `application/octet-stream` and the filename extension is never used to satisfy the allowlist. Reject detected image and video types before any storage write, then enforce the site's exact MIME allowlist when it is non-empty.
 
 Look up `content_hash` in `file_object`. If the object row exists, reuse it after checking the S3 object with `HeadObject`; repair a missing object by uploading again. If it does not exist, upload the temp file with `PutObject` using key `files/{sha256}` and insert the object row. Then insert a `file_reference` with a new UUID. Delete the temp file in all paths.
 

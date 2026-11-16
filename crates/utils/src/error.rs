@@ -31,6 +31,14 @@ pub enum LemmyErrorType {
   NoContentTypeHeader,
   NotAnImageType,
   ImageUploadDisabled,
+  FileUploadDisabled,
+  FileTooLarge,
+  FileTypeNotAllowed,
+  FileTypeMustUseImageEndpoint(String),
+  InvalidFileUploadPolicy,
+  FileStorageUnavailable,
+  FileStorageUnauthorized,
+  FileNotFound,
   NotAModOrAdmin,
   NotTopMod,
   NotLoggedIn,
@@ -231,9 +239,21 @@ cfg_select! {
     impl actix_web::error::ResponseError for LemmyError {
       fn status_code(&self) -> actix_web::http::StatusCode {
         match self.error_type {
-          LemmyErrorType::IncorrectLogin => actix_web::http::StatusCode::UNAUTHORIZED,
-          LemmyErrorType::SiteMismatch => actix_web::http::StatusCode::FORBIDDEN,
+          LemmyErrorType::IncorrectLogin | LemmyErrorType::NotLoggedIn => {
+            actix_web::http::StatusCode::UNAUTHORIZED
+          }
+          LemmyErrorType::SiteMismatch
+          | LemmyErrorType::NotAModerator
+          | LemmyErrorType::NotAnAdmin
+          | LemmyErrorType::NotAModOrAdmin
+          | LemmyErrorType::NotHigherAdmin => actix_web::http::StatusCode::FORBIDDEN,
           LemmyErrorType::NotFound => actix_web::http::StatusCode::NOT_FOUND,
+          LemmyErrorType::FileNotFound => actix_web::http::StatusCode::NOT_FOUND,
+          LemmyErrorType::FileTooLarge => actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+          LemmyErrorType::FileStorageUnavailable => {
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+          }
+          LemmyErrorType::FileStorageUnauthorized => actix_web::http::StatusCode::BAD_GATEWAY,
           _ => actix_web::http::StatusCode::BAD_REQUEST,
         }
       }

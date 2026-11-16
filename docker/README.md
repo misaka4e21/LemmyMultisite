@@ -22,13 +22,15 @@ Lemmy's needs, see [the image repository][image-repo].
 
 ## S3-compatible media storage
 
-The compose stack stores pict-rs blobs in an S3-compatible bucket. RustFS is
+The compose stack stores pict-rs blobs and generic documents in separate
+S3-compatible buckets. RustFS is
 the default local backend, but the settings are provider-neutral.
 
 1. Copy `docker/.env.example` to `docker/.env` and replace the credentials.
 2. Start the stack with `docker compose up --build` from this directory.
-3. `rustfs-init` creates the `S3_BUCKET` bucket before pict-rs starts. The
-   bucket is private; Lemmy serves images through its own image endpoints.
+3. `rustfs-init` creates the `S3_BUCKET` and `S3_FILE_BUCKET` buckets before
+   pict-rs starts. Both buckets are private; Lemmy serves content through its
+   own API endpoints.
 
 The relevant settings are:
 
@@ -36,15 +38,62 @@ The relevant settings are:
 | --- | --- | --- |
 | `S3_ENDPOINT` | S3 API endpoint | `http://rustfs:9000` |
 | `S3_BUCKET` | pict-rs blob bucket | `lemmy-media` |
+| `S3_FILE_BUCKET` | Generic document bucket | `lemmy-files` |
 | `S3_REGION` | SigV4 region | `us-east-1` |
 | `S3_ACCESS_KEY` | S3 access key | development value |
 | `S3_SECRET_KEY` | S3 secret key | development value |
 | `S3_USE_PATH_STYLE` | Path-style bucket addressing | `true` |
 
+The Compose file passes the document-store values to Lemmy as
+`LEMMY_S3_ENDPOINT`, `LEMMY_S3_BUCKET`, `LEMMY_S3_REGION`,
+`LEMMY_S3_ACCESS_KEY`, `LEMMY_S3_SECRET_KEY`, and
+`LEMMY_S3_USE_PATH_STYLE`. Outside Compose, set those `LEMMY_S3_*` variables
+or configure the matching `s3` block in `config.hjson`. If any required value
+is missing, generic file uploads stay disabled while Lemmy and pict-rs continue
+to start.
+
+For the native disposable server, run `LEMMY_TEST_START_MEDIA=1 ./start-for-dev.sh`
+from the repository root. The script starts RustFS and pict-rs in a separate
+Compose project with temporary data directories and dynamically selected local
+ports, then stops the services and removes their temporary data on exit. Set
+`LEMMY_TEST_S3_ACCESS_KEY`, `LEMMY_TEST_S3_SECRET_KEY`,
+`LEMMY_TEST_S3_BUCKET`, or `LEMMY_TEST_S3_REGION` to override the local defaults.
+With that server running, use a second terminal to run
+`python3 scripts/test_file_storage_integration.py`. To verify a missing S3
+configuration, restart with `LEMMY_TEST_START_MEDIA=1 LEMMY_TEST_DISABLE_S3=1`
+and run `python3 scripts/test_file_storage_failure.py`. To simulate an
+unavailable S3 endpoint, start with
+`LEMMY_TEST_START_MEDIA=1 LEMMY_S3_ENDPOINT=http://127.0.0.1:1`, then run
+`LEMMY_TEST_FAILURE_MODE=unavailable python3 scripts/test_file_storage_failure.py`.
+
 For another S3-compatible provider, change these values and set
 `S3_USE_PATH_STYLE` to match the provider. AWS S3 normally uses virtual-host
 addressing, while RustFS and many local providers use path-style. The bucket
 must exist or be creatable by the credentials used by `rustfs-init`.
+
+### Generic file API
+
+The authenticated API accepts one multipart field named `file` at
+`POST /api/v4/file`. It returns `public_id`, a tenant-hosted download `url`,
+the sanitized filename, detected content type, and size. Files can be listed
+with `GET /api/v4/file/list`, downloaded through
+`GET /api/v4/file/{public_id}/{filename}`, and removed through
+`DELETE /api/v4/file/{public_id}`. The owner or a site administrator can remove
+a file reference.
+
+Site administrators configure `file_upload_disabled`,
+`file_max_upload_size_bytes`, and `file_allowed_mime_types` through site
+settings. The default upload limit is 25 MiB; oversized bodies return 413.
+The MIME list matches types detected from file bytes. An empty list allows any
+non-image and non-video type; image and video uploads always use the existing
+pict-rs endpoints. Downloads are always attachments with `nosniff`. Private-site
+authentication and site-scoped references apply to downloads, so a site's file
+URL does not resolve through another site's hostname.
+This change provides API support; frontend upload controls are separate work.
+
+Back up the Lemmy database and the complete `S3_FILE_BUCKET` object set
+together. Restoring only one side can leave references without bytes or stored
+objects without references.
 
 ### Migrating an existing filesystem store
 

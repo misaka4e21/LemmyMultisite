@@ -188,6 +188,7 @@ use lemmy_routes::images::{
     upload_user_banner,
   },
 };
+use lemmy_routes::files::{delete_file, download_file, list_files, upload_file};
 use lemmy_utils::rate_limit::RateLimit;
 
 mod installation;
@@ -506,6 +507,14 @@ pub fn config(cfg: &mut ServiceConfig, rate_limit: &RateLimit) {
           .route("/health", get().to(pictrs_health))
           .route("/list", get().to(list_all_media))
           .route("/{filename}", get().to(get_image)),
+      )
+      .service(
+        scope("/file")
+          .wrap(rate_limit.image())
+          .route("", post().to(upload_file))
+          .route("/list", get().to(list_files))
+          .route("/{public_id}/{filename}", get().to(download_file))
+          .route("/{public_id}", delete().to(delete_file)),
       ),
   );
 }

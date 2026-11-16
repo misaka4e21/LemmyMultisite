@@ -112,6 +112,12 @@ unchecked_time_subtraction = "deny"
 unsafe_code = "forbid"
 
 [workspace.dependencies]
+aws-sdk-s3 = { version = "=1.49.0", default-features = false, features = [
+  "rt-tokio",
+  "rustls",
+] }
+aws-smithy-types = "=1.5.0"
+mime = "0.3.17"
 lemmy_api = { version = "=1.0.0-beta.3", path = "./crates/api/api" }
 lemmy_api_crud = { version = "=1.0.0-beta.3", path = "./crates/api/api_crud" }
 lemmy_api_routes = { version = "=1.0.0-beta.3", path = "./crates/api/routes" }
@@ -156,6 +162,7 @@ activitypub_federation = { version = "0.7.0-beta.14", default-features = false, 
 ] }
 diesel = { version = "2.3.14", features = [
   "64-column-tables",
+  "128-column-tables",
   "chrono",
   "postgres",
   "serde_json",

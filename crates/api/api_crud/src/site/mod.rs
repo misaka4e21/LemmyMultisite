@@ -5,6 +5,25 @@ pub mod create;
 pub mod read;
 pub mod update;
 
+/// Validate optional per-site generic file upload policy values.
+pub fn file_upload_policy_check(
+  max_size_bytes: Option<i64>,
+  allowed_mime_types: Option<&[String]>,
+) -> LemmyResult<()> {
+  if max_size_bytes.is_some_and(|size| size <= 0) {
+    return Err(LemmyErrorType::InvalidFileUploadPolicy.into());
+  }
+  if allowed_mime_types.is_some_and(|types| {
+    types.iter().any(|value| match value.parse::<mime::Mime>() {
+      Ok(parsed) => value != parsed.essence_str() || value.contains('*'),
+      Err(_) => true,
+    })
+  }) {
+    return Err(LemmyErrorType::InvalidFileUploadPolicy.into());
+  }
+  Ok(())
+}
+
 /// Checks whether the default post listing type is valid for a site.
 pub fn site_default_post_listing_type_check(
   default_post_listing_type: &Option<ListingType>,

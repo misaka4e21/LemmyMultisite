@@ -133,6 +133,9 @@ pub struct LocalSite {
   pub smtp_connection: Option<String>,
   /// Site-specific sender address. Falls back to the installation setting.
   pub smtp_from_address: Option<String>,
+  pub file_upload_disabled: bool,
+  pub file_max_upload_size_bytes: i64,
+  pub file_allowed_mime_types: Vec<String>,
 }
 
 #[derive(Clone, derive_new::new)]
@@ -146,6 +149,12 @@ pub struct LocalSiteInsertForm {
   pub smtp_connection: Option<String>,
   #[new(default)]
   pub smtp_from_address: Option<String>,
+  #[new(default)]
+  pub file_upload_disabled: Option<bool>,
+  #[new(default)]
+  pub file_max_upload_size_bytes: Option<i64>,
+  #[new(default)]
+  pub file_allowed_mime_types: Option<Vec<String>>,
   #[new(default)]
   pub site_setup: Option<bool>,
   #[new(default)]
@@ -264,4 +273,7 @@ pub struct LocalSiteUpdateForm {
   pub max_invites_per_user_allowed: Option<i32>,
   pub smtp_connection: Option<Option<String>>,
   pub smtp_from_address: Option<Option<String>>,
+  pub file_upload_disabled: Option<bool>,
+  pub file_max_upload_size_bytes: Option<i64>,
+  pub file_allowed_mime_types: Option<Vec<String>>,
 }

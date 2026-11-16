@@ -1,5 +1,7 @@
 use super::{not_zero, read::invalidate_site_response};
-use crate::site::{application_question_check, site_default_post_listing_type_check};
+use crate::site::{
+  application_question_check, file_upload_policy_check, site_default_post_listing_type_check,
+};
 use activitypub_federation::{config::Data, http_signatures::generate_actor_keypair};
 use actix_web::web::Json;
 use chrono::Utc;
@@ -135,6 +137,9 @@ pub async fn create_site(
     image_max_upload_size: data.image_max_upload_size,
     image_allow_video_uploads: data.image_allow_video_uploads,
     image_upload_disabled: data.image_upload_disabled,
+    file_upload_disabled: data.file_upload_disabled,
+    file_max_upload_size_bytes: data.file_max_upload_size_bytes,
+    file_allowed_mime_types: data.file_allowed_mime_types.clone(),
     max_invites_per_user_allowed: data.max_invites_per_user_allowed,
   };
 
@@ -182,6 +187,10 @@ pub async fn create_site(
 }
 
 fn validate_create_payload(local_site: &LocalSite, create_site: &CreateSite) -> LemmyResult<()> {
+  file_upload_policy_check(
+    create_site.file_max_upload_size_bytes,
+    create_site.file_allowed_mime_types.as_deref(),
+  )?;
   // Make sure the site hasn't already been set up...
   if local_site.site_setup {
     return Err(LemmyErrorType::AlreadyExists.into());

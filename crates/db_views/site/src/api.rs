@@ -175,6 +175,9 @@ pub struct CreateSite {
   pub image_max_upload_size: Option<i32>,
   pub image_allow_video_uploads: Option<bool>,
   pub image_upload_disabled: Option<bool>,
+  pub file_upload_disabled: Option<bool>,
+  pub file_max_upload_size_bytes: Option<i64>,
+  pub file_allowed_mime_types: Option<Vec<String>>,
   pub max_invites_per_user_allowed: Option<i32>,
 }
 
@@ -315,6 +318,9 @@ pub struct EditSite {
   pub image_max_upload_size: Option<i32>,
   pub image_allow_video_uploads: Option<bool>,
   pub image_upload_disabled: Option<bool>,
+  pub file_upload_disabled: Option<bool>,
+  pub file_max_upload_size_bytes: Option<i64>,
+  pub file_allowed_mime_types: Option<Vec<String>>,
   pub max_invites_per_user_allowed: Option<i32>,
 }
 
@@ -829,6 +835,24 @@ impl Default for SuccessResponse {
   fn default() -> Self {
     SuccessResponse { success: true }
   }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-rs", ts(export))]
+pub struct FileUploadResponse {
+  pub public_id: String,
+  pub url: String,
+  pub filename: String,
+  pub content_type: String,
+  pub size_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-rs", ts(export))]
+pub struct FileListResponse {
+  pub files: Vec<FileUploadResponse>,
 }
 
 /// Contains the amount of unread items of various types. For normal users this means the number of

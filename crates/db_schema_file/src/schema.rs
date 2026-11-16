@@ -487,6 +487,32 @@ diesel::table! {
         removed_at -> Nullable<Timestamptz>,
         smtp_connection -> Nullable<Text>,
         smtp_from_address -> Nullable<Text>,
+        file_upload_disabled -> Bool,
+        file_max_upload_size_bytes -> Int8,
+        file_allowed_mime_types -> Array<Text>,
+    }
+}
+
+diesel::table! {
+    file_object (id) {
+        id -> Int4,
+        content_hash -> Text,
+        storage_key -> Text,
+        size_bytes -> Int8,
+        content_type -> Text,
+        published_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    file_reference (id) {
+        id -> Int4,
+        public_id -> Uuid,
+        local_site_id -> Int4,
+        file_id -> Int4,
+        owner_person_id -> Int4,
+        original_filename -> Text,
+        published_at -> Timestamptz,
     }
 }
 
@@ -1220,6 +1246,9 @@ diesel::joinable!(local_site -> multi_community (suggested_multi_community_id));
 diesel::joinable!(local_site -> person (system_account));
 diesel::joinable!(local_site -> site (site_id));
 diesel::joinable!(local_site_rate_limit -> local_site (local_site_id));
+diesel::joinable!(file_reference -> file_object (file_id));
+diesel::joinable!(file_reference -> local_site (local_site_id));
+diesel::joinable!(file_reference -> person (owner_person_id));
 diesel::joinable!(local_user -> local_site (local_site_id));
 diesel::joinable!(local_user -> person (person_id));
 diesel::joinable!(local_user_invite -> local_user (local_user_id));
@@ -1306,6 +1335,8 @@ diesel::allow_tables_to_appear_in_same_query!(
   internal_activity_delivery,
   language,
   local_site,
+  file_object,
+  file_reference,
   local_site_rate_limit,
   local_user,
   local_user_invite,

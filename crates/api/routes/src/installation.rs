@@ -2,6 +2,7 @@ use actix_web::web::{Data, Json, Path};
 use lemmy_api_utils::{
   context::LemmyContext,
   installation_admin::{InstallationAdminAuth, InstallationAdminClaims},
+  utils::local_site_rate_limit_to_rate_limit_config,
 };
 use lemmy_db_schema::source::installation_admin::InstallationAdmin;
 use lemmy_db_schema_file::newtypes::LocalSiteId;
@@ -86,6 +87,12 @@ pub async fn installation_create_site(
     },
   )
   .await?;
+  context
+    .rate_limit_cell()
+    .set_config_for_site(
+      view.local_site.id,
+      local_site_rate_limit_to_rate_limit_config(&view.local_site_rate_limit),
+    );
   Ok(Json(view))
 }
 

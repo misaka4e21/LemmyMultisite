@@ -22,6 +22,14 @@ full = []
 ts-rs = ["dep:ts-rs"]
 
 [dependencies]
+aws-sdk-s3.workspace = true
+aws-smithy-types.workspace = true
+hex = "0.4.3"
+infer = "0.22.0"
+mime.workspace = true
+tempfile = "3.27.0"
+tokio-util = "0.7.20"
+uuid = { workspace = true, features = ["v4"] }
 lemmy_db_views_community = { workspace = true, features = ["full"] }
 lemmy_db_views_post = { workspace = true, features = ["full"] }
 lemmy_db_views_local_image = { workspace = true, features = ["full"] }

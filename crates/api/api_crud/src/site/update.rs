@@ -1,5 +1,7 @@
 use super::{not_zero, read::invalidate_site_response};
-use crate::site::{application_question_check, site_default_post_listing_type_check};
+use crate::site::{
+  application_question_check, file_upload_policy_check, site_default_post_listing_type_check,
+};
 use activitypub_federation::config::Data;
 use actix_web::web::Json;
 use chrono::Utc;
@@ -141,6 +143,9 @@ pub async fn edit_site(
     image_max_upload_size: data.image_max_upload_size,
     image_allow_video_uploads: data.image_allow_video_uploads,
     image_upload_disabled: data.image_upload_disabled,
+    file_upload_disabled: data.file_upload_disabled,
+    file_max_upload_size_bytes: data.file_max_upload_size_bytes,
+    file_allowed_mime_types: data.file_allowed_mime_types.clone(),
     max_invites_per_user_allowed: data.max_invites_per_user_allowed,
   };
 
@@ -223,6 +228,10 @@ pub async fn edit_site(
 }
 
 fn validate_update_payload(local_site: &LocalSite, edit_site: &EditSite) -> LemmyResult<()> {
+  file_upload_policy_check(
+    edit_site.file_max_upload_size_bytes,
+    edit_site.file_allowed_mime_types.as_deref(),
+  )?;
   // Check that the slur regex compiles, and return the regex if valid...
   // Prioritize using new slur regex from the request; if not provided, use the existing regex.
   let slur_regex = build_and_check_regex(

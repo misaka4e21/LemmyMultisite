@@ -30,6 +30,12 @@ services:
     environment:
       - RUST_LOG=warn,extism=info,lemmy_server=debug,lemmy_api=debug,lemmy_api_common=debug,lemmy_api_crud=debug,lemmy_apub=debug,lemmy_db_schema=debug,lemmy_db_views=debug,lemmy_routes=debug,lemmy_utils=debug,lemmy_websocket=debug,lemmy_diesel_utils=debug
       - LEMMY_DISABLE_ACTIVITY_SENDING=true
+      - LEMMY_S3_ENDPOINT=${S3_ENDPOINT:-http://rustfs:9000}
+      - LEMMY_S3_BUCKET=${S3_FILE_BUCKET:-lemmy-files}
+      - LEMMY_S3_REGION=${S3_REGION:-us-east-1}
+      - LEMMY_S3_ACCESS_KEY=${S3_ACCESS_KEY:-lemmy-rustfs}
+      - LEMMY_S3_SECRET_KEY=${S3_SECRET_KEY:-lemmy-rustfs-secret}
+      - LEMMY_S3_USE_PATH_STYLE=${S3_USE_PATH_STYLE:-true}
     volumes:
       - ./lemmy.hjson:/config/config.hjson:Z
       - ./plugins:/plugins:Z
@@ -64,6 +70,8 @@ services:
 
   pictrs:
     image: asonix/pictrs:0.5
+    ports:
+      - "127.0.0.1:${PICTRS_HOST_PORT:-8080}:8080"
     # this needs to match the pictrs url in lemmy.hjson
     hostname: pictrs
     # we can set options to pictrs like this, here we set max. image size and forced format for conversion
@@ -90,7 +98,7 @@ services:
       - PICTRS__MEDIA__GIF__MAX_FRAME_COUNT=400
     user: 991:991
     volumes:
-      - ./volumes/pictrs:/mnt:Z
+      - ${PICTRS_DATA_DIR:-./volumes/pictrs}:/mnt:Z
     depends_on:
       rustfs-init:
         condition: service_completed_successfully
@@ -111,10 +119,10 @@ services:
       RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-lemmy-rustfs}
       RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-lemmy-rustfs-secret}
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:${RUSTFS_HOST_PORT:-9000}:9000"
+      - "127.0.0.1:${RUSTFS_CONSOLE_HOST_PORT:-9001}:9001"
     volumes:
-      - ./volumes/rustfs:/data
+      - ${RUSTFS_DATA_DIR:-./volumes/rustfs}:/data
     restart: unless-stopped
     logging: *default-logging
 
@@ -126,6 +134,7 @@ services:
       AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://rustfs:9000}
       S3_BUCKET: ${S3_BUCKET:-lemmy-media}
+      S3_FILE_BUCKET: ${S3_FILE_BUCKET:-lemmy-files}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -135,6 +144,16 @@ services:
           i=$$((i + 1))
           if [ "$$i" -ge 60 ]; then
             echo "timed out waiting for $${S3_ENDPOINT} and bucket $${S3_BUCKET}" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        i=0
+        until aws --endpoint-url "$${S3_ENDPOINT}" s3api create-bucket --bucket "$${S3_FILE_BUCKET}" >/dev/null 2>&1 \
+          || aws --endpoint-url "$${S3_ENDPOINT}" s3api head-bucket --bucket "$${S3_FILE_BUCKET}" >/dev/null 2>&1; do
+          i=$$((i + 1))
+          if [ "$${i}" -ge 60 ]; then
+            echo "timed out waiting for $${S3_ENDPOINT} and bucket $${S3_FILE_BUCKET}" >&2
             exit 1
           fi
           sleep 1

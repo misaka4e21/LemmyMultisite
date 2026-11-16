@@ -20,6 +20,21 @@
     # Set a custom pictrs API key. ( Required for deleting images )
     api_key: "string"
   }
+  # Optional S3-compatible storage for generic file uploads. Omit this block or configure all
+  # fields before enabling uploads. Environment variables named LEMMY_S3_* override these values.
+  s3: {
+    # S3-compatible API endpoint. LEMMY_S3_ENDPOINT
+    endpoint: "http://localhost:9000"
+    # Dedicated document bucket. LEMMY_S3_BUCKET
+    bucket: "lemmy-files"
+    # SigV4 region. LEMMY_S3_REGION
+    region: "us-east-1"
+    # Static credentials. Replace these placeholders. LEMMY_S3_ACCESS_KEY / LEMMY_S3_SECRET_KEY
+    access_key: "replace-me"
+    secret_key: "replace-me"
+    # Path-style bucket addressing. LEMMY_S3_USE_PATH_STYLE
+    use_path_style: true
+  }
   # Email sending configuration. All options except login/password are mandatory
   email: {
     # https://docs.rs/lettre/0.11.14/lettre/transport/smtp/struct.AsyncSmtpTransport.html#method.from_url

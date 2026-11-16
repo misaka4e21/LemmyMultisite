@@ -38,6 +38,7 @@ ts-rs = ["dep:ts-rs"]
 
 [dependencies]
 chrono = { workspace = true }
+uuid = { workspace = true }
 serde = { workspace = true }
 serde_with = { workspace = true }
 url = { workspace = true }

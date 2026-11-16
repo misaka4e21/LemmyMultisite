@@ -3,6 +3,7 @@
 #
 # Everything lives under a temporary directory and is removed on exit. Useful for
 # manually exercising the API without touching the development database.
+# Set LEMMY_TEST_START_MEDIA=1 to also start an isolated RustFS and pict-rs stack.
 
 set -Eeuo pipefail
 
@@ -16,6 +17,10 @@ LEMMY_TEST_PORT="${LEMMY_TEST_PORT:-8536}"
 LEMMY_TEST_ADMIN_USERNAME="${LEMMY_TEST_ADMIN_USERNAME:-admin}"
 LEMMY_TEST_ADMIN_PASSWORD="${LEMMY_TEST_ADMIN_PASSWORD:-lemmy-test-password}"
 LEMMY_TEST_ADMIN_EMAIL="${LEMMY_TEST_ADMIN_EMAIL:-admin@example.com}"
+LEMMY_TEST_INSTALLATION_ADMIN_USERNAME="${LEMMY_TEST_INSTALLATION_ADMIN_USERNAME:-lemmy-test-installation-admin}"
+LEMMY_TEST_INSTALLATION_ADMIN_PASSWORD="${LEMMY_TEST_INSTALLATION_ADMIN_PASSWORD:-lemmy-test-installation-password}"
+LEMMY_TEST_START_MEDIA="${LEMMY_TEST_START_MEDIA:-0}"
+LEMMY_TEST_DISABLE_S3="${LEMMY_TEST_DISABLE_S3:-0}"
 
 pick_free_port() {
   if command -v python3 >/dev/null 2>&1; then
@@ -39,6 +44,21 @@ for command in initdb pg_ctl createdb cargo curl; do
   fi
 done
 
+if [[ "$LEMMY_TEST_START_MEDIA" == 1 ]]; then
+  if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    echo "error: LEMMY_TEST_START_MEDIA=1 requires Docker Compose" >&2
+    exit 1
+  fi
+elif [[ "$LEMMY_TEST_START_MEDIA" != 0 ]]; then
+  echo "error: LEMMY_TEST_START_MEDIA must be 0 or 1" >&2
+  exit 1
+fi
+
+if [[ "$LEMMY_TEST_DISABLE_S3" != 0 && "$LEMMY_TEST_DISABLE_S3" != 1 ]]; then
+  echo "error: LEMMY_TEST_DISABLE_S3 must be 0 or 1" >&2
+  exit 1
+fi
+
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lemmy-test.XXXXXX")"
 PGDATA="$TMP_DIR/pgdata"
 PGSOCKET="$TMP_DIR/pgsocket"
@@ -47,6 +67,50 @@ CONFIG_FILE="$TMP_DIR/lemmy-test.hjson"
 PGPORT="${LEMMY_TEST_PG_PORT:-$(pick_free_port)}"
 DATABASE_NAME="lemmy_test"
 DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/$DATABASE_NAME"
+COMPOSE_PROJECT="lemmy-dev-media-$$"
+MEDIA_STARTED=0
+
+PICTRS_CONFIG="null"
+S3_CONFIG="null"
+if [[ "$LEMMY_TEST_START_MEDIA" == 1 ]]; then
+  LEMMY_TEST_RUSTFS_PORT="${LEMMY_TEST_RUSTFS_PORT:-$(pick_free_port)}"
+  LEMMY_TEST_PICTRS_PORT="${LEMMY_TEST_PICTRS_PORT:-$(pick_free_port)}"
+  LEMMY_TEST_S3_ACCESS_KEY="${LEMMY_TEST_S3_ACCESS_KEY:-lemmy-rustfs}"
+  LEMMY_TEST_S3_SECRET_KEY="${LEMMY_TEST_S3_SECRET_KEY:-lemmy-rustfs-secret}"
+  LEMMY_TEST_S3_BUCKET="${LEMMY_TEST_S3_BUCKET:-lemmy-files}"
+  LEMMY_TEST_S3_REGION="${LEMMY_TEST_S3_REGION:-us-east-1}"
+  export RUSTFS_HOST_PORT="$LEMMY_TEST_RUSTFS_PORT"
+  export PICTRS_HOST_PORT="$LEMMY_TEST_PICTRS_PORT"
+  export S3_ACCESS_KEY="$LEMMY_TEST_S3_ACCESS_KEY"
+  export S3_SECRET_KEY="$LEMMY_TEST_S3_SECRET_KEY"
+  export S3_ENDPOINT="http://rustfs:9000"
+  export S3_FILE_BUCKET="$LEMMY_TEST_S3_BUCKET"
+  export S3_REGION="$LEMMY_TEST_S3_REGION"
+  PICTRS_CONFIG="{
+    url: \"http://127.0.0.1:$LEMMY_TEST_PICTRS_PORT/\"
+    api_key: \"my-pictrs-key\"
+  }"
+  if [[ "$LEMMY_TEST_DISABLE_S3" == 0 ]]; then
+    S3_CONFIG="{
+      endpoint: \"http://127.0.0.1:$LEMMY_TEST_RUSTFS_PORT\"
+      bucket: \"$LEMMY_TEST_S3_BUCKET\"
+      region: \"$LEMMY_TEST_S3_REGION\"
+      access_key: \"$LEMMY_TEST_S3_ACCESS_KEY\"
+      secret_key: \"$LEMMY_TEST_S3_SECRET_KEY\"
+      use_path_style: true
+    }"
+  else
+    S3_CONFIG="null"
+    unset LEMMY_S3_ENDPOINT LEMMY_S3_BUCKET LEMMY_S3_REGION
+    unset LEMMY_S3_ACCESS_KEY LEMMY_S3_SECRET_KEY LEMMY_S3_USE_PATH_STYLE
+  fi
+fi
+
+if [[ "$LEMMY_TEST_DISABLE_S3" == 1 ]]; then
+  S3_CONFIG="null"
+  unset LEMMY_S3_ENDPOINT LEMMY_S3_BUCKET LEMMY_S3_REGION
+  unset LEMMY_S3_ACCESS_KEY LEMMY_S3_SECRET_KEY LEMMY_S3_USE_PATH_STYLE
+fi
 
 SERVER_PID=""
 PG_STARTED=0
@@ -64,6 +128,11 @@ cleanup() {
     pg_ctl -D "$PGDATA" -m fast -w stop >/dev/null 2>&1 || true
   fi
 
+  if [[ "$MEDIA_STARTED" == 1 ]]; then
+    docker compose --project-name "$COMPOSE_PROJECT" --project-directory "$REPO_ROOT/docker" \
+      down --remove-orphans >/dev/null 2>&1 || true
+  fi
+
   if [[ "${LEMMY_TEST_KEEP_TMP:-0}" == 1 ]]; then
     echo "Temporary files kept at: $TMP_DIR"
   else
@@ -75,6 +144,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "$PGSOCKET"
+
+if [[ "$LEMMY_TEST_START_MEDIA" == 1 ]]; then
+  export RUSTFS_DATA_DIR="$TMP_DIR/rustfs"
+  export PICTRS_DATA_DIR="$TMP_DIR/pictrs"
+  mkdir -p "$RUSTFS_DATA_DIR" "$PICTRS_DATA_DIR"
+  chmod 777 "$RUSTFS_DATA_DIR" "$PICTRS_DATA_DIR"
+  echo "Starting isolated RustFS and pict-rs services"
+  MEDIA_STARTED=1
+  docker compose --project-name "$COMPOSE_PROJECT" --project-directory "$REPO_ROOT/docker" \
+    up --detach --wait rustfs pictrs
+fi
 
 echo "Initializing temporary PostgreSQL in $TMP_DIR"
 initdb \
@@ -111,7 +191,8 @@ cat >"$CONFIG_FILE" <<EOF
   bind: "127.0.0.1"
   port: $LEMMY_TEST_PORT
   tls_enabled: false
-  pictrs: null
+  pictrs: $PICTRS_CONFIG
+  s3: $S3_CONFIG
 }
 EOF
 
@@ -129,6 +210,8 @@ fi
 
 export LEMMY_CONFIG_LOCATION="$CONFIG_FILE"
 export LEMMY_DATABASE_URL="$DATABASE_URL"
+export LEMMY_INSTALLATION_ADMIN_USERNAME="$LEMMY_TEST_INSTALLATION_ADMIN_USERNAME"
+export LEMMY_INSTALLATION_ADMIN_PASSWORD="$LEMMY_TEST_INSTALLATION_ADMIN_PASSWORD"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "Starting lemmy_server on http://$LEMMY_TEST_HOSTNAME:$LEMMY_TEST_PORT"
@@ -155,12 +238,20 @@ for _ in $(seq 1 180); do
 done
 
 if [[ "$READY" == 1 ]]; then
+  MEDIA_STATUS="disabled"
+  if [[ "$LEMMY_TEST_START_MEDIA" == 1 ]]; then
+    MEDIA_STATUS="RustFS http://127.0.0.1:$LEMMY_TEST_RUSTFS_PORT, pict-rs http://127.0.0.1:$LEMMY_TEST_PICTRS_PORT"
+    if [[ "$LEMMY_TEST_DISABLE_S3" == 1 ]]; then
+      MEDIA_STATUS="$MEDIA_STATUS (Lemmy document S3 disabled)"
+    fi
+  fi
   cat <<EOF
 
 Test server is ready:
   URL:   http://$LEMMY_TEST_HOSTNAME:$LEMMY_TEST_PORT
   Admin: $LEMMY_TEST_ADMIN_USERNAME / $LEMMY_TEST_ADMIN_PASSWORD
   DB:    $DATABASE_URL
+  Media: $MEDIA_STATUS
 
 Press Ctrl-C to stop the server and remove the temporary database.
 Set LEMMY_TEST_KEEP_TMP=1 to keep the temporary files for debugging.

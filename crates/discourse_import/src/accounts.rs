@@ -477,7 +477,7 @@ pub async fn import_accounts(
       if !user.active || !user.approved {
         report.inactive_or_unapproved_users_count += 1;
         report.warnings.push(format!(
-          "user {} was inactive or unapproved in Discourse; Lemmy has no equivalent login state",
+          "user {} was inactive or unapproved in Discourse; active and approved flags were mapped to the available email and application gates, whose enforcement depends on target-site settings",
           user.id
         ));
       }
@@ -630,8 +630,8 @@ pub async fn import_accounts(
         password_verifier,
       );
       local_user_form.email = email;
-      local_user_form.email_verified = Some(local_user_form.email.is_some());
-      local_user_form.accepted_application = Some(true);
+      local_user_form.email_verified = Some(local_user_form.email.is_some() && user.active);
+      local_user_form.accepted_application = Some(user.approved);
       local_user_form.private_messages_enabled = Some(user.allow_private_messages.unwrap_or(true));
       local_user_form.open_links_in_new_tab = Some(user.external_links_in_new_tab.unwrap_or(false));
       create_imported_account(

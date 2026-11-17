@@ -51,6 +51,10 @@ The importer SHALL migrate every source user to a site-owned local account, pres
 - **WHEN** a source user has `allow_private_messages` or `external_links_in_new_tab` preferences
 - **THEN** the importer maps them to Lemmy's corresponding private-message and open-links preferences
 
+#### Scenario: Preserve source activation and approval flags
+- **WHEN** a source user has activation or approval state
+- **THEN** the importer maps `active` to email verification and `approved` to Lemmy's application acceptance state
+
 #### Scenario: Preserve profile fields without target equivalents
 - **WHEN** a source user has a location or website
 - **THEN** the importer retains those values in the imported biography with clear labels

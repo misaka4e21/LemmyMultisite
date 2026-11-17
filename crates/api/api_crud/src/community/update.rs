@@ -26,7 +26,7 @@ use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
   utils::{
     slurs::{check_slurs, check_slurs_opt},
-    validation::{is_valid_body_field, is_valid_display_name},
+    validation::{is_valid_body_field, is_valid_display_name, is_valid_local_actor_name},
   },
 };
 
@@ -67,12 +67,31 @@ pub async fn edit_community(
   }
 
   let summary = diesel_string_update(data.summary.as_deref());
+  if let Some(name) = &data.name {
+    is_valid_local_actor_name(name, local_site.federation_enabled)?;
+    check_slurs(name, &slur_regex)?;
+  }
 
   let old_community = Community::read(&mut context.pool(), data.community_id).await?;
 
   // Verify its a mod (only mods can edit it)
   check_community_global_mod_action(&local_user_view, &old_community, false, &mut context.pool())
     .await?;
+
+  if old_community.origin_local_site_id != Some(local_site.id) {
+    return Err(LemmyErrorType::NotFound.into());
+  }
+  if let Some(name) = &data.name
+    && name != &old_community.name
+  {
+    Community::check_name_available(
+      &mut context.pool(),
+      local_site.id,
+      name,
+      old_community.id,
+    )
+    .await?;
+  }
 
   let community_id = data.community_id;
   if let Some(languages) = data.discussion_languages.clone() {
@@ -87,6 +106,7 @@ pub async fn edit_community(
   }
 
   let community_form = CommunityUpdateForm {
+    name: data.name.clone(),
     title,
     sidebar,
     summary,

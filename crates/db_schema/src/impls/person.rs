@@ -2,6 +2,7 @@ use crate::{
   diesel::{BoolExpressionMethods, NullableExpressionMethods, OptionalExtension},
   impls::presence::{default_local_site_id, ensure_person_site},
   source::{
+    local_site::LocalSite,
     media::MediaReference,
     person::{
       Person, PersonActions, PersonBlockForm, PersonFollowerForm, PersonInsertForm, PersonNoteForm,
@@ -22,7 +23,7 @@ use diesel_uplete::{UpleteCount, uplete};
 use lemmy_db_schema_file::{
   InstanceId, PersonId,
   newtypes::{CommunityId, LocalSiteId, LocalUserId},
-  schema::{instance, instance_actions, local_user, person, person_actions},
+  schema::{instance, instance_actions, local_site, local_user, person, person_actions},
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
@@ -56,6 +57,20 @@ impl Crud for Person {
     let conn = &mut get_conn(pool).await?;
     conn
       .transaction::<Self, LemmyError, _>(async |conn| {
+        if form.local.unwrap_or(true)
+          && let Some(local_site_id) = form.origin_local_site_id
+        {
+          LocalSite::lock_actor_name_changes(conn, local_site_id).await?;
+          let federation_enabled = local_site::table
+            .find(local_site_id)
+            .select(local_site::federation_enabled)
+            .first::<bool>(conn)
+            .await?;
+          lemmy_utils::utils::validation::is_valid_local_actor_name(
+            &form.name,
+            federation_enabled,
+          )?;
+        }
         let person = insert_into(person::table)
           .values(form)
           .get_result::<Self>(conn)
@@ -82,6 +97,22 @@ impl Crud for Person {
     let conn = &mut get_conn(pool).await?;
     conn
       .transaction::<Self, LemmyError, _>(async |conn| {
+        if let Some(name) = &form.name {
+          let local_site_id = person::table
+            .find(person_id)
+            .select(person::origin_local_site_id)
+            .first::<Option<LocalSiteId>>(conn)
+            .await?;
+          if let Some(local_site_id) = local_site_id {
+            LocalSite::lock_actor_name_changes(conn, local_site_id).await?;
+            let federation_enabled = local_site::table
+              .find(local_site_id)
+              .select(local_site::federation_enabled)
+              .first::<bool>(conn)
+              .await?;
+            lemmy_utils::utils::validation::is_valid_local_actor_name(name, federation_enabled)?;
+          }
+        }
         let updated = diesel::update(person::table.find(person_id))
           .set(form)
           .get_result::<Self>(conn)
@@ -95,6 +126,20 @@ impl Crud for Person {
 }
 
 impl Person {
+  pub async fn list_names_owned_by_site(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Vec<String>> {
+    let conn = &mut get_conn(pool).await?;
+    person::table
+      .filter(person::origin_local_site_id.eq(Some(local_site_id)))
+      .filter(person::deleted.eq(false))
+      .select(person::name)
+      .load(conn)
+      .await
+      .map_err(Into::into)
+  }
+
   /// Read a non-deleted person only when it is owned by the selected site.
   pub async fn read_owned_by_site(
     pool: &mut DbPool<'_>,
@@ -195,6 +240,25 @@ impl Person {
       person::table
         .filter(lower(person::name).eq(username.to_lowercase()))
         .filter(person::origin_local_site_id.eq(local_site_id)),
+    )))
+    .get_result::<bool>(conn)
+    .await?
+    .then_some(())
+    .ok_or(LemmyErrorType::UsernameAlreadyTaken.into())
+  }
+
+  pub async fn check_username_available(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    username: &str,
+    except_person_id: PersonId,
+  ) -> LemmyResult<()> {
+    let conn = &mut get_conn(pool).await?;
+    select(not(exists(
+      person::table
+        .filter(lower(person::name).eq(username.to_lowercase()))
+        .filter(person::origin_local_site_id.eq(local_site_id))
+        .filter(person::id.ne(except_person_id)),
     )))
     .get_result::<bool>(conn)
     .await?

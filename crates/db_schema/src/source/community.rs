@@ -203,6 +203,7 @@ pub struct CommunityUpsertForm {
 #[cfg_attr(feature = "full", derive(AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = community))]
 pub struct CommunityUpdateForm {
+  pub name: Option<String>,
   pub title: Option<Option<String>>,
   pub sidebar: Option<Option<String>>,
   pub removed: Option<bool>,

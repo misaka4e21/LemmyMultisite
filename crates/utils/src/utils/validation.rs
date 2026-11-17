@@ -50,6 +50,24 @@ pub fn is_valid_actor_name(name: &str) -> LemmyResult<()> {
   }
 }
 
+pub fn is_valid_local_actor_name(name: &str, federation_enabled: bool) -> LemmyResult<()> {
+  if federation_enabled {
+    return is_valid_actor_name(name);
+  }
+
+  #[expect(clippy::expect_used)]
+  static VALID_NON_FEDERATED_ACTOR_NAME_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[\p{Han}a-zA-Z0-9_]+$").expect("compile regex"));
+
+  min_length_check(name, 2, LemmyErrorType::InvalidName)?;
+  max_length_check(name, ACTOR_NAME_MAX_LENGTH, LemmyErrorType::InvalidName)?;
+  if VALID_NON_FEDERATED_ACTOR_NAME_REGEX.is_match(name) {
+    Ok(())
+  } else {
+    Err(LemmyErrorType::InvalidName.into())
+  }
+}
+
 fn has_3_permitted_display_chars(name: &str) -> bool {
   let mut num_non_fdc: i8 = 0;
   for c in name.chars() {
@@ -339,6 +357,7 @@ mod tests {
       check_urls_are_valid,
       is_url_blocked,
       is_valid_actor_name,
+      is_valid_local_actor_name,
       is_valid_bio_field,
       is_valid_display_name,
       is_valid_matrix_id,
@@ -392,6 +411,18 @@ Line3",
       .is_err()
     );
     assert!(is_valid_actor_name("Line1\nLine3",).is_err());
+  }
+
+  #[test]
+  fn test_valid_local_actor_name() {
+    let too_long_name = "中".repeat(21);
+    assert!(is_valid_local_actor_name("中文用户名", false).is_ok());
+    assert!(is_valid_local_actor_name("中文User_12", false).is_ok());
+    assert!(is_valid_local_actor_name("中文-user", false).is_err());
+    assert!(is_valid_local_actor_name("中 文", false).is_err());
+    assert!(is_valid_local_actor_name("中文", true).is_err());
+    assert!(is_valid_local_actor_name("Hello_98", true).is_ok());
+    assert!(is_valid_local_actor_name(&too_long_name, false).is_err());
   }
 
   #[test]

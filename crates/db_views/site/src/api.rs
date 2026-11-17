@@ -523,6 +523,8 @@ pub struct ResendVerificationEmail {
 #[cfg_attr(feature = "ts-rs", ts(optional_fields, export))]
 /// Saves settings for your user.
 pub struct SaveUserSettings {
+  /// Your username.
+  pub username: Option<String>,
   /// Show nsfw posts.
   pub show_nsfw: Option<bool>,
   /// Blur nsfw posts.
@@ -592,6 +594,15 @@ pub struct SaveUserSettings {
   pub hide_posts_with_media: Option<bool>,
   /// Whether to show vote totals given to others.
   pub show_person_votes: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-rs", ts(optional_fields, export))]
+/// Change a local account username as a site administrator.
+pub struct AdminChangeUsername {
+  pub person_id: PersonId,
+  pub username: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]

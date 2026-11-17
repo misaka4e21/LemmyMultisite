@@ -106,6 +106,7 @@ pub struct PersonInsertForm {
 #[cfg_attr(feature = "full", derive(AsChangeset))]
 #[cfg_attr(feature = "full", diesel(table_name = person))]
 pub struct PersonUpdateForm {
+  pub name: Option<String>,
   pub display_name: Option<Option<String>>,
   pub avatar: Option<Option<DbUrl>>,
   pub updated_at: Option<Option<DateTime<Utc>>>,

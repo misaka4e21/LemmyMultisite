@@ -1,5 +1,6 @@
 use activitypub_federation::config::Data;
 use actix_web::web::Json;
+use chrono::Utc;
 use lemmy_api_utils::{
   context::LemmyContext,
   tenant::TenantContext,
@@ -25,9 +26,12 @@ use lemmy_diesel_utils::{
 use lemmy_email::account::send_verification_email;
 use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
-  utils::validation::{
-    check_blocking_keywords_are_valid, is_valid_bio_field, is_valid_display_name,
-    is_valid_matrix_id,
+  utils::{
+    slurs::check_slurs,
+    validation::{
+      check_blocking_keywords_are_valid, is_valid_bio_field, is_valid_display_name,
+      is_valid_local_actor_name, is_valid_matrix_id,
+    },
   },
 };
 use std::ops::Deref;
@@ -56,6 +60,20 @@ pub async fn save_user_settings(
   );
 
   let display_name = diesel_string_update(data.display_name.as_deref().map(str::trim));
+  if let Some(username) = &data.username {
+    is_valid_local_actor_name(username, local_site.federation_enabled)?;
+    check_slurs(username, &slur_regex)?;
+    if username != &local_user_view.person.name {
+      Person::check_username_available(
+        &mut context.pool(),
+        local_site.id,
+        username,
+        local_user_view.person.id,
+      )
+      .await?;
+    }
+  }
+  let name = data.username.clone();
   let matrix_user_id = diesel_string_update(data.matrix_user_id.as_deref());
   let email_deref = data.email.as_deref().map(str::to_lowercase);
   let email = diesel_string_update(email_deref.as_deref());
@@ -119,6 +137,8 @@ pub async fn save_user_settings(
   let default_comment_sort_type = data.default_comment_sort_type;
 
   let person_form = PersonUpdateForm {
+    name,
+    updated_at: data.username.as_ref().map(|_| Some(Utc::now())),
     display_name,
     bio,
     matrix_user_id,
@@ -128,9 +148,10 @@ pub async fn save_user_settings(
 
   // Ignore errors, because 'no fields updated' will return an error.
   // https://github.com/LemmyNet/lemmy/issues/4076
-  Person::update(&mut context.pool(), person_id, &person_form)
-    .await
-    .ok();
+  let person_update = Person::update(&mut context.pool(), person_id, &person_form).await;
+  if data.username.is_some() {
+    person_update?;
+  }
 
   if let Some(discussion_languages) = data.discussion_languages.clone() {
     LocalUserLanguage::update(&mut context.pool(), discussion_languages, local_user_id).await?;

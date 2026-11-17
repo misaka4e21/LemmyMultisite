@@ -89,6 +89,7 @@ use lemmy_api::{
   site::{
     admin_allow_instance::admin_allow_instance,
     admin_block_instance::admin_block_instance,
+    admin_change_username::admin_change_username,
     admin_list_users::admin_list_users,
     federated_instances::get_federated_instances,
     list_all_media::list_all_media,
@@ -471,6 +472,7 @@ pub fn config(cfg: &mut ServiceConfig, rate_limit: &RateLimit) {
           )
           .route("/ban", post().to(ban_from_site))
           .route("/users", get().to(admin_list_users))
+          .route("/username", put().to(admin_change_username))
           .service(
             scope("/instance")
               .route("/block", post().to(admin_block_instance))

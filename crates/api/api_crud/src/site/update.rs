@@ -150,8 +150,7 @@ pub async fn edit_site(
   };
 
   let update_local_site = LocalSite::update(&mut context.pool(), local_site.id, &local_site_form)
-    .await
-    .ok();
+    .await?;
 
   let local_site_rate_limit_form = LocalSiteRateLimitUpdateForm {
     message_max_requests: data.rate_limit_message_max_requests,
@@ -196,19 +195,14 @@ pub async fn edit_site(
 
   let old_require_application =
     local_site.registration_mode == RegistrationMode::RequireApplication;
-  let new_require_application = update_local_site
-    .as_ref()
-    .map(|ols| ols.registration_mode == RegistrationMode::RequireApplication)
-    .unwrap_or(false);
+  let new_require_application =
+    update_local_site.registration_mode == RegistrationMode::RequireApplication;
   if !old_require_application && new_require_application {
     LocalUser::set_all_users_registration_applications_accepted(&mut context.pool(), local_site.id)
       .await?;
   }
 
-  let new_require_email_verification = update_local_site
-    .as_ref()
-    .map(|ols| ols.email_verification_required)
-    .unwrap_or(false);
+  let new_require_email_verification = update_local_site.email_verification_required;
   if !local_site.email_verification_required && new_require_email_verification {
     LocalUser::set_all_users_email_verified(&mut context.pool(), local_site.id).await?;
   }

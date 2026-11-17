@@ -41,7 +41,7 @@ use lemmy_utils::{
   utils::{
     slurs::{check_slurs, check_slurs_opt},
     validation::{
-      is_valid_actor_name,
+      is_valid_local_actor_name,
       is_valid_body_field,
       is_valid_display_name,
       summary_length_check,
@@ -94,7 +94,8 @@ pub async fn create_community(
     check_slurs(summary, &slur_regex)?;
   }
 
-  is_valid_actor_name(&data.name)?;
+  is_valid_local_actor_name(&data.name, local_site.federation_enabled)?;
+  Community::check_new_name_available(&mut context.pool(), local_site.id, &data.name).await?;
 
   // Check for duplicate community with the same name
   let ap_id = Community::generate_local_actor_url(&data.name, &context.protocol_and_hostname())?;

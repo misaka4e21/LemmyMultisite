@@ -131,6 +131,8 @@ pub struct DeleteCommunity {
 /// Edit a community.
 pub struct EditCommunity {
   pub community_id: CommunityId,
+  /// The unique name.
+  pub name: Option<String>,
   /// A longer title.
   pub title: Option<String>,
   /// A sidebar for the community in markdown.

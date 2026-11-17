@@ -3,6 +3,7 @@ use crate::{
   impls::presence::{default_local_site_id, ensure_community_site},
   source::{
     actor_language::CommunityLanguage,
+    local_site::LocalSite,
     community::{
       Community, CommunityActions, CommunityBlockForm, CommunityFollowerForm, CommunityInsertForm,
       CommunityModeratorForm, CommunityPersonBanForm, CommunityUpdateForm, CommunityUpsertForm,
@@ -26,7 +27,7 @@ use lemmy_db_schema_file::{
   PersonId,
   enums::{CommunityFollowerState, CommunityNotificationsMode, CommunityVisibility, ListingType},
   newtypes::{CommunityId, LocalSiteId},
-  schema::{comment, community, community_actions, instance, local_user, post},
+  schema::{comment, community, community_actions, instance, local_site, local_user, post},
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
@@ -49,6 +50,20 @@ impl Crud for Community {
     let conn = &mut get_conn(pool).await?;
     conn
       .transaction::<Self, LemmyError, _>(async |conn| {
+        if form.local.unwrap_or(true)
+          && let Some(local_site_id) = form.origin_local_site_id
+        {
+          LocalSite::lock_actor_name_changes(conn, local_site_id).await?;
+          let federation_enabled = local_site::table
+            .find(local_site_id)
+            .select(local_site::federation_enabled)
+            .first::<bool>(conn)
+            .await?;
+          lemmy_utils::utils::validation::is_valid_local_actor_name(
+            &form.name,
+            federation_enabled,
+          )?;
+        }
         let community_ = insert_into(community::table)
           .values(form)
           .get_result::<Self>(conn)
@@ -81,6 +96,22 @@ impl Crud for Community {
     let conn = &mut get_conn(pool).await?;
     conn
       .transaction::<Self, LemmyError, _>(async |conn| {
+        if let Some(name) = &form.name {
+          let local_site_id = community::table
+            .find(community_id)
+            .select(community::origin_local_site_id)
+            .first::<Option<LocalSiteId>>(conn)
+            .await?;
+          if let Some(local_site_id) = local_site_id {
+            LocalSite::lock_actor_name_changes(conn, local_site_id).await?;
+            let federation_enabled = local_site::table
+              .find(local_site_id)
+              .select(local_site::federation_enabled)
+              .first::<bool>(conn)
+              .await?;
+            lemmy_utils::utils::validation::is_valid_local_actor_name(name, federation_enabled)?;
+          }
+        }
         let updated = diesel::update(community::table.find(community_id))
           .set(form)
           .get_result::<Self>(conn)
@@ -90,6 +121,58 @@ impl Crud for Community {
         Ok(updated)
       })
       .await
+  }
+}
+
+impl Community {
+  pub async fn check_new_name_available(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    name: &str,
+  ) -> LemmyResult<()> {
+    let conn = &mut get_conn(pool).await?;
+    select(not(exists(
+      community::table
+        .filter(lower(community::name).eq(name.to_lowercase()))
+        .filter(community::origin_local_site_id.eq(Some(local_site_id))),
+    )))
+    .get_result::<bool>(conn)
+    .await?
+    .then_some(())
+    .ok_or(LemmyErrorType::AlreadyExists.into())
+  }
+
+  pub async fn list_names_owned_by_site(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Vec<String>> {
+    let conn = &mut get_conn(pool).await?;
+    community::table
+      .filter(community::origin_local_site_id.eq(Some(local_site_id)))
+      .filter(community::deleted.eq(false))
+      .select(community::name)
+      .load(conn)
+      .await
+      .map_err(Into::into)
+  }
+
+  pub async fn check_name_available(
+    pool: &mut DbPool<'_>,
+    local_site_id: LocalSiteId,
+    name: &str,
+    except_community_id: CommunityId,
+  ) -> LemmyResult<()> {
+    let conn = &mut get_conn(pool).await?;
+    select(not(exists(
+      community::table
+        .filter(lower(community::name).eq(name.to_lowercase()))
+        .filter(community::origin_local_site_id.eq(local_site_id))
+        .filter(community::id.ne(except_community_id)),
+    )))
+    .get_result::<bool>(conn)
+    .await?
+    .then_some(())
+    .ok_or(LemmyErrorType::AlreadyExists.into())
   }
 }
 

@@ -63,7 +63,7 @@ use lemmy_utils::{
   spawn_try_task,
   utils::{
     slurs::{check_slurs, check_slurs_opt},
-    validation::is_valid_actor_name,
+    validation::is_valid_local_actor_name,
   },
 };
 use regex::Regex;
@@ -566,7 +566,7 @@ async fn create_person(
   conn: &mut AsyncPgConnection,
 ) -> Result<Person, LemmyError> {
   let actor_keypair = generate_actor_keypair()?;
-  is_valid_actor_name(&username)?;
+  is_valid_local_actor_name(&username, site_view.local_site.federation_enabled)?;
   let ap_id = Person::generate_local_actor_url(&username, &context.protocol_and_hostname())?;
 
   // Register the new person

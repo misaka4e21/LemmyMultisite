@@ -64,7 +64,7 @@ pub struct AccountImportReport {
   pub resumed_user_count: u64,
   pub skipped_user_count: u64,
   pub users_without_password_count: u64,
-  pub inactive_users_count: u64,
+  pub inactive_or_unapproved_users_count: u64,
   pub suspended_users_count: u64,
   pub silenced_users_count: u64,
   pub staged_users_count: u64,
@@ -412,7 +412,7 @@ pub async fn import_accounts(
     resumed_user_count: 0,
     skipped_user_count: 0,
     users_without_password_count: 0,
-    inactive_users_count: 0,
+    inactive_or_unapproved_users_count: 0,
     suspended_users_count: 0,
     silenced_users_count: 0,
     staged_users_count: 0,
@@ -451,7 +451,7 @@ pub async fn import_accounts(
       last_id = user.id;
       report.source_user_count += 1;
       if !user.active || !user.approved {
-        report.inactive_users_count += 1;
+        report.inactive_or_unapproved_users_count += 1;
         report.conflicts.push(format!(
           "user {} was inactive or unapproved in Discourse; Lemmy has no equivalent login state",
           user.id

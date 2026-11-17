@@ -1,0 +1,41 @@
+[package]
+name = "lemmy_discourse_import"
+publish = false
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lemmy-discourse-import"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+activitypub_federation = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+flate2 = { workspace = true }
+hex = { workspace = true }
+lemmy_db_schema = { workspace = true, features = ["full"] }
+lemmy_db_schema_file = { workspace = true }
+lemmy_diesel_utils = { workspace = true }
+lemmy_utils = { workspace = true, features = ["full"] }
+percent-encoding = "2.3.2"
+reqwest = { workspace = true, features = ["multipart", "query"] }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = "0.11.0"
+sha2 = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }

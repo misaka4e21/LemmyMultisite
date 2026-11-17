@@ -3,14 +3,8 @@ use crate::source::{
   local_user::{LocalUser, LocalUserInsertForm, LocalUserUpdateForm},
   site::Site,
 };
-use bcrypt::{DEFAULT_COST, hash};
 use diesel::{
-  CombineDsl,
-  ExpressionMethods,
-  JoinOnDsl,
-  NullableExpressionMethods,
-  OptionalExtension,
-  QueryDsl,
+  CombineDsl, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, OptionalExtension, QueryDsl,
   dsl::{IntervalDsl, insert_into, not},
   result::Error,
 };
@@ -36,14 +30,16 @@ impl LocalUser {
     form: &LocalUserInsertForm,
     languages: Vec<LanguageId>,
   ) -> LemmyResult<LocalUser> {
-    let conn = &mut get_conn(pool).await?;
     let mut form_with_encrypted_password = form.clone();
 
     if let Some(password_encrypted) = &form.password_encrypted {
-      let password_hash = hash(password_encrypted, DEFAULT_COST)?;
+      let password = password_encrypted.clone();
+      let password_hash =
+        tokio::task::spawn_blocking(move || super::password::hash_password(&password)).await??;
       form_with_encrypted_password.password_encrypted = Some(password_hash);
     }
 
+    let conn = &mut get_conn(pool).await?;
     let local_user_ = insert_into(local_user::table)
       .values(form_with_encrypted_password)
       .get_result::<Self>(conn)
@@ -51,6 +47,48 @@ impl LocalUser {
 
     LocalUserLanguage::update(pool, languages, local_user_.id).await?;
 
+    Ok(local_user_)
+  }
+
+  /// Insert a pre-validated encoded verifier without treating it as plaintext.
+  /// This is intended for offline account migration. New and reset passwords must use `create`.
+  pub async fn create_with_password_verifier(
+    pool: &mut DbPool<'_>,
+    form: &LocalUserInsertForm,
+    languages: Vec<LanguageId>,
+  ) -> LemmyResult<LocalUser> {
+    if !form
+      .password_encrypted
+      .as_deref()
+      .is_some_and(super::password::is_supported_password_verifier)
+    {
+      return Err(LemmyErrorType::InvalidName.into());
+    }
+    let conn = &mut get_conn(pool).await?;
+    let local_user_ = insert_into(local_user::table)
+      .values(form)
+      .get_result::<Self>(conn)
+      .await?;
+    LocalUserLanguage::update(pool, languages, local_user_.id).await?;
+    Ok(local_user_)
+  }
+
+  /// Insert a migrated local account whose source credential is missing or expired.
+  /// `None` disables password login until the user completes account recovery.
+  pub async fn create_without_password_verifier(
+    pool: &mut DbPool<'_>,
+    form: &LocalUserInsertForm,
+    languages: Vec<LanguageId>,
+  ) -> LemmyResult<LocalUser> {
+    if form.password_encrypted.is_some() {
+      return Err(LemmyErrorType::InvalidName.into());
+    }
+    let conn = &mut get_conn(pool).await?;
+    let local_user_ = insert_into(local_user::table)
+      .values(form)
+      .get_result::<Self>(conn)
+      .await?;
+    LocalUserLanguage::update(pool, languages, local_user_.id).await?;
     Ok(local_user_)
   }
 
@@ -103,14 +141,35 @@ impl LocalUser {
     local_user_id: LocalUserId,
     new_password: &str,
   ) -> LemmyResult<Self> {
+    let password = new_password.to_string();
+    let password_hash =
+      tokio::task::spawn_blocking(move || super::password::hash_password(&password)).await??;
     let conn = &mut get_conn(pool).await?;
-    let password_hash = hash(new_password, DEFAULT_COST)?;
 
     diesel::update(local_user::table.find(local_user_id))
       .set((local_user::password_encrypted.eq(password_hash),))
       .get_result::<Self>(conn)
       .await
       .with_lemmy_type(LemmyErrorType::CouldntUpdate)
+  }
+
+  pub async fn upgrade_password_hash(
+    pool: &mut DbPool<'_>,
+    local_user_id: LocalUserId,
+    current_hash: &str,
+    new_hash: &str,
+  ) -> LemmyResult<bool> {
+    let conn = &mut get_conn(pool).await?;
+    let updated = diesel::update(
+      local_user::table
+        .filter(local_user::id.eq(local_user_id))
+        .filter(local_user::password_encrypted.eq(current_hash)),
+    )
+    .set(local_user::password_encrypted.eq(new_hash))
+    .execute(conn)
+    .await
+    .with_lemmy_type(LemmyErrorType::CouldntUpdate)?;
+    Ok(updated == 1)
   }
 
   pub async fn set_all_users_email_verified(
@@ -189,15 +248,8 @@ impl LocalUser {
     person_id_: PersonId,
   ) -> LemmyResult<UserBackupLists> {
     use lemmy_db_schema_file::schema::{
-      comment,
-      comment_actions,
-      community,
-      community_actions,
-      instance,
-      instance_actions,
-      person_actions,
-      post,
-      post_actions,
+      comment, comment_actions, community, community_actions, instance, instance_actions,
+      person_actions, post, post_actions,
     };
     let conn = &mut get_conn(pool).await?;
 
@@ -520,15 +572,9 @@ mod tests {
   async fn same_username_and_email_on_two_sites() -> LemmyResult<()> {
     use crate::{
       impls::presence::{
-        SiteReportId,
-        SiteReportObject,
-        combined_report_id,
-        ensure_report_site,
-        lock_report_activity,
-        read_report_site_state,
-        record_report_activity,
-        resolve_report_for_site,
-        resolve_reports_for_site,
+        SiteReportId, SiteReportObject, combined_report_id, ensure_report_site,
+        lock_report_activity, read_report_site_state, record_report_activity,
+        resolve_report_for_site, resolve_reports_for_site,
       },
       source::{
         community::{Community, CommunityActions, CommunityInsertForm, CommunityModeratorForm},

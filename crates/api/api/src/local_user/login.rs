@@ -2,7 +2,6 @@ use actix_web::{
   HttpRequest,
   web::{Data, Json},
 };
-use bcrypt::verify;
 use lemmy_api_utils::{
   claims::Claims,
   context::LemmyContext,
@@ -11,6 +10,10 @@ use lemmy_api_utils::{
     check_email_verified, check_local_user_deleted, check_registration_application,
     check_totp_2fa_valid,
   },
+};
+use lemmy_db_schema::{
+  impls::password::{hash_password, is_legacy_password_hash, verify_password},
+  source::local_user::LocalUser,
 };
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::{Login, LoginResponse};
@@ -38,8 +41,8 @@ pub async fn login(
     Ok(o) => o,
     Err(e) => {
       spawn_blocking(move || {
-        // Dummy bcrypt verify for constant timing
-        let _ = verify(
+        // Dummy bcrypt verification for constant timing.
+        verify_password(
           &data.password,
           "$2b$12$dt1Xr.ZGO8W1YtWoJRtpauM1.bkBt2C1Tck3XgZTSoBQRdGuYCTTy",
         );
@@ -55,9 +58,8 @@ pub async fn login(
   };
 
   // Verify the password
-  let valid = spawn_blocking(move || verify(&password, &password_encrypted).ok())
-    .await?
-    .unwrap_or_default();
+  let stored_hash = password_encrypted.clone().into_inner();
+  let valid = spawn_blocking(move || verify_password(&password, &stored_hash)).await?;
   if !valid {
     return Err(LemmyErrorType::IncorrectLogin.into());
   }
@@ -70,6 +72,22 @@ pub async fn login(
   // Check the totp if enabled
   if local_user_view.local_user.totp_2fa_enabled {
     check_totp_2fa_valid(&local_user_view, &data.totp_2fa_token, context.hostname())?;
+  }
+
+  if is_legacy_password_hash(&password_encrypted) {
+    let current_hash = password_encrypted.clone().into_inner();
+    let password = data.password.clone();
+    let replacement = spawn_blocking(move || hash_password(&password)).await??;
+    if let Err(error) = LocalUser::upgrade_password_hash(
+      &mut context.pool(),
+      local_user_view.local_user.id,
+      &current_hash,
+      &replacement,
+    )
+    .await
+    {
+      tracing::warn!("failed to upgrade a legacy local-user password verifier: {error}");
+    }
   }
 
   let jwt = Claims::generate(

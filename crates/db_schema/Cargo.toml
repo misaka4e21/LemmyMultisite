@@ -24,6 +24,11 @@ full = [
   "anyhow",
   "moka",
   "bcrypt",
+  "argon2",
+  "pbkdf2",
+  "sha2",
+  "subtle",
+  "hex",
   "lemmy_utils",
   "serde_json",
   "diesel_ltree",
@@ -48,6 +53,11 @@ lemmy_utils = { workspace = true, optional = true }
 lemmy_db_schema_file = { workspace = true }
 lemmy_diesel_utils = { workspace = true }
 bcrypt = { workspace = true, optional = true }
+argon2 = { workspace = true, optional = true }
+pbkdf2 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 diesel = { workspace = true, optional = true }
 diesel-async = { workspace = true, optional = true }
 diesel-uplete = { workspace = true, optional = true }

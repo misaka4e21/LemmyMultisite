@@ -43,12 +43,21 @@ The importer SHALL migrate every source user to a site-owned local account, pres
 - **WHEN** a source username or email conflicts with a target-site account
 - **THEN** preview requires a deterministic resolution and import does not silently merge identities
 
+#### Scenario: Source account has restrictions or a privileged role
+- **WHEN** a source account is inactive, unapproved, suspended, silenced, staged, or has a Discourse admin/moderator role
+- **THEN** the account report identifies the source user for operator review, and Discourse roles do not grant Lemmy privileges automatically
+
 ### Requirement: Category hierarchy mapping
 The importer SHALL map each leaf Discourse category to one Lemmy community and each parent category to one Lemmy multi-community containing the communities mapped from its descendant leaf categories.
 
 #### Scenario: Import nested categories
 - **WHEN** a Discourse category tree contains leaf categories under parent categories
 - **THEN** each leaf has one community and each parent has a multi-community with its descendant communities
+
+#### Scenario: Parent category exceeds the target membership limit
+
+- **WHEN** a source parent category has 50 or more imported descendant communities
+- **THEN** the importer SHALL report the category as unresolved, SHALL NOT claim the multi-community structure is complete, and SHALL block final validation
 
 #### Scenario: Category access restrictions are unsupported
 - **WHEN** a source category has restricted visibility or posting permissions

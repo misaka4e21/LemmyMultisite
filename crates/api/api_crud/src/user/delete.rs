@@ -1,12 +1,12 @@
 use activitypub_federation::config::Data;
 use actix_web::web::Json;
-use bcrypt::verify;
 use lemmy_api_utils::{
   context::LemmyContext,
   plugins::{plugin_hook_after, plugin_hook_before},
   send_activity::{ActivityChannel, SendActivityData},
   utils::purge_user_account,
 };
+use lemmy_db_schema::impls::password::verify_password;
 use lemmy_db_schema::source::{
   community::CommunityActions, login_token::LoginToken, oauth_account::OAuthAccount, person::Person,
 };
@@ -16,6 +16,7 @@ use lemmy_utils::{
   error::{LemmyErrorType, LemmyResult},
   spawn_try_task,
 };
+use tokio::task::spawn_blocking;
 
 pub async fn delete_account(
   Json(data): Json<DeleteAccount>,
@@ -25,12 +26,14 @@ pub async fn delete_account(
   let local_instance_id = local_user_view.person.instance_id;
 
   // Verify the password
-  let valid: bool = local_user_view
-    .local_user
-    .password_encrypted
-    .as_ref()
-    .and_then(|password_encrypted| verify(&data.password, password_encrypted).ok())
-    .unwrap_or(false);
+  let valid =
+    if let Some(password_encrypted) = local_user_view.local_user.password_encrypted.clone() {
+      let password = data.password.clone();
+      let password_encrypted = password_encrypted.into_inner();
+      spawn_blocking(move || verify_password(&password, &password_encrypted)).await?
+    } else {
+      false
+    };
   if !valid {
     return Err(LemmyErrorType::IncorrectLogin.into());
   }

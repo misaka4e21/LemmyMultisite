@@ -2,16 +2,19 @@ use actix_web::{
   HttpRequest,
   web::{Data, Json},
 };
-use bcrypt::verify;
 use lemmy_api_utils::{
   claims::Claims,
   context::LemmyContext,
   utils::{check_local_user_banned_or_deleted, password_length_check},
 };
-use lemmy_db_schema::source::{local_user::LocalUser, login_token::LoginToken};
+use lemmy_db_schema::{
+  impls::password::verify_password,
+  source::{local_user::LocalUser, login_token::LoginToken},
+};
 use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_site::api::{ChangePassword, LoginResponse};
 use lemmy_utils::error::{LemmyErrorType, LemmyResult};
+use tokio::task::spawn_blocking;
 
 pub async fn change_password(
   Json(data): Json<ChangePassword>,
@@ -30,7 +33,9 @@ pub async fn change_password(
   // Check the old password
   let valid: bool = if let Some(password_encrypted) = &local_user_view.local_user.password_encrypted
   {
-    verify(&data.old_password, password_encrypted).unwrap_or(false)
+    let old_password = data.old_password.clone();
+    let password_encrypted = password_encrypted.clone().into_inner();
+    spawn_blocking(move || verify_password(&old_password, &password_encrypted)).await?
   } else {
     data.old_password.is_empty()
   };

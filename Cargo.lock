@@ -497,6 +497,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "argparse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1012,6 +1024,15 @@ name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
+]
 
 [[package]]
 name = "block-buffer"
@@ -4102,6 +4123,7 @@ name = "lemmy_db_schema"
 version = "1.0.0-beta.3"
 dependencies = [
  "anyhow",
+ "argon2",
  "bcrypt",
  "chrono",
  "derive-new",
@@ -4109,17 +4131,21 @@ dependencies = [
  "diesel-async",
  "diesel-uplete",
  "diesel_ltree",
+ "hex",
  "i-love-jesus",
  "lemmy_db_schema_file",
  "lemmy_diesel_utils",
  "lemmy_utils 1.0.0-beta.3",
  "moka",
+ "pbkdf2",
  "pretty_assertions",
  "serde",
  "serde_json",
  "serde_with",
  "serial_test",
+ "sha2 0.10.9",
  "strum 0.28.0",
+ "subtle",
  "tokio",
  "ts-rs",
  "url",
@@ -4673,6 +4699,33 @@ dependencies = [
  "unified-diff",
  "url",
  "webpki-roots",
+]
+
+[[package]]
+name = "lemmy_discourse_import"
+version = "1.0.0-beta.3"
+dependencies = [
+ "activitypub_federation",
+ "anyhow",
+ "chrono",
+ "clap",
+ "diesel",
+ "diesel-async",
+ "flate2",
+ "hex",
+ "lemmy_db_schema 1.0.0-beta.3",
+ "lemmy_db_schema_file",
+ "lemmy_diesel_utils",
+ "lemmy_utils 1.0.0-beta.3",
+ "percent-encoding",
+ "reqwest",
+ "rustls 0.23.46",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.10.9",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -5472,6 +5525,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "pathfinding"
 version = "4.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5483,6 +5547,16 @@ dependencies = [
  "num-traits",
  "rustc-hash",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest 0.10.7",
+ "hmac 0.12.1",
 ]
 
 [[package]]

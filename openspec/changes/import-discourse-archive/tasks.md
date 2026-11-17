@@ -2,9 +2,9 @@
 
 ## 1. Source and target inventory
 
-- [ ] 1.1 Confirm the supported Discourse backup/database versions from backup metadata and source schema fixtures; verify preview reports unsupported versions before target writes.
-- [ ] 1.2 Inventory source tables for users, credentials, category hierarchy, topics/posts, PMs, polls, votes, bookmarks, uploads, and plugin data against Lemmy target models; record conversion and loss rules in importer documentation and verify each source entity is classified.
-- [ ] 1.3 Define importer command options, source fingerprint, site selection, mapping conflict format, and report format; verify operator documentation shows a preview-only run and an explicit target-site selection.
+- [ ] 1.1 Confirm the supported Discourse backup/database versions from backup metadata and source schema fixtures; verify preview reports unsupported versions before target writes. The adapter currently targets the checked-out Discourse source version and schema, but no backup metadata or representative archive fixture has been provided.
+- [ ] 1.2 Inventory source tables for users, credentials, category hierarchy, topics/posts, PMs, polls, votes, bookmarks, uploads, and plugin data against Lemmy target models; record conversion and loss rules in importer documentation and verify each source entity is classified. The importer reports unclassified dump tables, but no representative archive has been used to verify full source-entity coverage.
+- [x] 1.3 Define importer command options, source fingerprint, site selection, mapping conflict format, and report format; verify operator documentation shows a preview-only run and an explicit target-site selection.
 
 ## 2. Password verifier compatibility
 
@@ -42,5 +42,5 @@
 ## 7. Completion validation and operations
 
 - [ ] 7.1 Add final referential and count validation for users, categories, topic starters, replies, PM participants, votes, bookmarks, and attachments; verify unresolved required references prevent completion and appear in the durable report.
-- [ ] 7.2 Document target backup, write pause, import, validation, redirect activation, rollback, and source-archive retention steps; verify the runbook explicitly keeps federation disabled through import.
+- [x] 7.2 Document target backup, write pause, import, validation, redirect activation, rollback, and source-archive retention steps; verify the runbook explicitly keeps federation disabled through import.
 - [ ] 7.3 Verify a representative archived fixture end to end, including interruption/resume, account login and verifier upgrade, private-message isolation, media resolution, URL redirects, and zero federation delivery; record the resulting import report and known losses.

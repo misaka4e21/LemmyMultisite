@@ -66,6 +66,7 @@ members = [
   "crates/apub/send",
   "crates/routes",
   "crates/server",
+  "crates/discourse_import",
 ]
 resolver = "3"
 
@@ -194,6 +195,12 @@ reqwest-middleware = { version = "0.5.2", features = ["form", "multipart", "quer
 reqwest-tracing = "0.7.1"
 doku = { version = "0.22.0", features = ["url-2"] }
 bcrypt = "0.19.3"
+argon2 = "0.5.3"
+pbkdf2 = "0.12.2"
+sha2 = "0.10.9"
+subtle = "2.6.1"
+hex = "0.4.3"
+flate2 = "1.1.10"
 chrono = { version = "0.4.45", features = [
   "now",
   "serde",

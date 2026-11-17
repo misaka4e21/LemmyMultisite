@@ -44,7 +44,7 @@ The importer SHALL migrate every source user to a site-owned local account, pres
 - **THEN** preview requires a deterministic resolution and import does not silently merge identities
 
 #### Scenario: Source account has restrictions or a privileged role
-- **WHEN** a source account is inactive, unapproved, suspended, silenced, staged, or has a Discourse admin/moderator role
+- **WHEN** a source account is inactive, unapproved, suspended, silenced, staged, hides profile/presence, or has a Discourse admin/moderator role
 - **THEN** the account report identifies the source user for operator review, and Discourse roles do not grant Lemmy privileges automatically
 
 #### Scenario: Preserve local account preferences

@@ -69,6 +69,7 @@ pub struct AccountImportReport {
   pub silenced_users_count: u64,
   pub staged_users_count: u64,
   pub privileged_users_count: u64,
+  pub users_with_profile_privacy_restrictions_count: u64,
   pub conflict_policy: &'static str,
   pub import_run_status: &'static str,
   pub warnings: Vec<String>,
@@ -238,6 +239,12 @@ struct SourceUser {
   allow_private_messages: Option<bool>,
   #[diesel(sql_type = Nullable<Bool>)]
   external_links_in_new_tab: Option<bool>,
+  #[diesel(sql_type = Nullable<Bool>)]
+  hide_profile_and_presence: Option<bool>,
+  #[diesel(sql_type = Nullable<Bool>)]
+  hide_profile: Option<bool>,
+  #[diesel(sql_type = Nullable<Bool>)]
+  hide_presence: Option<bool>,
   #[diesel(sql_type = diesel::sql_types::Timestamptz)]
   created_at: DateTime<Utc>,
   #[diesel(sql_type = Nullable<diesel::sql_types::Timestamptz>)]
@@ -428,6 +435,7 @@ pub async fn import_accounts(
     silenced_users_count: 0,
     staged_users_count: 0,
     privileged_users_count: 0,
+    users_with_profile_privacy_restrictions_count: 0,
     conflict_policy: match conflict_policy {
       AccountConflictPolicy::Report => "report",
       AccountConflictPolicy::Rename => "rename",
@@ -444,6 +452,7 @@ pub async fn import_accounts(
       "SELECT u.id, u.username, u.name AS display_name, up.bio_raw AS bio, \
        up.location, up.website, \
        uo.allow_private_messages, uo.external_links_in_new_tab, \
+       uo.hide_profile_and_presence, uo.hide_profile, uo.hide_presence, \
        u.created_at AT TIME ZONE 'UTC' AS created_at, \
        u.updated_at AT TIME ZONE 'UTC' AS updated_at, ue.email, \
        upw.password_hash, upw.password_salt, upw.password_algorithm, \
@@ -497,6 +506,16 @@ pub async fn import_accounts(
         report.privileged_users_count += 1;
         report.warnings.push(format!(
           "user {} had a Discourse admin or moderator role; no Lemmy privileges were granted",
+          user.id
+        ));
+      }
+      if user.hide_profile_and_presence.unwrap_or(false)
+        || user.hide_profile.unwrap_or(false)
+        || user.hide_presence.unwrap_or(false)
+      {
+        report.users_with_profile_privacy_restrictions_count += 1;
+        report.warnings.push(format!(
+          "user {} hid profile details or presence in Discourse; Lemmy has no equivalent local-user visibility setting",
           user.id
         ));
       }

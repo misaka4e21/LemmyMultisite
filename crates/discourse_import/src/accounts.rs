@@ -71,6 +71,7 @@ pub struct AccountImportReport {
   pub privileged_users_count: u64,
   pub conflict_policy: &'static str,
   pub import_run_status: &'static str,
+  pub warnings: Vec<String>,
   pub conflicts: Vec<String>,
 }
 
@@ -423,6 +424,7 @@ pub async fn import_accounts(
       AccountConflictPolicy::Skip => "skip",
     },
     import_run_status: "running",
+    warnings: Vec::new(),
     conflicts: Vec::new(),
   };
   let mut last_id = 0_i32;
@@ -452,35 +454,35 @@ pub async fn import_accounts(
       report.source_user_count += 1;
       if !user.active || !user.approved {
         report.inactive_or_unapproved_users_count += 1;
-        report.conflicts.push(format!(
+        report.warnings.push(format!(
           "user {} was inactive or unapproved in Discourse; Lemmy has no equivalent login state",
           user.id
         ));
       }
       if user.suspended_till.is_some_and(|until| until > Utc::now()) {
         report.suspended_users_count += 1;
-        report.conflicts.push(format!(
+        report.warnings.push(format!(
           "user {} was suspended in Discourse; review target account access",
           user.id
         ));
       }
       if user.silenced_till.is_some_and(|until| until > Utc::now()) {
         report.silenced_users_count += 1;
-        report.conflicts.push(format!(
+        report.warnings.push(format!(
           "user {} was silenced in Discourse; Lemmy has no equivalent posting restriction",
           user.id
         ));
       }
       if user.staged {
         report.staged_users_count += 1;
-        report.conflicts.push(format!(
+        report.warnings.push(format!(
           "user {} was a staged Discourse account; review whether it should remain usable",
           user.id
         ));
       }
       if user.admin || user.moderator.unwrap_or(false) {
         report.privileged_users_count += 1;
-        report.conflicts.push(format!(
+        report.warnings.push(format!(
           "user {} had a Discourse admin or moderator role; no Lemmy privileges were granted",
           user.id
         ));
@@ -564,7 +566,7 @@ pub async fn import_accounts(
           || user.password_salt.is_some()
           || user.password_algorithm.is_some()
         {
-          report.conflicts.push(format!(
+          report.warnings.push(format!(
             "user {} has a password verifier format unsupported by this importer; password login requires account recovery",
             user.id
           ));

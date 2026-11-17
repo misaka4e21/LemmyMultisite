@@ -83,3 +83,20 @@ A failure in internal delivery for one site pair SHALL NOT block external delive
 - **WHEN** internal delivery from site A to site B fails
 - **THEN** site A's external queue continues
 - **AND** the A to B delivery retries independently
+
+### Requirement: Local names must be actor-compatible before federation is enabled
+Before enabling federation for a site, the system SHALL verify that every local username and local community name satisfies the ActivityPub actor-name rules. If any name does not satisfy those rules, the system MUST reject the configuration change and identify the offending names so an administrator can resolve them. Existing federated sites SHALL retain the current actor-name validation for newly created or renamed local actors.
+
+#### Scenario: Enable federation when all local names are compatible
+- **WHEN** an administrator enables federation and all local usernames and community names satisfy the ActivityPub actor-name rules
+- **THEN** the federation setting is enabled
+
+#### Scenario: Reject enabling federation with an incompatible username
+- **WHEN** an administrator enables federation while a local username violates the ActivityPub actor-name rules
+- **THEN** the federation setting remains disabled
+- **AND** the response identifies the incompatible username
+
+#### Scenario: Reject enabling federation with an incompatible community name
+- **WHEN** an administrator enables federation while a local community name violates the ActivityPub actor-name rules
+- **THEN** the federation setting remains disabled
+- **AND** the response identifies the incompatible community name

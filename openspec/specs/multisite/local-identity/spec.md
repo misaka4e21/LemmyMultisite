@@ -98,3 +98,39 @@ OAuth authorization, callbacks, account linking and login SHALL use only provide
 #### Scenario: Same-site OAuth provider
 - **WHEN** a user completes a valid OAuth login through an enabled provider owned by the current site
 - **THEN** the existing registration and account-linking policy applies
+
+### Requirement: Non-federated local usernames
+When federation is disabled for a site, the system SHALL allow a local account to register or change its username to a name containing Chinese characters, subject to the existing username length, uniqueness, and safety constraints. A user SHALL be able to change their own username, and a site administrator SHALL be able to change a local account's username. When federation is enabled, registration and username changes SHALL continue to enforce the ActivityPub actor-name rules.
+
+#### Scenario: Register with a Chinese username while federation is disabled
+- **WHEN** a user registers on a site with federation disabled using a valid Chinese username
+- **THEN** registration succeeds if the username is available and satisfies the site's other account requirements
+
+#### Scenario: Change own username while federation is disabled
+- **WHEN** a user changes their own username on a site with federation disabled to a valid Chinese username
+- **THEN** the username is updated
+
+#### Scenario: Administrator changes a username while federation is disabled
+- **WHEN** a site administrator changes a local account's username to a valid Chinese username while federation is disabled
+- **THEN** the username is updated
+
+#### Scenario: Reject non-actor username on a federated site
+- **WHEN** a user registers or changes a username on a site with federation enabled
+- **AND** the username violates the ActivityPub actor-name rules
+- **THEN** the operation is rejected with a validation error
+
+### Requirement: Non-federated community names
+When federation is disabled for a site, the system SHALL allow creation and renaming of a local community to a name containing Chinese characters, subject to existing community name length, uniqueness, and safety constraints. An authorized community moderator or site administrator SHALL be able to rename a local community. When federation is enabled, community creation and renaming SHALL continue to enforce the ActivityPub actor-name rules.
+
+#### Scenario: Create a community with a Chinese name while federation is disabled
+- **WHEN** an authorized user creates a local community on a site with federation disabled using a valid Chinese name
+- **THEN** the community is created if the name is available and satisfies the site's other community requirements
+
+#### Scenario: Rename a community while federation is disabled
+- **WHEN** an authorized community moderator or site administrator renames a local community on a site with federation disabled to a valid Chinese name
+- **THEN** the community name is updated
+
+#### Scenario: Reject non-actor community name on a federated site
+- **WHEN** a user creates or renames a community on a site with federation enabled
+- **AND** the name violates the ActivityPub actor-name rules
+- **THEN** the operation is rejected with a validation error

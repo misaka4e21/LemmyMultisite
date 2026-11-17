@@ -1,6 +1,6 @@
 use super::oauth_tenant_tests::site_context;
 use crate::{
-  local_user::save_settings::save_user_settings,
+  local_user::{login::login, save_settings::save_user_settings},
   site::admin_change_username::admin_change_username,
 };
 use actix_web::{test::TestRequest, web::Json};
@@ -27,7 +27,7 @@ use lemmy_db_views_local_user::LocalUserView;
 use lemmy_db_views_registration_applications::api::Register;
 use lemmy_db_views_site::{
   SiteView,
-  api::{AdminChangeUsername, EditSite, SaveUserSettings},
+  api::{AdminChangeUsername, EditSite, Login, SaveUserSettings},
 };
 use lemmy_db_schema_file::enums::RegistrationMode;
 use lemmy_diesel_utils::traits::Crud;
@@ -106,9 +106,38 @@ async fn non_federated_users_and_moderators_can_use_chinese_actor_names() -> Lem
   .await?;
   assert!(registration.jwt.is_some());
 
+  for username in ["ひらがな登録", "カタカナ登録", "한국어등록"] {
+    let registration = register(
+      Json(Register {
+        username: username.into(),
+        password: "valid_password".to_string().into(),
+        password_verify: "valid_password".to_string().into(),
+        ..Default::default()
+      }),
+      TestRequest::default().to_http_request(),
+      context.clone(),
+      tenant.clone(),
+    )
+    .await?;
+    assert!(registration.jwt.is_some());
+
+    let authenticated = login(
+      Json(Login {
+        username_or_email: username.into(),
+        password: "valid_password".to_string().into(),
+        ..Default::default()
+      }),
+      TestRequest::default().to_http_request(),
+      context.clone(),
+      tenant.clone(),
+    )
+    .await?;
+    assert!(authenticated.jwt.is_some());
+  }
+
   save_user_settings(
     Json(SaveUserSettings {
-      username: Some("中文用户".into()),
+      username: Some("ひらがな利用者".into()),
       ..Default::default()
     }),
     context.clone(),
@@ -116,23 +145,46 @@ async fn non_federated_users_and_moderators_can_use_chinese_actor_names() -> Lem
     tenant.clone(),
   )
   .await?;
-  assert_eq!(Person::read(pool, user_person.id).await?.name, "中文用户");
+  assert_eq!(Person::read(pool, user_person.id).await?.name, "ひらがな利用者");
+
+  save_user_settings(
+    Json(SaveUserSettings {
+      username: Some("한국어사용자".into()),
+      ..Default::default()
+    }),
+    context.clone(),
+    user.clone(),
+    tenant.clone(),
+  )
+  .await?;
+  assert_eq!(Person::read(pool, user_person.id).await?.name, "한국어사용자");
 
   admin_change_username(
     Json(AdminChangeUsername {
       person_id: user_person.id,
-      username: "管理员改名".into(),
+      username: "カタカナ管理改名".into(),
     }),
     context.clone(),
     admin.clone(),
     tenant.clone(),
   )
   .await?;
-  assert_eq!(Person::read(pool, user_person.id).await?.name, "管理员改名");
+  assert_eq!(Person::read(pool, user_person.id).await?.name, "カタカナ管理改名");
 
   assert!(save_user_settings(
     Json(SaveUserSettings {
       username: Some(admin_person.name.clone()),
+      ..Default::default()
+    }),
+    context.clone(),
+    user.clone(),
+    tenant.clone(),
+  )
+  .await
+  .is_err());
+  assert!(save_user_settings(
+    Json(SaveUserSettings {
+      username: Some("ひらがな改名".into()),
       ..Default::default()
     }),
     context.clone(),
@@ -253,7 +305,7 @@ async fn non_federated_users_and_moderators_can_use_chinese_actor_names() -> Lem
   let lemmy_utils::error::LemmyErrorType::Unknown(message) = error.error_type else {
     panic!("expected actionable federation validation error");
   };
-  assert!(message.contains("username: 管理员改名"));
+  assert!(message.contains("username: カタカナ管理改名"));
   assert!(message.contains("community: 改名社区"));
   assert!(!SiteView::read_by_id(&mut base.pool(), data.local_site.id)
     .await?

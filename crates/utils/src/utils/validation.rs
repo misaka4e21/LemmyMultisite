@@ -57,7 +57,7 @@ pub fn is_valid_local_actor_name(name: &str, federation_enabled: bool) -> LemmyR
 
   #[expect(clippy::expect_used)]
   static VALID_NON_FEDERATED_ACTOR_NAME_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[\p{Han}a-zA-Z0-9_]+$").expect("compile regex"));
+    LazyLock::new(|| Regex::new(r"^[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}a-zA-Z0-9_]+$").expect("compile regex"));
 
   min_length_check(name, 2, LemmyErrorType::InvalidName)?;
   max_length_check(name, ACTOR_NAME_MAX_LENGTH, LemmyErrorType::InvalidName)?;
@@ -418,9 +418,15 @@ Line3",
     let too_long_name = "中".repeat(21);
     assert!(is_valid_local_actor_name("中文用户名", false).is_ok());
     assert!(is_valid_local_actor_name("中文User_12", false).is_ok());
+    assert!(is_valid_local_actor_name("ひらがな", false).is_ok());
+    assert!(is_valid_local_actor_name("カタカナ", false).is_ok());
+    assert!(is_valid_local_actor_name("한국어", false).is_ok());
     assert!(is_valid_local_actor_name("中文-user", false).is_err());
     assert!(is_valid_local_actor_name("中 文", false).is_err());
+    assert!(is_valid_local_actor_name("ひらがな!", false).is_err());
     assert!(is_valid_local_actor_name("中文", true).is_err());
+    assert!(is_valid_local_actor_name("ひらがな", true).is_err());
+    assert!(is_valid_local_actor_name("한국어", true).is_err());
     assert!(is_valid_local_actor_name("Hello_98", true).is_ok());
     assert!(is_valid_local_actor_name(&too_long_name, false).is_err());
   }

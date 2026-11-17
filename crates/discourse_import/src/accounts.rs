@@ -170,6 +170,9 @@ pub struct MediaImportReport {
   pub unresolved_private_message_source_post_ids: Vec<i32>,
   pub rewritten_avatar_count: usize,
   pub unresolved_avatar_source_user_ids: Vec<i32>,
+  pub rewritten_category_icon_count: usize,
+  pub rewritten_category_banner_count: usize,
+  pub unresolved_category_image_ids: Vec<i32>,
   pub rewritten_source_post_count: usize,
   pub rewritten_media_reference_count: usize,
   pub import_run_status: &'static str,
@@ -2106,6 +2109,9 @@ pub async fn import_media(
     unresolved_private_message_source_post_ids: Vec::new(),
     rewritten_avatar_count: 0,
     unresolved_avatar_source_user_ids: Vec::new(),
+    rewritten_category_icon_count: 0,
+    rewritten_category_banner_count: 0,
+    unresolved_category_image_ids: Vec::new(),
     rewritten_source_post_count: 0,
     rewritten_media_reference_count: 0,
     import_run_status: "running",
@@ -2375,6 +2381,83 @@ pub async fn import_media(
         .push(source_user_id);
     }
   }
+  let source_category_images = diesel::sql_query(
+    "SELECT id AS category_id, uploaded_logo_id, uploaded_background_id \
+     FROM categories WHERE uploaded_logo_id IS NOT NULL OR uploaded_background_id IS NOT NULL \
+     ORDER BY id",
+  )
+  .load::<SourceCategoryImages>(&mut source)
+  .await
+  .context("failed to read Discourse category icon and banner references")?;
+  for category_images in source_category_images {
+    let Some(target_community_id) = read_mapping(
+      pool,
+      run.id,
+      "category_community",
+      &category_images.category_id.to_string(),
+    )
+    .await
+    .map_err(convert_lemmy_error)?
+    else {
+      report
+        .unresolved_category_image_ids
+        .push(category_images.category_id);
+      continue;
+    };
+    for (source_upload_id, field) in [
+      (category_images.uploaded_logo_id, "icon"),
+      (category_images.uploaded_background_id, "banner"),
+    ] {
+      let Some(source_upload_id) = source_upload_id else {
+        continue;
+      };
+      let Some(target_media_id) =
+        read_mapping(pool, run.id, "upload", &source_upload_id.to_string())
+          .await
+          .map_err(convert_lemmy_error)?
+      else {
+        report
+          .unresolved_category_image_ids
+          .push(category_images.category_id);
+        continue;
+      };
+      let media =
+        diesel::sql_query("SELECT id, canonical_pictrs_alias FROM media_object WHERE id = $1")
+          .bind::<BigInt, _>(target_media_id)
+          .get_result::<TargetMediaObject>(&mut get_conn(pool).await?)
+          .await
+          .context("mapped Discourse category image no longer exists")?;
+      let target_image_url = format!(
+        "{}://{}/api/v4/image/{}",
+        SETTINGS.get_protocol_string(),
+        target_site.hostname,
+        media.canonical_pictrs_alias
+      );
+      let update_sql = match field {
+        "icon" => "UPDATE community SET icon = $1 WHERE id = $2 AND origin_local_site_id = $3",
+        "banner" => "UPDATE community SET banner = $1 WHERE id = $2 AND origin_local_site_id = $3",
+        _ => unreachable!(),
+      };
+      let updated = diesel::sql_query(update_sql)
+        .bind::<Text, _>(target_image_url)
+        .bind::<Integer, _>(target_community_id as i32)
+        .bind::<Integer, _>(site_id.0)
+        .execute(&mut get_conn(pool).await?)
+        .await
+        .context("failed to attach imported media to a community image")?;
+      if updated == 1 {
+        if field == "icon" {
+          report.rewritten_category_icon_count += 1;
+        } else {
+          report.rewritten_category_banner_count += 1;
+        }
+      } else {
+        report
+          .unresolved_category_image_ids
+          .push(category_images.category_id);
+      }
+    }
+  }
   report.retained_secure_upload_ids.sort_unstable();
   report.retained_secure_upload_ids.dedup();
   report.retained_non_image_upload_ids.sort_unstable();
@@ -2391,6 +2474,8 @@ pub async fn import_media(
   report.unresolved_private_message_source_post_ids.dedup();
   report.unresolved_avatar_source_user_ids.sort_unstable();
   report.unresolved_avatar_source_user_ids.dedup();
+  report.unresolved_category_image_ids.sort_unstable();
+  report.unresolved_category_image_ids.dedup();
   let unresolved = !report.missing_archive_upload_ids.is_empty()
     || !report.invalid_upload_ids.is_empty()
     || !report.unresolved_content_source_post_ids.is_empty()
@@ -3028,6 +3113,16 @@ struct SourceAvatar {
   user_id: i32,
   #[diesel(sql_type = Integer)]
   uploaded_avatar_id: i32,
+}
+
+#[derive(QueryableByName)]
+struct SourceCategoryImages {
+  #[diesel(sql_type = Integer)]
+  category_id: i32,
+  #[diesel(sql_type = Nullable<Integer>)]
+  uploaded_logo_id: Option<i32>,
+  #[diesel(sql_type = Nullable<Integer>)]
+  uploaded_background_id: Option<i32>,
 }
 
 #[derive(serde::Deserialize)]

@@ -18,7 +18,7 @@
 - [ ] 3.1 Add a Rust offline importer entry point that recognizes `.tar.gz` and `.sql.gz`, safely extracts supported backup members, restores the dump into an isolated source database, and enforces path/decompression limits; verify malformed and traversal archives are rejected before target writes.
 - [ ] 3.2 Implement preview inventory, source-version checks, and operator mapping decisions for account conflicts and restricted categories; verify preview reports counts and warnings without changing the target database.
 - [ ] 3.3 Add a durable source-fingerprint and target-site-scoped mapping/progress ledger with transactional idempotent updates; verify rerunning a completed phase reuses mappings and an interrupted phase resumes without duplicates.
-- [ ] 3.4 Document backup handling, temporary storage requirements, required database access, and cleanup; verify every documented command matches the CLI help output.
+- [x] 3.4 Document backup handling, temporary storage requirements, required database access, and cleanup; verify documented subcommands and options against the CLI argument definitions.
 
 ## 4. Accounts and category structure
 

@@ -84,7 +84,7 @@ Discourse stores `password_algorithm`, `password_salt`, and `password_hash` sepa
 
 | Discourse data | LemmyMultisite target | Initial handling |
 | --- | --- | --- |
-| `users`, `user_emails`, `user_profiles`, `user_options`, `user_passwords` | `person`, `local_user`, profile fields | Create one site-owned identity per source account. Preserve PBKDF2 inputs for compatibility; mark accounts without a usable credential for recovery. Emails and usernames require explicit conflict handling. |
+| `users`, `user_emails`, `user_profiles`, `user_options`, `user_passwords` | `person`, `local_user`, profile fields | Create one site-owned identity per source account. Preserve PBKDF2 inputs for compatibility; map `allow_private_messages` and `external_links_in_new_tab` to the matching local-user preferences; append source location and website to the imported biography because the target profile has no separate fields; mark accounts without a usable credential for recovery. Emails and usernames require explicit conflict handling. |
 | `categories` | `community` | Every leaf category maps to one community. A parent that contains child categories and its own topics also receives a community. |
 | Parent/child category structure | `multi_community`, `multi_community_entry` | Each parent category maps to a multi-community containing its descendant leaf communities. |
 | Category permissions and `category_user` policy | No direct equivalent | Report source visibility and posting restrictions; do not claim they remain enforced. |

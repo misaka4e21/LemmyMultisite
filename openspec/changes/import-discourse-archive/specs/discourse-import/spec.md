@@ -47,6 +47,14 @@ The importer SHALL migrate every source user to a site-owned local account, pres
 - **WHEN** a source account is inactive, unapproved, suspended, silenced, staged, or has a Discourse admin/moderator role
 - **THEN** the account report identifies the source user for operator review, and Discourse roles do not grant Lemmy privileges automatically
 
+#### Scenario: Preserve local account preferences
+- **WHEN** a source user has `allow_private_messages` or `external_links_in_new_tab` preferences
+- **THEN** the importer maps them to Lemmy's corresponding private-message and open-links preferences
+
+#### Scenario: Preserve profile fields without target equivalents
+- **WHEN** a source user has a location or website
+- **THEN** the importer retains those values in the imported biography with clear labels
+
 ### Requirement: Category hierarchy mapping
 The importer SHALL map each leaf Discourse category to one Lemmy community and each parent category to one Lemmy multi-community containing the communities mapped from its descendant leaf categories.
 

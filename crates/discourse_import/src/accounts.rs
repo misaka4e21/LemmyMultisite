@@ -230,6 +230,14 @@ struct SourceUser {
   display_name: Option<String>,
   #[diesel(sql_type = Nullable<Text>)]
   bio: Option<String>,
+  #[diesel(sql_type = Nullable<Text>)]
+  location: Option<String>,
+  #[diesel(sql_type = Nullable<Text>)]
+  website: Option<String>,
+  #[diesel(sql_type = Nullable<Bool>)]
+  allow_private_messages: Option<bool>,
+  #[diesel(sql_type = Nullable<Bool>)]
+  external_links_in_new_tab: Option<bool>,
   #[diesel(sql_type = diesel::sql_types::Timestamptz)]
   created_at: DateTime<Utc>,
   #[diesel(sql_type = Nullable<diesel::sql_types::Timestamptz>)]
@@ -434,12 +442,15 @@ pub async fn import_accounts(
   loop {
     let batch = diesel::sql_query(
       "SELECT u.id, u.username, u.name AS display_name, up.bio_raw AS bio, \
+       up.location, up.website, \
+       uo.allow_private_messages, uo.external_links_in_new_tab, \
        u.created_at AT TIME ZONE 'UTC' AS created_at, \
        u.updated_at AT TIME ZONE 'UTC' AS updated_at, ue.email, \
        upw.password_hash, upw.password_salt, upw.password_algorithm, \
        u.active, u.approved, u.admin, u.suspended_till AT TIME ZONE 'UTC' AS suspended_till, \
        u.silenced_till AT TIME ZONE 'UTC' AS silenced_till, u.staged, u.moderator \
        FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id \
+       LEFT JOIN user_options uo ON uo.user_id = u.id \
        LEFT JOIN user_emails ue ON ue.user_id = u.id AND ue.primary = TRUE \
        LEFT JOIN user_passwords upw ON upw.user_id = u.id AND upw.password_expired_at IS NULL \
        WHERE u.id > $1 ORDER BY u.id LIMIT 500",
@@ -585,7 +596,8 @@ pub async fn import_accounts(
         InstanceId(target_site.instance_id),
       );
       person_form.display_name = user.display_name;
-      person_form.bio = user.bio;
+      person_form.bio =
+        merge_profile_fields(user.bio, user.location.as_deref(), user.website.as_deref());
       person_form.published_at = Some(user.created_at);
       person_form.updated_at = user.updated_at;
       person_form.ap_id = Some(actor_id);
@@ -601,6 +613,8 @@ pub async fn import_accounts(
       local_user_form.email = email;
       local_user_form.email_verified = Some(local_user_form.email.is_some());
       local_user_form.accepted_application = Some(true);
+      local_user_form.private_messages_enabled = Some(user.allow_private_messages.unwrap_or(true));
+      local_user_form.open_links_in_new_tab = Some(user.external_links_in_new_tab.unwrap_or(false));
       create_imported_account(
         pool,
         run.id,
@@ -3542,6 +3556,37 @@ fn escape_markdown(input: &str) -> String {
     .replace('(', "\\(")
     .replace(')', "\\)")
     .replace('`', "\\`")
+}
+
+fn merge_profile_fields(
+  bio: Option<String>,
+  location: Option<&str>,
+  website: Option<&str>,
+) -> Option<String> {
+  let mut content = bio.unwrap_or_default();
+  let mut details = Vec::new();
+  if let Some(location) = location.filter(|value| !value.trim().is_empty()) {
+    details.push(format!("**Location:** {}", escape_profile_text(location)));
+  }
+  if let Some(website) = website.filter(|value| !value.trim().is_empty()) {
+    details.push(format!("**Website:** {}", escape_profile_text(website)));
+  }
+  if !details.is_empty() {
+    if !content.trim().is_empty() {
+      content.push_str("\n\n---\n\n");
+    }
+    content.push_str(&details.join("\n\n"));
+  }
+  (!content.trim().is_empty()).then_some(content)
+}
+
+fn escape_profile_text(input: &str) -> String {
+  let one_line = input.split_whitespace().collect::<Vec<_>>().join(" ");
+  let html_escaped = one_line
+    .replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;");
+  escape_markdown(&html_escaped)
 }
 
 fn imported_object_ap_id(

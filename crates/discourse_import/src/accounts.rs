@@ -167,6 +167,8 @@ pub struct MediaImportReport {
   pub invalid_upload_ids: Vec<i32>,
   pub unresolved_content_source_post_ids: Vec<i32>,
   pub unresolved_private_message_source_post_ids: Vec<i32>,
+  pub rewritten_avatar_count: usize,
+  pub unresolved_avatar_source_user_ids: Vec<i32>,
   pub rewritten_source_post_count: usize,
   pub rewritten_media_reference_count: usize,
   pub import_run_status: &'static str,
@@ -2069,6 +2071,8 @@ pub async fn import_media(
     invalid_upload_ids: Vec::new(),
     unresolved_content_source_post_ids: Vec::new(),
     unresolved_private_message_source_post_ids: Vec::new(),
+    rewritten_avatar_count: 0,
+    unresolved_avatar_source_user_ids: Vec::new(),
     rewritten_source_post_count: 0,
     rewritten_media_reference_count: 0,
     import_run_status: "running",
@@ -2278,6 +2282,66 @@ pub async fn import_media(
     &mut report,
   )
   .await?;
+  let source_avatars = diesel::sql_query(
+    "SELECT id AS user_id, uploaded_avatar_id FROM users WHERE uploaded_avatar_id IS NOT NULL ORDER BY id",
+  )
+  .load::<SourceAvatar>(&mut source)
+  .await
+  .context("failed to read Discourse user avatar references")?;
+  for avatar in source_avatars {
+    let source_user_id = avatar.user_id;
+    let Some(target_person_id) = read_mapping(pool, run.id, "user", &source_user_id.to_string())
+      .await
+      .map_err(convert_lemmy_error)?
+    else {
+      report
+        .unresolved_avatar_source_user_ids
+        .push(source_user_id);
+      continue;
+    };
+    let Some(target_media_id) = read_mapping(
+      pool,
+      run.id,
+      "upload",
+      &avatar.uploaded_avatar_id.to_string(),
+    )
+    .await
+    .map_err(convert_lemmy_error)?
+    else {
+      report
+        .unresolved_avatar_source_user_ids
+        .push(source_user_id);
+      continue;
+    };
+    let media =
+      diesel::sql_query("SELECT id, canonical_pictrs_alias FROM media_object WHERE id = $1")
+        .bind::<BigInt, _>(target_media_id)
+        .get_result::<TargetMediaObject>(&mut get_conn(pool).await?)
+        .await
+        .context("mapped Discourse avatar media object no longer exists")?;
+    let target_avatar_url = format!(
+      "{}://{}/api/v4/image/{}",
+      SETTINGS.get_protocol_string(),
+      target_site.hostname,
+      media.canonical_pictrs_alias
+    );
+    let updated = diesel::sql_query(
+      "UPDATE person SET avatar = $1 WHERE id = $2 AND origin_local_site_id = $3",
+    )
+    .bind::<Text, _>(target_avatar_url)
+    .bind::<Integer, _>(target_person_id as i32)
+    .bind::<Integer, _>(site_id.0)
+    .execute(&mut get_conn(pool).await?)
+    .await
+    .context("failed to attach imported media to a local user avatar")?;
+    if updated == 1 {
+      report.rewritten_avatar_count += 1;
+    } else {
+      report
+        .unresolved_avatar_source_user_ids
+        .push(source_user_id);
+    }
+  }
   report.retained_secure_upload_ids.sort_unstable();
   report.retained_secure_upload_ids.dedup();
   report.retained_non_image_upload_ids.sort_unstable();
@@ -2292,6 +2356,8 @@ pub async fn import_media(
     .unresolved_private_message_source_post_ids
     .sort_unstable();
   report.unresolved_private_message_source_post_ids.dedup();
+  report.unresolved_avatar_source_user_ids.sort_unstable();
+  report.unresolved_avatar_source_user_ids.dedup();
   let unresolved = !report.missing_archive_upload_ids.is_empty()
     || !report.invalid_upload_ids.is_empty()
     || !report.unresolved_content_source_post_ids.is_empty()
@@ -2921,6 +2987,14 @@ struct SourceUpload {
   secure: bool,
   #[diesel(sql_type = Nullable<BigInt>)]
   access_control_post_id: Option<i64>,
+}
+
+#[derive(QueryableByName)]
+struct SourceAvatar {
+  #[diesel(sql_type = Integer)]
+  user_id: i32,
+  #[diesel(sql_type = Integer)]
+  uploaded_avatar_id: i32,
 }
 
 #[derive(serde::Deserialize)]

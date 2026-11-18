@@ -1,4 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
+use aws_sdk_s3::{
+  Client as S3Client,
+  config::{Credentials, Region},
+  primitives::ByteStream,
+};
 use chrono::{DateTime, Utc};
 use diesel::{
   OptionalExtension, QueryableByName,
@@ -9,14 +14,16 @@ use lemmy_db_schema::{
   impls::discourse_import::{
     create_imported_account, create_imported_bookmark, create_imported_comment,
     create_imported_community, create_imported_community_tag, create_imported_multi_community,
-    create_imported_post, create_imported_private_message, create_imported_vote, get_or_create_run,
-    phase_completed, read_mapping, record_mapping, set_run_status, store_run_report, update_phase,
+    create_imported_post, create_imported_private_message, create_imported_vote,
+    ensure_imported_private_message_notification, get_or_create_run, phase_completed, read_mapping,
+    record_mapping, set_run_status, store_run_report, update_phase,
   },
   source::{
     actor_language::SiteLanguage,
     comment::{Comment, CommentInsertForm},
     community::{Community, CommunityInsertForm},
     community_tag::{CommunityTag, CommunityTagInsertForm, PostCommunityTag},
+    file::{FileObject, FileObjectInsertForm, FileReference, FileReferenceInsertForm},
     local_user::LocalUserInsertForm,
     media::{MediaObject, MediaObjectInsertForm, MediaReference, MediaReferenceInsertForm},
     multi_community::{
@@ -31,7 +38,9 @@ use lemmy_db_schema::{
 use lemmy_db_schema_file::{
   InstanceId,
   enums::TagColor,
-  newtypes::{CommentId, CommunityId, LocalSiteId, MultiCommunityId, PostId, SiteId},
+  newtypes::{
+    CommentId, CommunityId, LocalSiteId, MultiCommunityId, PostId, PrivateMessageId, SiteId,
+  },
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, build_db_pool, get_conn},
@@ -47,6 +56,7 @@ use std::{
   path::Path,
 };
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug)]
 pub enum AccountConflictPolicy {
@@ -74,6 +84,46 @@ pub struct AccountImportReport {
   pub import_run_status: &'static str,
   pub warnings: Vec<String>,
   pub conflicts: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct AccountConflictPreviewReport {
+  pub target_site_id: i32,
+  pub source_fingerprint_sha256: String,
+  pub source_user_count: usize,
+  pub conflict_policy: &'static str,
+  pub unresolved_conflict_count: usize,
+  pub conflicts: Vec<AccountIdentityConflict>,
+}
+
+#[derive(Serialize)]
+pub struct AccountIdentityConflict {
+  pub source_user_id: i32,
+  pub source_username: String,
+  pub normalized_username: String,
+  pub username_collision: bool,
+  pub username_alias_collision: bool,
+  pub resolved_username: Option<String>,
+  pub source_email: Option<String>,
+  pub email_collision: bool,
+  pub email_action: &'static str,
+  pub blocks_import: bool,
+}
+
+#[derive(QueryableByName)]
+struct SourceAccountIdentity {
+  #[diesel(sql_type = Integer)]
+  id: i32,
+  #[diesel(sql_type = Text)]
+  username: String,
+  #[diesel(sql_type = Nullable<Text>)]
+  email: Option<String>,
+}
+
+#[derive(QueryableByName)]
+struct ImportRunId {
+  #[diesel(sql_type = BigInt)]
+  id: i64,
 }
 
 #[derive(Serialize)]
@@ -108,10 +158,16 @@ pub struct PrivateMessageImportReport {
   pub target_site_id: i32,
   pub source_fingerprint_sha256: String,
   pub source_pm_post_count: usize,
+  pub source_chat_message_count: usize,
   pub imported_pm_message_count: usize,
   pub resumed_pm_message_count: usize,
   pub unresolved_source_pm_post_ids: Vec<i32>,
   pub pairwise_group_topic_ids: Vec<i32>,
+  pub pairwise_group_chat_channel_ids: Vec<i64>,
+  pub unresolved_chat_message_ids: Vec<i64>,
+  pub source_chat_messages_with_attachments: usize,
+  pub source_chat_messages_with_structured_blocks: usize,
+  pub warnings: Vec<String>,
   pub import_run_status: &'static str,
 }
 
@@ -120,7 +176,6 @@ pub struct LegacyUrlExportReport {
   pub target_site_id: i32,
   pub source_fingerprint_sha256: String,
   pub generated_entry_count: usize,
-  pub skipped_slug_topic_ids: Vec<i32>,
   pub unmapped_source_post_ids: Vec<i32>,
   pub import_run_status: &'static str,
 }
@@ -161,6 +216,8 @@ pub struct MediaImportReport {
   pub archived_upload_file_count: usize,
   pub imported_image_count: usize,
   pub resumed_image_count: usize,
+  pub imported_attachment_count: usize,
+  pub resumed_attachment_count: usize,
   pub retained_secure_upload_ids: Vec<i32>,
   pub retained_non_image_upload_ids: Vec<i32>,
   pub retained_upload_manifest: Vec<RetainedUpload>,
@@ -197,6 +254,8 @@ pub struct HistoricalPollReport {
   pub prompt: String,
   pub status: i32,
   pub results_visibility: i32,
+  pub is_closed: bool,
+  pub show_public_results: bool,
   pub options: Vec<HistoricalPollOption>,
 }
 
@@ -286,6 +345,12 @@ struct TargetSite {
   hostname: String,
   #[diesel(sql_type = Bool)]
   federation_enabled: bool,
+  #[diesel(sql_type = Bool)]
+  file_upload_disabled: bool,
+  #[diesel(sql_type = BigInt)]
+  file_max_upload_size_bytes: i64,
+  #[diesel(sql_type = Array<Text>)]
+  file_allowed_mime_types: Vec<String>,
 }
 
 #[derive(QueryableByName, Clone)]
@@ -378,6 +443,133 @@ struct TargetMultiCommunityEntry {
   multi_community_id: i32,
   #[diesel(sql_type = Integer)]
   community_id: i32,
+}
+
+/// Read-only preflight for username and primary-email collisions against one target site.
+pub async fn preview_account_conflicts(
+  source_database_url: &str,
+  site_id: i32,
+  source_fingerprint: &str,
+  conflict_policy: AccountConflictPolicy,
+) -> Result<AccountConflictPreviewReport> {
+  let mut source = AsyncPgConnection::establish(source_database_url)
+    .await
+    .context("failed to connect to the restored Discourse source database")?;
+  let target_pool = build_db_pool().map_err(convert_lemmy_error)?;
+  let pool = &mut DbPool::Pool(&target_pool);
+  let site_id = LocalSiteId(site_id);
+  load_target_site(pool, site_id).await?;
+
+  let run = diesel::sql_query(
+    "SELECT id FROM discourse_import_run \
+     WHERE local_site_id = $1 AND source_fingerprint_sha256 = $2",
+  )
+  .bind::<Integer, _>(site_id.0)
+  .bind::<Text, _>(source_fingerprint)
+  .get_result::<ImportRunId>(&mut get_conn(pool).await?)
+  .await
+  .optional()
+  .context("failed to inspect an existing import run for preview")?;
+  let mut reserved_names = HashSet::new();
+  let mut conflicts = Vec::new();
+  let mut unresolved_conflict_count = 0;
+  let mut source_user_count = 0;
+  let mut last_id = 0_i32;
+  loop {
+    let identities = diesel::sql_query(
+      "SELECT u.id, u.username, ue.email FROM users u \
+       LEFT JOIN user_emails ue ON ue.user_id = u.id AND ue.primary = TRUE \
+       WHERE u.id > $1 ORDER BY u.id LIMIT 500",
+    )
+    .bind::<Integer, _>(last_id)
+    .load::<SourceAccountIdentity>(&mut source)
+    .await
+    .context("failed to read source account identities for preview")?;
+    if identities.is_empty() {
+      break;
+    }
+    for identity in identities {
+      last_id = identity.id;
+      source_user_count += 1;
+      if let Some(run) = &run
+        && let Some(target_id) = read_mapping(pool, run.id, "user", &identity.id.to_string())
+          .await
+          .map_err(convert_lemmy_error)?
+      {
+        let person = Person::read(pool, lemmy_db_schema_file::PersonId(target_id as i32))
+          .await
+          .map_err(convert_lemmy_error)?;
+        reserved_names.insert(person.name);
+        continue;
+      }
+
+      let normalized_username = normalize_username(&identity.username, identity.id);
+      let username_collision =
+        username_taken(pool, site_id, &normalized_username, &reserved_names).await?;
+      let mut username_alias_collision = false;
+      let resolved_username = if username_collision {
+        match conflict_policy {
+          AccountConflictPolicy::Report | AccountConflictPolicy::Skip => None,
+          AccountConflictPolicy::Rename => {
+            let alias = renamed_username(&normalized_username, identity.id)?;
+            username_alias_collision =
+              username_taken(pool, site_id, &alias, &reserved_names).await?;
+            (!username_alias_collision).then_some(alias)
+          }
+        }
+      } else {
+        Some(normalized_username.clone())
+      };
+      if let Some(name) = &resolved_username {
+        reserved_names.insert(name.clone());
+      }
+      let email_collision = match identity.email.as_deref() {
+        Some(email) => email_taken(pool, site_id, email).await?,
+        None => false,
+      };
+      let blocks_import = username_alias_collision
+        || ((username_collision || email_collision)
+          && !matches!(conflict_policy, AccountConflictPolicy::Rename));
+      if blocks_import {
+        unresolved_conflict_count += 1;
+      }
+      if username_collision || email_collision {
+        conflicts.push(AccountIdentityConflict {
+          source_user_id: identity.id,
+          source_username: identity.username,
+          normalized_username,
+          username_collision,
+          username_alias_collision,
+          resolved_username,
+          source_email: identity.email.clone(),
+          email_collision,
+          email_action: if email_collision
+            && matches!(conflict_policy, AccountConflictPolicy::Rename)
+          {
+            "omit_conflicting_email"
+          } else if identity.email.is_some() {
+            "keep_source_email"
+          } else {
+            "no_source_email"
+          },
+          blocks_import,
+        });
+      }
+    }
+  }
+
+  Ok(AccountConflictPreviewReport {
+    target_site_id: site_id.0,
+    source_fingerprint_sha256: source_fingerprint.to_string(),
+    source_user_count,
+    conflict_policy: match conflict_policy {
+      AccountConflictPolicy::Report => "report",
+      AccountConflictPolicy::Rename => "rename",
+      AccountConflictPolicy::Skip => "skip",
+    },
+    unresolved_conflict_count,
+    conflicts,
+  })
 }
 
 pub async fn import_accounts(
@@ -480,14 +672,14 @@ pub async fn import_accounts(
       if !user.active || !user.approved {
         report.inactive_or_unapproved_users_count += 1;
         report.warnings.push(format!(
-          "user {} was inactive or unapproved in Discourse; active and approved flags were mapped to the available email and application gates, whose enforcement depends on target-site settings",
+          "user {} was inactive or unapproved in Discourse; the imported person is marked deleted so login remains blocked independently of target-site settings",
           user.id
         ));
       }
       if user.suspended_till.is_some_and(|until| until > Utc::now()) {
         report.suspended_users_count += 1;
         report.warnings.push(format!(
-          "user {} was suspended in Discourse; review target account access",
+          "user {} was suspended in Discourse; Lemmy has no temporary local-user suspension, so review target account access",
           user.id
         ));
       }
@@ -522,11 +714,14 @@ pub async fn import_accounts(
           user.id
         ));
       }
-      if read_mapping(pool, run.id, "user", &user.id.to_string())
+      if let Some(target_id) = read_mapping(pool, run.id, "user", &user.id.to_string())
         .await
         .map_err(convert_lemmy_error)?
-        .is_some()
       {
+        let person = Person::read(pool, lemmy_db_schema_file::PersonId(target_id as i32))
+          .await
+          .map_err(convert_lemmy_error)?;
+        reserved_names.insert(person.name);
         report.resumed_user_count += 1;
         update_phase(
           pool,
@@ -617,6 +812,10 @@ pub async fn import_accounts(
         keypair.public_key,
         InstanceId(target_site.instance_id),
       );
+      // Login checks person deletion independently of target-wide registration
+      // and email-verification settings, so this preserves the source account
+      // gate without changing settings for existing target users.
+      person_form.deleted = Some(!user.active || !user.approved);
       person_form.display_name = user.display_name;
       person_form.bio =
         merge_profile_fields(user.bio, user.location.as_deref(), user.website.as_deref());
@@ -798,6 +997,7 @@ pub async fn import_categories(
         .await
         .map_err(convert_lemmy_error)?;
       communities.insert(category.id, community.id);
+      reserved_community_names.insert(community.name.clone());
       report.resumed_community_count += 1;
       continue;
     }
@@ -1085,9 +1285,18 @@ pub async fn import_discussions(
             .map_err(convert_lemmy_error)?
         {
           let target_post_id = PostId(target_id as i32);
-          let _existing = Post::read(pool, target_post_id)
+          let existing_post = Post::read(pool, target_post_id)
             .await
             .map_err(convert_lemmy_error)?;
+          if existing_post.creator_id != target_user_id
+            || existing_post.community_id != target_community_id
+            || existing_post.origin_local_site_id != Some(site_id)
+          {
+            bail!(
+              "Discourse topic {} maps to a post with conflicting ownership",
+              source_post.topic_id
+            );
+          }
           record_mapping(
             pool,
             run.id,
@@ -1104,7 +1313,7 @@ pub async fn import_discussions(
           &protocol_and_hostname,
           source_fingerprint,
           "topic",
-          source_post.topic_id,
+          i64::from(source_post.topic_id),
         )?;
         let mut form = PostInsertForm::new(
           source_post.title.clone(),
@@ -1188,7 +1397,7 @@ pub async fn import_discussions(
           &protocol_and_hostname,
           source_fingerprint,
           "reply",
-          source_post.id,
+          i64::from(source_post.id),
         )?;
         let mut form = CommentInsertForm::new(
           target_user_id,
@@ -1292,10 +1501,16 @@ pub async fn import_private_messages(
     target_site_id: site_id.0,
     source_fingerprint_sha256: source_fingerprint.to_string(),
     source_pm_post_count: 0,
+    source_chat_message_count: 0,
     imported_pm_message_count: 0,
     resumed_pm_message_count: 0,
     unresolved_source_pm_post_ids: Vec::new(),
     pairwise_group_topic_ids: Vec::new(),
+    pairwise_group_chat_channel_ids: Vec::new(),
+    unresolved_chat_message_ids: Vec::new(),
+    source_chat_messages_with_attachments: 0,
+    source_chat_messages_with_structured_blocks: 0,
+    warnings: Vec::new(),
     import_run_status: "running",
   };
   let mut participant_cache: HashMap<i32, Vec<i32>> = HashMap::new();
@@ -1374,11 +1589,17 @@ pub async fn import_private_messages(
           "{}:{}:{}",
           source_post.topic_id, source_post.id, source_recipient_id
         );
-        if read_mapping(pool, run.id, "private_message", &mapping_key)
+        if let Some(target_id) = read_mapping(pool, run.id, "private_message", &mapping_key)
           .await
           .map_err(convert_lemmy_error)?
-          .is_some()
         {
+          ensure_imported_private_message_notification(
+            pool,
+            PrivateMessageId(target_id as i32),
+            true,
+          )
+          .await
+          .map_err(convert_lemmy_error)?;
           report.resumed_pm_message_count += 1;
           continue;
         }
@@ -1386,7 +1607,7 @@ pub async fn import_private_messages(
           &protocol_and_hostname,
           source_fingerprint,
           &format!("private-message/{source_recipient_id}"),
-          source_post.id,
+          i64::from(source_post.id),
         )?;
         let mut form =
           PrivateMessageInsertForm::new(sender_id, target_recipient_id, source_post.raw.clone());
@@ -1402,6 +1623,7 @@ pub async fn import_private_messages(
           &mapping_key,
           &source_post.id.to_string(),
           site_id,
+          true,
           &form,
         )
         .await
@@ -1426,9 +1648,222 @@ pub async fn import_private_messages(
       .map_err(convert_lemmy_error)?;
     }
   }
+  let chat_tables = diesel::sql_query(
+    "SELECT to_regclass('public.chat_messages') IS NOT NULL AS has_messages, \
+     to_regclass('public.chat_channels') IS NOT NULL AS has_channels, \
+     to_regclass('public.direct_message_channels') IS NOT NULL AS has_dm_channels, \
+     to_regclass('public.direct_message_users') IS NOT NULL AS has_dm_users",
+  )
+  .get_result::<SourceChatTables>(&mut source)
+  .await
+  .context("failed to inspect optional Discourse Chat tables")?;
+  let all_chat_tables_present = chat_tables.has_messages
+    && chat_tables.has_channels
+    && chat_tables.has_dm_channels
+    && chat_tables.has_dm_users;
+  let any_chat_table_present = chat_tables.has_messages
+    || chat_tables.has_channels
+    || chat_tables.has_dm_channels
+    || chat_tables.has_dm_users;
+  let incomplete_chat_tables = any_chat_table_present && !all_chat_tables_present;
+  if all_chat_tables_present {
+    let mut last_chat_message_id = 0_i64;
+    let mut chat_participant_cache = HashMap::<i64, Vec<i32>>::new();
+    loop {
+      let batch = diesel::sql_query(
+        "SELECT m.id, dmc.id AS direct_message_channel_id, \
+         dmc.\"group\" AS is_group, m.user_id, COALESCE(m.message, m.cooked, '') AS raw, \
+         m.created_at AT TIME ZONE 'UTC' AS created_at, \
+         m.updated_at AT TIME ZONE 'UTC' AS updated_at, \
+         m.deleted_at IS NOT NULL AS deleted, \
+         EXISTS (SELECT 1 FROM upload_references ur WHERE ur.target_id = m.id \
+           AND ur.target_type = 'ChatMessage') AS has_attachments, \
+         m.blocks IS NOT NULL AND m.blocks <> 'null'::jsonb AS has_structured_blocks \
+         FROM chat_messages m \
+         JOIN chat_channels cc ON cc.id = m.chat_channel_id AND cc.chatable_type = 'DirectMessage' \
+         JOIN direct_message_channels dmc ON dmc.id = cc.chatable_id \
+         WHERE m.id > $1 ORDER BY m.id LIMIT 500",
+      )
+      .bind::<BigInt, _>(last_chat_message_id)
+      .load::<SourceChatDirectMessage>(&mut source)
+      .await
+      .context("failed to read Discourse direct-message chat messages")?;
+      if batch.is_empty() {
+        break;
+      }
+      for chat_message in batch {
+        last_chat_message_id = chat_message.id;
+        report.source_chat_message_count += 1;
+        report.source_chat_messages_with_attachments += usize::from(chat_message.has_attachments);
+        report.source_chat_messages_with_structured_blocks +=
+          usize::from(chat_message.has_structured_blocks);
+        let Some(source_sender_id) = chat_message.user_id else {
+          report.unresolved_chat_message_ids.push(chat_message.id);
+          continue;
+        };
+        let participants = if let Some(participants) =
+          chat_participant_cache.get(&chat_message.direct_message_channel_id)
+        {
+          participants.clone()
+        } else {
+          let participants = diesel::sql_query(
+            "SELECT user_id FROM direct_message_users \
+             WHERE direct_message_channel_id = $1 ORDER BY user_id",
+          )
+          .bind::<BigInt, _>(chat_message.direct_message_channel_id)
+          .load::<SourceParticipant>(&mut source)
+          .await
+          .context("failed to read Discourse direct-message channel participants")?
+          .into_iter()
+          .map(|participant| participant.user_id)
+          .collect::<Vec<_>>();
+          chat_participant_cache
+            .insert(chat_message.direct_message_channel_id, participants.clone());
+          participants
+        };
+        let recipients = participants
+          .iter()
+          .copied()
+          .filter(|user_id| *user_id != source_sender_id)
+          .collect::<Vec<_>>();
+        if (chat_message.is_group || recipients.len() > 1)
+          && !report
+            .pairwise_group_chat_channel_ids
+            .contains(&chat_message.direct_message_channel_id)
+        {
+          report
+            .pairwise_group_chat_channel_ids
+            .push(chat_message.direct_message_channel_id);
+        }
+        if recipients.is_empty() {
+          report.unresolved_chat_message_ids.push(chat_message.id);
+          continue;
+        }
+        let Some(sender_id) = read_mapping(pool, run.id, "user", &source_sender_id.to_string())
+          .await
+          .map_err(convert_lemmy_error)?
+        else {
+          report.unresolved_chat_message_ids.push(chat_message.id);
+          continue;
+        };
+        for source_recipient_id in recipients {
+          let Some(recipient_id) =
+            read_mapping(pool, run.id, "user", &source_recipient_id.to_string())
+              .await
+              .map_err(convert_lemmy_error)?
+          else {
+            report.unresolved_chat_message_ids.push(chat_message.id);
+            continue;
+          };
+          // A leading zero distinguishes Chat messages from legacy PM post IDs;
+          // both still fit the validation ledger's sender lookup convention.
+          let source_message_key = format!("0:{}", chat_message.id);
+          let mapping_key = format!(
+            "{}:{}:{}",
+            source_message_key, chat_message.direct_message_channel_id, source_recipient_id
+          );
+          if let Some(target_id) = read_mapping(pool, run.id, "private_message", &mapping_key)
+            .await
+            .map_err(convert_lemmy_error)?
+          {
+            ensure_imported_private_message_notification(
+              pool,
+              PrivateMessageId(target_id as i32),
+              true,
+            )
+            .await
+            .map_err(convert_lemmy_error)?;
+            report.resumed_pm_message_count += 1;
+            continue;
+          }
+          let ap_id = imported_object_ap_id(
+            &protocol_and_hostname,
+            source_fingerprint,
+            &format!(
+              "chat-private-message/{}/{source_recipient_id}",
+              chat_message.direct_message_channel_id
+            ),
+            chat_message.id,
+          )?;
+          let mut form = PrivateMessageInsertForm::new(
+            lemmy_db_schema_file::PersonId(sender_id as i32),
+            lemmy_db_schema_file::PersonId(recipient_id as i32),
+            chat_message.raw.clone(),
+          );
+          form.deleted = Some(chat_message.deleted);
+          form.published_at = Some(chat_message.created_at);
+          form.updated_at = chat_message.updated_at;
+          form.ap_id = Some(ap_id);
+          form.local = Some(true);
+          form.origin_local_site_id = Some(site_id);
+          create_imported_private_message(
+            pool,
+            run.id,
+            &mapping_key,
+            &source_message_key,
+            site_id,
+            true,
+            &form,
+          )
+          .await
+          .map_err(convert_lemmy_error)
+          .with_context(|| {
+            format!(
+              "failed to import Discourse Chat message {}",
+              chat_message.id
+            )
+          })?;
+          report.imported_pm_message_count += 1;
+        }
+        update_phase(
+          pool,
+          run.id,
+          "private_messages",
+          Some(&last_chat_message_id.to_string()),
+          "running",
+          (report.imported_pm_message_count + report.resumed_pm_message_count) as i64,
+        )
+        .await
+        .map_err(convert_lemmy_error)?;
+      }
+    }
+  } else if incomplete_chat_tables {
+    report.warnings.push(
+      "Discourse Chat tables are incomplete; direct-message chat history was not imported and the phase cannot complete"
+        .to_string(),
+    );
+  } else {
+    report.warnings.push(
+      "Discourse Chat tables are absent; direct-message chat history was not imported".to_string(),
+    );
+  }
+  if report.source_chat_messages_with_attachments > 0 {
+    report.warnings.push(format!(
+      "{} source direct-message Chat messages contain upload references that were not rewritten",
+      report.source_chat_messages_with_attachments
+    ));
+  }
+  if report.source_chat_messages_with_structured_blocks > 0 {
+    report.warnings.push(format!(
+      "{} source direct-message Chat messages contain structured blocks; only the text field is preserved when the message is imported",
+      report.source_chat_messages_with_structured_blocks
+    ));
+  }
+  if report.source_chat_message_count > 0 {
+    report.warnings.push(
+      "Chat direct-message recipients come from the current channel membership snapshot; historical members who have left cannot be reconstructed"
+        .to_string(),
+    );
+  }
   report.pairwise_group_topic_ids.sort_unstable();
   report.pairwise_group_topic_ids.dedup();
-  let unresolved = !report.unresolved_source_pm_post_ids.is_empty();
+  report.pairwise_group_chat_channel_ids.sort_unstable();
+  report.pairwise_group_chat_channel_ids.dedup();
+  report.unresolved_chat_message_ids.sort_unstable();
+  report.unresolved_chat_message_ids.dedup();
+  let unresolved = !report.unresolved_source_pm_post_ids.is_empty()
+    || !report.unresolved_chat_message_ids.is_empty()
+    || incomplete_chat_tables;
   update_phase(
     pool,
     run.id,
@@ -1518,7 +1953,7 @@ pub async fn export_legacy_urls(
     .collect::<HashMap<_, _>>();
 
   let source_posts = diesel::sql_query(
-    "SELECT t.id AS topic_id, t.slug, p.id AS source_post_id, p.post_number \
+    "SELECT t.id AS topic_id, p.id AS source_post_id, p.post_number \
      FROM topics t JOIN posts p ON p.topic_id = t.id \
      WHERE t.archetype <> 'private_message' AND p.post_type = 1 \
      ORDER BY t.id, p.post_number",
@@ -1531,7 +1966,6 @@ pub async fn export_legacy_urls(
     target_site_id: site_id.0,
     source_fingerprint_sha256: source_fingerprint.to_string(),
     generated_entry_count: 0,
-    skipped_slug_topic_ids: Vec::new(),
     unmapped_source_post_ids: Vec::new(),
     import_run_status: "running",
   };
@@ -1552,32 +1986,16 @@ pub async fn export_legacy_urls(
         .push(source_post.source_post_id);
       continue;
     };
-    let id_only = if source_post.post_number <= 1 {
-      format!("/t/{}", source_post.topic_id)
-    } else {
-      format!("/t/{}/{}", source_post.topic_id, source_post.post_number)
-    };
-    entries.insert(id_only, target_path.clone());
-    if let Some(slug) = source_post
-      .slug
-      .as_deref()
-      .filter(|slug| safe_discourse_slug(slug))
-    {
-      let slugged = if source_post.post_number <= 1 {
-        format!("/t/{slug}/{}", source_post.topic_id)
-      } else {
-        format!(
-          "/t/{slug}/{}/{}",
-          source_post.topic_id, source_post.post_number
-        )
-      };
-      entries.insert(slugged, target_path);
-    } else if source_post.slug.is_some() {
-      report.skipped_slug_topic_ids.push(source_post.topic_id);
-    }
+    entries.insert(
+      format!(
+        "{}:{}",
+        source_post.topic_id,
+        source_post.post_number.max(1)
+      ),
+      target_path.clone(),
+    );
+    entries.insert(format!("{}:last", source_post.topic_id), target_path);
   }
-  report.skipped_slug_topic_ids.sort_unstable();
-  report.skipped_slug_topic_ids.dedup();
   report.unmapped_source_post_ids.sort_unstable();
   report.unmapped_source_post_ids.dedup();
   report.generated_entry_count = entries.len();
@@ -2043,6 +2461,7 @@ pub async fn import_media(
   archived_upload_file_count: usize,
 ) -> Result<MediaImportReport> {
   const MAX_IMAGE_BYTES: u64 = 268_435_456;
+  const MAX_ATTACHMENT_BYTES: u64 = 1_073_741_824;
   let mut source = AsyncPgConnection::establish(source_database_url)
     .await
     .context("failed to connect to the restored Discourse source database")?;
@@ -2072,6 +2491,8 @@ pub async fn import_media(
     .await
     .map_err(convert_lemmy_error)?;
 
+  let _ = rustls::crypto::ring::default_provider().install_default();
+
   let members = if archive
     .file_name()
     .and_then(|name| name.to_str())
@@ -2093,6 +2514,9 @@ pub async fn import_media(
   let client = reqwest::Client::builder()
     .build()
     .context("failed to create the pict-rs upload client")?;
+  let s3_storage = SETTINGS
+    .s3()
+    .map(|config| (build_s3_client(&config), config.bucket));
   let mut report = MediaImportReport {
     target_site_id: site_id.0,
     source_fingerprint_sha256: source_fingerprint.to_string(),
@@ -2100,6 +2524,8 @@ pub async fn import_media(
     archived_upload_file_count,
     imported_image_count: 0,
     resumed_image_count: 0,
+    imported_attachment_count: 0,
+    resumed_attachment_count: 0,
     retained_secure_upload_ids: Vec::new(),
     retained_non_image_upload_ids: Vec::new(),
     retained_upload_manifest: Vec::new(),
@@ -2119,9 +2545,31 @@ pub async fn import_media(
   let mut media_items = Vec::new();
   let mut all_source_tokens = Vec::new();
   for upload in &uploads {
-    let source_tokens = upload_source_reference_tokens(upload);
+    let source_sha1 = upload_source_sha1(upload);
+    let mut source_tokens = upload_source_reference_tokens(upload);
+    let optimized_images =
+      diesel::sql_query("SELECT url FROM optimized_images WHERE upload_id = $1 ORDER BY id")
+        .bind::<Integer, _>(upload.id)
+        .load::<SourceUploadVariant>(&mut source)
+        .await
+        .context("failed to read Discourse optimized upload image paths")?;
+    for variant in optimized_images {
+      source_tokens.push(variant.url.clone());
+      if let Some(path) = upload_url_path(&variant.url) {
+        source_tokens.push(path);
+      }
+    }
+    source_tokens.sort_by(|left, right| right.len().cmp(&left.len()).then(left.cmp(right)));
+    source_tokens.dedup();
     all_source_tokens.extend(source_tokens.iter().cloned());
-    let archive_member = find_archive_upload_member(&upload.url, &members);
+    let archive_member = find_archive_upload_member(
+      &upload.url,
+      upload.id,
+      source_sha1.as_deref(),
+      upload.extension.as_deref(),
+      &upload.original_filename,
+      &members,
+    );
     if upload.secure || upload.access_control_post_id.is_some() {
       report.retained_secure_upload_ids.push(upload.id);
       report.retained_upload_manifest.push(RetainedUpload {
@@ -2149,15 +2597,155 @@ pub async fn import_media(
       extension.as_str(),
       "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp"
     ) {
-      report.retained_non_image_upload_ids.push(upload.id);
-      report.retained_upload_manifest.push(RetainedUpload {
-        source_upload_id: upload.id,
-        original_filename: upload.original_filename.clone(),
-        source_url: upload.url.clone(),
-        archive_member,
-        filesize_bytes: upload.filesize,
-        reason: "non-image attachment import is not supported",
-      });
+      let owner_id = read_mapping(pool, run.id, "user", &upload.user_id.to_string())
+        .await
+        .map_err(convert_lemmy_error)?;
+      let mut imported = false;
+      if !target_site.file_upload_disabled
+        && upload.filesize > 0
+        && upload.filesize <= target_site.file_max_upload_size_bytes
+        && owner_id.is_some()
+        && let (Some(member), Some((storage, bucket))) = (archive_member.as_deref(), &s3_storage)
+        && let Ok(bytes) = super::read_archive_member(archive, member, MAX_ATTACHMENT_BYTES)
+        && bytes.len() as i64 == upload.filesize
+      {
+        let sha1 = hex::encode(<Sha1 as Sha1Digest>::digest(&bytes));
+        if source_sha1
+          .as_deref()
+          .is_none_or(|expected| expected.eq_ignore_ascii_case(&sha1))
+          && let Some(content_type) = infer::get(&bytes).map(|kind| kind.mime_type().to_string())
+          && !content_type.starts_with("image/")
+          && !content_type.starts_with("video/")
+          && (target_site.file_allowed_mime_types.is_empty()
+            || target_site
+              .file_allowed_mime_types
+              .iter()
+              .any(|allowed| allowed == &content_type))
+        {
+          let owner_id = owner_id.context("mapped file owner is missing")?;
+          let object = ensure_generic_file_object(
+            pool,
+            storage,
+            bucket,
+            bytes,
+            upload.filesize,
+            &content_type,
+          )
+          .await?;
+          if let Some(reference_id) =
+            read_mapping(pool, run.id, "file_upload", &upload.id.to_string())
+              .await
+              .map_err(convert_lemmy_error)?
+          {
+            let reference = diesel::sql_query(
+              "SELECT fr.id, fr.public_id::text, fo.content_hash FROM file_reference fr \
+               JOIN file_object fo ON fo.id = fr.file_id \
+               WHERE fr.id = $1 AND fr.local_site_id = $2",
+            )
+            .bind::<Integer, _>(reference_id as i32)
+            .bind::<Integer, _>(site_id.0)
+            .get_result::<TargetFileReference>(&mut get_conn(pool).await?)
+            .await
+            .context("mapped generic file reference is missing")?;
+            if reference.content_hash != object.content_hash {
+              bail!(
+                "mapped generic file reference no longer matches source upload {}",
+                upload.id
+              );
+            }
+            let filename = safe_import_filename(&upload.original_filename);
+            let target_url = format!(
+              "{}://{}/api/v4/file/{}/{}",
+              SETTINGS.get_protocol_string(),
+              target_site.hostname,
+              reference.public_id,
+              urlencoding::encode(&filename)
+            );
+            media_items.push(ImportedMediaItem {
+              media_id: None,
+              target_url,
+              replacements: source_tokens,
+            });
+            report.resumed_attachment_count += 1;
+            continue;
+          }
+          let filename = safe_import_filename(&upload.original_filename);
+          let target_owner_id = lemmy_db_schema_file::PersonId(owner_id as i32);
+          let existing_reference = diesel::sql_query(
+            "SELECT fr.id, fr.public_id::text, fo.content_hash FROM file_reference fr \
+             JOIN file_object fo ON fo.id = fr.file_id WHERE fr.local_site_id = $1 \
+             AND fr.file_id = $2 AND fr.owner_person_id = $3 \
+             AND fr.original_filename = $4 LIMIT 1",
+          )
+          .bind::<Integer, _>(site_id.0)
+          .bind::<Integer, _>(object.id.0)
+          .bind::<Integer, _>(target_owner_id.0)
+          .bind::<Text, _>(&filename)
+          .get_result::<TargetFileReference>(&mut get_conn(pool).await?)
+          .await
+          .optional()
+          .context("failed to look up an existing imported file reference")?;
+          let reference = if let Some(reference) = existing_reference {
+            reference
+          } else {
+            let created = FileReference::create(
+              pool,
+              &FileReferenceInsertForm {
+                public_id: Uuid::new_v4(),
+                local_site_id: site_id,
+                file_id: object.id,
+                owner_person_id: target_owner_id,
+                original_filename: filename.clone(),
+              },
+            )
+            .await
+            .map_err(convert_lemmy_error)?;
+            TargetFileReference {
+              id: created.id,
+              public_id: created.public_id.to_string(),
+              content_hash: object.content_hash.clone(),
+            }
+          };
+          record_mapping(
+            pool,
+            run.id,
+            "file_upload",
+            &upload.id.to_string(),
+            i64::from(reference.id),
+          )
+          .await
+          .map_err(convert_lemmy_error)?;
+          let target_url = format!(
+            "{}://{}/api/v4/file/{}/{}",
+            SETTINGS.get_protocol_string(),
+            target_site.hostname,
+            reference.public_id,
+            urlencoding::encode(&filename)
+          );
+          media_items.push(ImportedMediaItem {
+            media_id: None,
+            target_url,
+            replacements: source_tokens,
+          });
+          report.imported_attachment_count += 1;
+          imported = true;
+        }
+      }
+      if !imported {
+        report.retained_non_image_upload_ids.push(upload.id);
+        report.retained_upload_manifest.push(RetainedUpload {
+          source_upload_id: upload.id,
+          original_filename: upload.original_filename.clone(),
+          source_url: upload.url.clone(),
+          archive_member,
+          filesize_bytes: upload.filesize,
+          reason: if target_site.file_upload_disabled || s3_storage.is_none() {
+            "generic file storage is disabled or unavailable"
+          } else {
+            "file is not in the archive, exceeds policy, has an unsupported type, or has no mapped owner"
+          },
+        });
+      }
       continue;
     }
     let Some(member) = archive_member else {
@@ -2175,10 +2763,9 @@ pub async fn import_media(
         continue;
       }
     };
-    let source_sha1 = <Sha1 as Sha1Digest>::digest(&bytes);
-    let source_sha1_hex = hex::encode(source_sha1);
-    if upload
-      .sha1
+    let actual_sha1 = <Sha1 as Sha1Digest>::digest(&bytes);
+    let source_sha1_hex = hex::encode(actual_sha1);
+    if source_sha1
       .as_deref()
       .is_some_and(|expected| !expected.eq_ignore_ascii_case(&source_sha1_hex))
     {
@@ -2290,7 +2877,7 @@ pub async fn import_media(
       media.canonical_pictrs_alias
     );
     media_items.push(ImportedMediaItem {
-      media_id: media.id,
+      media_id: Some(media.id),
       target_url,
       replacements: source_tokens,
     });
@@ -2486,7 +3073,10 @@ pub async fn import_media(
     "media",
     None,
     if unresolved { "failed" } else { "completed" },
-    (report.imported_image_count + report.resumed_image_count) as i64,
+    (report.imported_image_count
+      + report.resumed_image_count
+      + report.imported_attachment_count
+      + report.resumed_attachment_count) as i64,
   )
   .await
   .map_err(convert_lemmy_error)?;
@@ -2559,17 +3149,15 @@ async fn validate_discussion_relationships(
        LEFT JOIN discourse_import_mapping parent_map ON parent_map.run_id = $1 \
          AND parent_map.entity_type = 'source_discussion_post' \
          AND parent_map.source_id = r.parent_source_post_id::text \
-       LEFT JOIN post p ON p.id = object_map.target_id \
        LEFT JOIN comment c ON c.id = object_map.target_id \
        WHERE object_map.target_id IS NULL OR topic_map.target_id IS NULL \
          OR user_map.target_id IS NULL OR category_map.target_id IS NULL \
-         OR (r.post_number = 1 AND (p.id IS NULL OR c.id IS NOT NULL \
-           OR p.id <> topic_map.target_id OR p.creator_id <> user_map.target_id \
-           OR p.community_id <> category_map.target_id \
-           OR p.origin_local_site_id IS DISTINCT FROM $2 \
-           OR NOT EXISTS (SELECT 1 FROM post_site ps WHERE ps.local_site_id = $2 \
-             AND ps.post_id = p.id))) \
-         OR (r.post_number <> 1 AND (c.id IS NULL OR p.id IS NOT NULL \
+         OR (r.post_number = 1 AND (topic_map.target_id IS NULL \
+           OR NOT EXISTS (SELECT 1 FROM post p JOIN post_site ps ON ps.post_id = p.id \
+             WHERE p.id = topic_map.target_id AND p.creator_id = user_map.target_id \
+               AND p.community_id = category_map.target_id \
+               AND p.origin_local_site_id = $2 AND ps.local_site_id = $2))) \
+         OR (r.post_number <> 1 AND (c.id IS NULL \
            OR c.post_id <> topic_map.target_id OR c.creator_id <> user_map.target_id \
            OR c.community_id <> category_map.target_id \
            OR c.origin_local_site_id IS DISTINCT FROM $2 \
@@ -2794,6 +3382,48 @@ pub async fn validate_import(
       .with_context(|| format!("failed to count source {name}"))?;
     source_counts.insert(name.to_string(), result.count);
   }
+  let chat_tables = diesel::sql_query(
+    "SELECT to_regclass('public.chat_messages') IS NOT NULL AS has_messages, \
+     to_regclass('public.chat_channels') IS NOT NULL AS has_channels, \
+     to_regclass('public.direct_message_channels') IS NOT NULL AS has_dm_channels, \
+     to_regclass('public.direct_message_users') IS NOT NULL AS has_dm_users",
+  )
+  .get_result::<SourceChatTables>(&mut source)
+  .await
+  .context("failed to inspect optional Discourse Chat tables during validation")?;
+  let (chat_message_count, chat_message_copy_count) = if chat_tables.has_messages
+    && chat_tables.has_channels
+    && chat_tables.has_dm_channels
+    && chat_tables.has_dm_users
+  {
+    #[derive(QueryableByName)]
+    struct ChatCounts {
+      #[diesel(sql_type = BigInt)]
+      messages: i64,
+      #[diesel(sql_type = BigInt)]
+      copies: i64,
+    }
+    let result = diesel::sql_query(
+      "SELECT COUNT(*)::bigint AS messages, COALESCE(SUM(recipient_count), 0)::bigint AS copies \
+       FROM (SELECT m.id, COUNT(DISTINCT dmu.user_id) FILTER (WHERE dmu.user_id <> m.user_id) AS recipient_count \
+         FROM chat_messages m \
+         JOIN chat_channels cc ON cc.id = m.chat_channel_id AND cc.chatable_type = 'DirectMessage' \
+         JOIN direct_message_channels dmc ON dmc.id = cc.chatable_id \
+         LEFT JOIN direct_message_users dmu ON dmu.direct_message_channel_id = dmc.id \
+         GROUP BY m.id) direct_messages",
+    )
+    .get_result::<ChatCounts>(&mut source)
+    .await
+    .context("failed to count Discourse direct-message chat rows")?;
+    (result.messages, result.copies)
+  } else {
+    (0, 0)
+  };
+  source_counts.insert("chat_direct_messages".to_string(), chat_message_count);
+  source_counts.insert(
+    "chat_direct_message_copies".to_string(),
+    chat_message_copy_count,
+  );
 
   let mut mapped_counts = BTreeMap::new();
   for entity_type in [
@@ -2812,6 +3442,7 @@ pub async fn validate_import(
     "category_tag",
     "topic_tag",
     "upload",
+    "file_upload",
   ] {
     let result = diesel::sql_query(
       "SELECT COUNT(*) AS count FROM discourse_import_mapping \
@@ -2862,15 +3493,6 @@ pub async fn validate_import(
         OR NOT EXISTS (SELECT 1 FROM post_site ps WHERE ps.local_site_id = $2 AND ps.post_id = p.id))",
     ),
     (
-      "discussion_posts_and_replies",
-      "SELECT COUNT(*) AS count FROM discourse_import_mapping m \
-       WHERE m.run_id = $1 AND m.entity_type = 'source_discussion_post' AND NOT ( \
-         EXISTS (SELECT 1 FROM post p JOIN post_site ps ON ps.post_id = p.id \
-          WHERE p.id = m.target_id AND p.origin_local_site_id = $2 AND ps.local_site_id = $2) \
-         OR EXISTS (SELECT 1 FROM comment c JOIN comment_site cs ON cs.comment_id = c.id \
-          WHERE c.id = m.target_id AND c.origin_local_site_id = $2 AND cs.local_site_id = $2))",
-    ),
-    (
       "private_messages",
       "SELECT COUNT(*) AS count FROM discourse_import_mapping m \
        LEFT JOIN private_message pm ON pm.id = m.target_id \
@@ -2882,7 +3504,8 @@ pub async fn validate_import(
           AND pr.private_message_id = pm.id AND pr.role IN ('recipient', 'both')) \
         OR NOT EXISTS (SELECT 1 FROM discourse_import_mapping sm WHERE sm.run_id = m.run_id \
           AND sm.entity_type = 'private_message_sender' \
-          AND sm.source_id = split_part(m.source_id, ':', 2) \
+          AND sm.source_id IN (split_part(m.source_id, ':', 2), \
+            '0:' || split_part(m.source_id, ':', 2)) \
           AND sm.target_id = pm.creator_id) \
         OR NOT EXISTS (SELECT 1 FROM discourse_import_mapping rm WHERE rm.run_id = m.run_id \
           AND rm.entity_type = 'private_message_recipient' AND rm.source_id = m.source_id \
@@ -2934,6 +3557,16 @@ pub async fn validate_import(
          SELECT 1 FROM media_object mo JOIN media_reference mr ON mr.media_id = mo.id \
          WHERE mo.id = m.target_id AND mr.local_site_id = $2)",
     ),
+    (
+      "generic_file_uploads",
+      "SELECT COUNT(*) AS count FROM discourse_import_mapping m \
+       LEFT JOIN file_reference fr ON fr.id = m.target_id \
+       LEFT JOIN file_object fo ON fo.id = fr.file_id \
+       WHERE m.run_id = $1 AND m.entity_type = 'file_upload' AND \
+       (fr.id IS NULL OR fr.local_site_id <> $2 OR fo.id IS NULL OR \
+        NOT EXISTS (SELECT 1 FROM person_site ps WHERE ps.person_id = fr.owner_person_id \
+          AND ps.local_site_id = $2))",
+    ),
   ];
   for (name, query) in invalid_queries {
     let result = diesel::sql_query(query)
@@ -2944,6 +3577,58 @@ pub async fn validate_import(
       .with_context(|| format!("failed to validate target references for {name}"))?;
     invalid_target_reference_counts.insert(name.to_string(), result.count);
   }
+  let stored_file_keys = diesel::sql_query(
+    "SELECT DISTINCT fo.storage_key FROM discourse_import_mapping m \
+     JOIN file_reference fr ON fr.id = m.target_id \
+     JOIN file_object fo ON fo.id = fr.file_id \
+     WHERE m.run_id = $1 AND m.entity_type = 'file_upload' ORDER BY fo.storage_key",
+  )
+  .bind::<BigInt, _>(run.id)
+  .load::<StoredFileKey>(&mut get_conn(pool).await?)
+  .await
+  .context("failed to read imported generic file objects for storage validation")?;
+  let mut invalid_file_object_count = 0_i64;
+  let mut file_storage_validation_error = None;
+  if !stored_file_keys.is_empty() {
+    if let Some(config) = SETTINGS.s3() {
+      let storage = build_s3_client(&config);
+      for file in &stored_file_keys {
+        match storage
+          .head_object()
+          .bucket(&config.bucket)
+          .key(&file.storage_key)
+          .send()
+          .await
+        {
+          Ok(_) => {}
+          Err(error)
+            if error
+              .raw_response()
+              .is_some_and(|response| response.status().as_u16() == 404) =>
+          {
+            invalid_file_object_count += 1;
+          }
+          Err(error) => {
+            invalid_file_object_count = stored_file_keys.len() as i64;
+            file_storage_validation_error = Some(format!(
+              "could not verify generic file storage object: {error}"
+            ));
+            break;
+          }
+        }
+      }
+    } else {
+      invalid_file_object_count = stored_file_keys.len() as i64;
+      file_storage_validation_error = Some(
+        "generic file storage is not configured, so imported attachment objects cannot be verified"
+          .to_string(),
+      );
+    }
+  }
+  invalid_target_reference_counts.insert(
+    "generic_file_objects".to_string(),
+    invalid_file_object_count,
+  );
   invalid_target_reference_counts.insert(
     "discussion_relationships".to_string(),
     invalid_discussion_relationship_count,
@@ -2958,12 +3643,38 @@ pub async fn validate_import(
     ("community_categories", "category_community"),
     ("parent_categories", "category_multi_community"),
     ("public_topics", "topic"),
-    ("private_message_copies", "private_message"),
     ("active_likes", "like"),
     ("supported_bookmarks", "bookmark"),
     ("public_topic_tags", "topic_tag"),
   ];
   let mut blocking_reasons = Vec::new();
+  if invalid_discussion_relationship_count > 0 {
+    blocking_reasons.push(format!(
+      "{invalid_discussion_relationship_count} discussion posts or replies have invalid target relationships"
+    ));
+  }
+  if let Some(error) = file_storage_validation_error {
+    blocking_reasons.push(error);
+  }
+  #[derive(QueryableByName)]
+  struct FailedImportPhase {
+    #[diesel(sql_type = Text)]
+    phase: String,
+  }
+  let failed_phases = diesel::sql_query(
+    "SELECT phase FROM discourse_import_phase WHERE run_id = $1 AND status = 'failed' \
+     AND phase <> 'validation' ORDER BY phase",
+  )
+  .bind::<BigInt, _>(run.id)
+  .load::<FailedImportPhase>(&mut get_conn(pool).await?)
+  .await
+  .context("failed to inspect failed import phases")?;
+  for failed_phase in failed_phases {
+    blocking_reasons.push(format!(
+      "import phase '{}' has a failed status",
+      failed_phase.phase
+    ));
+  }
   for (source_name, mapped_name) in comparisons {
     let expected = source_counts.get(source_name).copied().unwrap_or_default();
     let actual = mapped_counts.get(mapped_name).copied().unwrap_or_default();
@@ -2973,9 +3684,16 @@ pub async fn validate_import(
       ));
     }
   }
+  let expected_private_message_copies =
+    source_counts["private_message_copies"] + source_counts["chat_direct_message_copies"];
+  if expected_private_message_copies != mapped_counts["private_message"] {
+    blocking_reasons.push(format!(
+      "private message copy count is {expected_private_message_copies}, but private_message mappings contain {}",
+      mapped_counts["private_message"]
+    ));
+  }
   let expected_public_post_mappings = source_counts["public_posts"];
-  let actual_public_post_mappings =
-    mapped_counts["topic"] + mapped_counts["source_discussion_post"];
+  let actual_public_post_mappings = mapped_counts["source_discussion_post"];
   if expected_public_post_mappings != actual_public_post_mappings {
     blocking_reasons.push(format!(
       "public_posts count is {expected_public_post_mappings}, but topic and reply mappings contain {actual_public_post_mappings}"
@@ -3006,7 +3724,9 @@ pub async fn validate_import(
       "categories_communities" => source_counts["categories"],
       "categories_multi_communities" => source_counts["parent_categories"],
       "discussions" => source_counts["public_posts"],
-      "private_messages" => source_counts["private_message_posts"],
+      "private_messages" => {
+        source_counts["private_message_posts"] + source_counts["chat_direct_messages"]
+      }
       "interactions" => source_counts["active_likes"] + source_counts["supported_bookmarks"],
       "tags" => source_counts["public_topic_tags"],
       "media" => source_counts["upload_records"],
@@ -3108,6 +3828,12 @@ struct SourceUpload {
 }
 
 #[derive(QueryableByName)]
+struct SourceUploadVariant {
+  #[diesel(sql_type = Text)]
+  url: String,
+}
+
+#[derive(QueryableByName)]
 struct SourceAvatar {
   #[diesel(sql_type = Integer)]
   user_id: i32,
@@ -3147,9 +3873,19 @@ struct PictrsUploadDetails {
 }
 
 struct ImportedMediaItem {
-  media_id: i64,
+  media_id: Option<i64>,
   target_url: String,
   replacements: Vec<String>,
+}
+
+#[derive(QueryableByName)]
+struct TargetFileReference {
+  #[diesel(sql_type = Integer)]
+  id: i32,
+  #[diesel(sql_type = Text)]
+  public_id: String,
+  #[diesel(sql_type = Text)]
+  content_hash: String,
 }
 
 #[derive(QueryableByName)]
@@ -3246,19 +3982,21 @@ async fn rewrite_imported_media_references(
           changed = true;
         }
       }
-      MediaReference::ensure(
-        pool,
-        &MediaReferenceInsertForm {
-          local_site_id: site_id,
-          media_id: item.media_id,
-          owner_person_id: None,
-          post_id: Some(PostId(root_post_id as i32)),
-          purpose: "post".to_string(),
-        },
-      )
-      .await
-      .map_err(convert_lemmy_error)?;
-      report.rewritten_media_reference_count += 1;
+      if let Some(media_id) = item.media_id {
+        MediaReference::ensure(
+          pool,
+          &MediaReferenceInsertForm {
+            local_site_id: site_id,
+            media_id,
+            owner_person_id: None,
+            post_id: Some(PostId(root_post_id as i32)),
+            purpose: "post".to_string(),
+          },
+        )
+        .await
+        .map_err(convert_lemmy_error)?;
+        report.rewritten_media_reference_count += 1;
+      }
     }
     if all_source_tokens
       .iter()
@@ -3308,8 +4046,8 @@ fn upload_source_reference_tokens(upload: &SourceUpload) -> Vec<String> {
   if let Some(path) = upload_url_path(&upload.url) {
     tokens.push(path);
   }
-  if let Some(sha1) = &upload.sha1
-    && let Ok(base62) = base62_sha1(sha1)
+  if let Some(sha1) = upload_source_sha1(upload)
+    && let Ok(base62) = base62_sha1(&sha1)
   {
     let extension = upload
       .extension
@@ -3338,18 +4076,184 @@ fn upload_source_reference_tokens(upload: &SourceUpload) -> Vec<String> {
   tokens
 }
 
-fn find_archive_upload_member(url: &str, members: &[String]) -> Option<String> {
-  let path = upload_url_path(url)?;
-  let exact = path.trim_start_matches('/');
-  if members.iter().any(|member| member == exact) {
-    return Some(exact.to_string());
+fn upload_source_sha1(upload: &SourceUpload) -> Option<String> {
+  let valid_sha1 = |value: &str| {
+    (value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+      .then(|| value.to_ascii_lowercase())
+  };
+  upload.sha1.as_deref().and_then(valid_sha1).or_else(|| {
+    let path = upload_url_path(&upload.url)?;
+    let file_stem = Path::new(&path).file_stem()?.to_str()?;
+    valid_sha1(file_stem)
+  })
+}
+
+fn safe_import_filename(filename: &str) -> String {
+  let filename = filename.replace(['/', '\\'], "_");
+  let filename = Path::new(&filename)
+    .file_name()
+    .and_then(|value| value.to_str())
+    .unwrap_or("attachment");
+  let safe = filename
+    .chars()
+    .filter(|character| !character.is_control())
+    .collect::<String>();
+  if safe.trim().is_empty() {
+    "attachment".to_string()
+  } else {
+    safe
   }
-  let suffix = path
-    .split_once("/original/")
-    .map(|(_, rest)| format!("original/{rest}"))?;
+}
+
+fn build_s3_client(config: &lemmy_utils::settings::structs::ResolvedS3Config) -> S3Client {
+  let sdk_config = aws_sdk_s3::Config::builder()
+    .behavior_version_latest()
+    .endpoint_url(config.endpoint.clone())
+    .region(Region::new(config.region.clone()))
+    .credentials_provider(Credentials::new(
+      config.access_key.clone(),
+      config.secret_key.clone(),
+      None,
+      None,
+      "lemmy-discourse-import",
+    ))
+    .force_path_style(config.use_path_style)
+    .build();
+  S3Client::from_conf(sdk_config)
+}
+
+async fn ensure_generic_file_object(
+  pool: &mut DbPool<'_>,
+  storage: &S3Client,
+  bucket: &str,
+  bytes: Vec<u8>,
+  size_bytes: i64,
+  content_type: &str,
+) -> Result<FileObject> {
+  let content_hash = hex::encode(<Sha256 as Sha2Digest>::digest(&bytes));
+  let storage_key = format!("files/{content_hash}");
+  let object_registered = FileObject::read_by_hash(pool, &content_hash)
+    .await
+    .map_err(convert_lemmy_error)?
+    .is_some();
+  let object_present = if object_registered {
+    match storage
+      .head_object()
+      .bucket(bucket)
+      .key(&storage_key)
+      .send()
+      .await
+    {
+      Ok(_) => true,
+      Err(error)
+        if error
+          .raw_response()
+          .is_some_and(|response| response.status().as_u16() == 404) =>
+      {
+        false
+      }
+      Err(error) => return Err(anyhow!("could not check generic file in S3: {error}")),
+    }
+  } else {
+    false
+  };
+  if !object_present {
+    storage
+      .put_object()
+      .bucket(bucket)
+      .key(&storage_key)
+      .content_type(content_type)
+      .body(ByteStream::from(bytes))
+      .send()
+      .await
+      .context("failed to store imported generic attachment")?;
+  }
+  let (object, _) = FileObject::create_or_read(
+    pool,
+    &FileObjectInsertForm {
+      content_hash,
+      storage_key,
+      size_bytes,
+      content_type: content_type.to_string(),
+    },
+  )
+  .await
+  .map_err(convert_lemmy_error)?;
+  Ok(object)
+}
+
+fn find_archive_upload_member(
+  url: &str,
+  source_id: i32,
+  sha1: Option<&str>,
+  extension: Option<&str>,
+  original_filename: &str,
+  members: &[String],
+) -> Option<String> {
+  if let Some(path) = upload_url_path(url) {
+    let exact = path.trim_start_matches('/');
+    if members.iter().any(|member| member == exact) {
+      return Some(exact.to_string());
+    }
+    if let Some((_, suffix)) = path.split_once("/original/") {
+      if let Some(member) = unique_upload_member(members, &format!("original/{suffix}")) {
+        return Some(member);
+      }
+    }
+  }
+
+  // Short-URL records do not reveal the physical `/original/...` path. Discourse's
+  // BaseStore derives that path from the upload ID, SHA-1, and extension.
+  let sha1 = sha1?.to_ascii_lowercase();
+  if sha1.len() != 40 || !sha1.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    return None;
+  }
+  let extension = extension
+    .filter(|value| !value.is_empty())
+    .map(str::to_string)
+    .or_else(|| {
+      Path::new(original_filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
+    })
+    .unwrap_or_default()
+    .trim_start_matches('.')
+    .to_string();
+  let depth = discourse_upload_depth(source_id);
+  let tree = sha1
+    .chars()
+    .take(depth)
+    .map(|character| format!("{character}/"))
+    .collect::<String>();
+  let extension = if extension.is_empty() {
+    String::new()
+  } else {
+    format!(".{extension}")
+  };
+  let suffix = format!("original/{}X/{tree}{sha1}{extension}", depth + 1);
+  unique_upload_member(members, &suffix)
+}
+
+/// Match Discourse `BaseStore#get_depth_for`: ceil(log_16(id / 1000.0)), clamped at zero.
+/// Integer thresholds avoid rounding differences around powers of 16.
+fn discourse_upload_depth(source_id: i32) -> usize {
+  if source_id <= 1_000 {
+    return 0;
+  }
+  let mut depth = 0;
+  let mut boundary = 1_000_i64;
+  while i64::from(source_id) > boundary {
+    depth += 1;
+    boundary *= 16;
+  }
+  depth
+}
+
+fn unique_upload_member(members: &[String], suffix: &str) -> Option<String> {
   let mut matches = members
     .iter()
-    .filter(|member| member.starts_with("uploads/") && member.ends_with(&suffix));
+    .filter(|member| member.starts_with("uploads/") && member.ends_with(suffix));
   let first = matches.next()?.clone();
   matches.next().is_none().then_some(first)
 }
@@ -3470,6 +4374,12 @@ struct CountResult {
 }
 
 #[derive(QueryableByName)]
+struct StoredFileKey {
+  #[diesel(sql_type = Text)]
+  storage_key: String,
+}
+
+#[derive(QueryableByName)]
 struct TargetSourceMapping {
   #[diesel(sql_type = Text)]
   source_id: String,
@@ -3481,21 +4391,10 @@ struct TargetSourceMapping {
 struct SourceLegacyPost {
   #[diesel(sql_type = Integer)]
   topic_id: i32,
-  #[diesel(sql_type = Nullable<Text>)]
-  slug: Option<String>,
   #[diesel(sql_type = Integer)]
   source_post_id: i32,
   #[diesel(sql_type = Integer)]
   post_number: i32,
-}
-
-fn safe_discourse_slug(slug: &str) -> bool {
-  !slug.is_empty()
-    && slug != "."
-    && slug != ".."
-    && slug
-      .bytes()
-      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
 }
 
 #[derive(QueryableByName)]
@@ -3523,6 +4422,42 @@ struct SourceParticipant {
 }
 
 #[derive(QueryableByName)]
+struct SourceChatTables {
+  #[diesel(sql_type = Bool)]
+  has_messages: bool,
+  #[diesel(sql_type = Bool)]
+  has_channels: bool,
+  #[diesel(sql_type = Bool)]
+  has_dm_channels: bool,
+  #[diesel(sql_type = Bool)]
+  has_dm_users: bool,
+}
+
+#[derive(QueryableByName)]
+struct SourceChatDirectMessage {
+  #[diesel(sql_type = BigInt)]
+  id: i64,
+  #[diesel(sql_type = BigInt)]
+  direct_message_channel_id: i64,
+  #[diesel(sql_type = Bool)]
+  is_group: bool,
+  #[diesel(sql_type = Nullable<Integer>)]
+  user_id: Option<i32>,
+  #[diesel(sql_type = Text)]
+  raw: String,
+  #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+  created_at: DateTime<Utc>,
+  #[diesel(sql_type = Nullable<diesel::sql_types::Timestamptz>)]
+  updated_at: Option<DateTime<Utc>>,
+  #[diesel(sql_type = Bool)]
+  deleted: bool,
+  #[diesel(sql_type = Bool)]
+  has_attachments: bool,
+  #[diesel(sql_type = Bool)]
+  has_structured_blocks: bool,
+}
+
+#[derive(QueryableByName)]
 struct SourceParent {
   #[diesel(sql_type = Integer)]
   id: i32,
@@ -3536,6 +4471,8 @@ struct SourcePoll {
   name: String,
   #[diesel(sql_type = Nullable<Text>)]
   title: Option<String>,
+  #[diesel(sql_type = Nullable<diesel::sql_types::Timestamptz>)]
+  close_at: Option<DateTime<Utc>>,
   #[diesel(sql_type = Integer)]
   status: i32,
   #[diesel(sql_type = Integer)]
@@ -3565,7 +4502,8 @@ async fn read_historical_polls(
   source_post_id: i32,
 ) -> Result<Vec<HistoricalPollReport>> {
   let polls = diesel::sql_query(
-    "SELECT id, name, title, status, results FROM polls WHERE post_id = $1 ORDER BY id",
+    "SELECT id, name, title, status, results, close_at AT TIME ZONE 'UTC' AS close_at \
+     FROM polls WHERE post_id = $1 ORDER BY id",
   )
   .bind::<Integer, _>(source_post_id)
   .load::<SourcePoll>(source)
@@ -3604,6 +4542,8 @@ async fn read_historical_polls(
           .collect(),
       });
     }
+    let is_closed =
+      poll.status == 1 || poll.close_at.is_some_and(|close_at| close_at <= Utc::now());
     reports.push(HistoricalPollReport {
       source_poll_id: poll.id,
       source_post_id: i64::from(source_post_id),
@@ -3613,6 +4553,12 @@ async fn read_historical_polls(
         .unwrap_or_else(|| poll.name),
       status: poll.status,
       results_visibility: poll.results,
+      is_closed,
+      // Discourse `on_vote` results are only visible to voters and the poll
+      // author while open, so they cannot be copied into public content. Both
+      // `on_vote` and `on_close` become public after close_at/status closes the
+      // poll. `staff_only` results remain private even after closing.
+      show_public_results: poll.results == 0 || (matches!(poll.results, 1 | 2) && is_closed),
       options: option_reports,
     });
   }
@@ -3628,6 +4574,10 @@ fn append_historical_polls(raw: &str, polls: &[HistoricalPollReport]) -> String 
     .push_str("\n\n---\n\n**Historical poll results (frozen at migration; not interactive):**\n");
   for poll in polls {
     content.push_str(&format!("\n{}\n", escape_markdown(&poll.prompt)));
+    if !poll.show_public_results {
+      content.push_str("*Results were hidden by the source poll settings at migration time.*\n");
+      continue;
+    }
     for option in &poll.options {
       content.push_str(&format!(
         "- {} — {} vote(s)\n",
@@ -3707,7 +4657,7 @@ fn imported_object_ap_id(
   root: &str,
   fingerprint: &str,
   kind: &str,
-  source_id: i32,
+  source_id: i64,
 ) -> Result<DbUrl> {
   Ok(
     Url::parse(&format!(
@@ -3835,7 +4785,9 @@ fn descendant_category_ids(root: i32, categories: &[SourceCategory]) -> Vec<i32>
 async fn load_target_site(pool: &mut DbPool<'_>, site_id: LocalSiteId) -> Result<TargetSite> {
   let conn = &mut lemmy_diesel_utils::connection::get_conn(pool).await?;
   diesel::sql_query(
-    "SELECT s.id AS site_id, s.instance_id, ls.hostname, ls.federation_enabled FROM local_site ls \
+    "SELECT s.id AS site_id, s.instance_id, ls.hostname, ls.federation_enabled, \
+     ls.file_upload_disabled, ls.file_max_upload_size_bytes, ls.file_allowed_mime_types \
+     FROM local_site ls \
      JOIN site s ON s.id = ls.site_id WHERE ls.id = $1",
   )
   .bind::<Integer, _>(site_id.0)
@@ -3876,17 +4828,22 @@ async fn resolve_username(
   match policy {
     AccountConflictPolicy::Report | AccountConflictPolicy::Skip => Ok(None),
     AccountConflictPolicy::Rename => {
-      let suffix = format!("_d{source_id}");
-      let prefix_len = 20_usize.saturating_sub(suffix.len());
-      candidate = normalized.chars().take(prefix_len).collect::<String>();
-      candidate.push_str(&suffix);
-      is_valid_local_actor_name(&candidate, false).map_err(convert_lemmy_error)?;
+      candidate = renamed_username(normalized, source_id)?;
       if username_taken(pool, site_id, &candidate, reserved).await? {
         bail!("deterministic username alias {candidate} is already taken");
       }
       Ok(Some(candidate))
     }
   }
+}
+
+fn renamed_username(normalized: &str, source_id: i32) -> Result<String> {
+  let suffix = format!("_d{source_id}");
+  let prefix_len = 20_usize.saturating_sub(suffix.len());
+  let mut candidate = normalized.chars().take(prefix_len).collect::<String>();
+  candidate.push_str(&suffix);
+  is_valid_local_actor_name(&candidate, false).map_err(convert_lemmy_error)?;
+  Ok(candidate)
 }
 
 async fn username_taken(

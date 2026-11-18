@@ -6,6 +6,10 @@ use subtle::ConstantTimeEq;
 
 const DISCOURSE_PBKDF2_PREFIX: &str = "$discourse-pbkdf2-sha256$";
 const MAX_PBKDF2_ITERATIONS: u32 = 5_000_000;
+const MAX_BCRYPT_COST: u32 = 16;
+const MAX_ARGON2_MEMORY_KIB: u32 = 65_536;
+const MAX_ARGON2_ITERATIONS: u32 = 4;
+const MAX_ARGON2_PARALLELISM: u32 = 4;
 
 /// Encode the separate fields stored by Discourse's `user_passwords` table in
 /// the self-identifying form consumed by `verify_password`.
@@ -55,16 +59,19 @@ pub fn hash_password(password: &str) -> LemmyResult<String> {
 /// Verify the supported local-user formats. Discourse hashes are imported as
 /// `$discourse-pbkdf2-sha256$i=<iterations>,l=32$<hex salt>$<hex digest>`.
 pub fn verify_password(password: &str, stored: &str) -> bool {
-  if stored.starts_with("$2") {
+  if is_supported_bcrypt_verifier(stored) {
     return bcrypt::verify(password, stored).unwrap_or(false);
   }
 
   if stored.starts_with("$argon2id$") {
-    return PasswordHash::new(stored).ok().is_some_and(|parsed| {
-      Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok()
-    });
+    return PasswordHash::new(stored)
+      .ok()
+      .filter(is_supported_argon2id_verifier)
+      .is_some_and(|parsed| {
+        Argon2::default()
+          .verify_password(password.as_bytes(), &parsed)
+          .is_ok()
+      });
   }
 
   verify_discourse_pbkdf2(password, stored)
@@ -76,16 +83,13 @@ pub fn is_legacy_password_hash(stored: &str) -> bool {
 
 /// Recognize only supported encoded password verifiers before migration inserts them.
 pub fn is_supported_password_verifier(stored: &str) -> bool {
-  if ["$2a$", "$2b$", "$2x$", "$2y$"]
-    .iter()
-    .any(|prefix| stored.starts_with(prefix))
-  {
-    return stored.len() == 60;
+  if stored.starts_with("$2") {
+    return is_supported_bcrypt_verifier(stored);
   }
   if stored.starts_with("$argon2id$") {
     return PasswordHash::new(stored)
       .ok()
-      .is_some_and(|parsed| parsed.algorithm.as_str() == "argon2id");
+      .is_some_and(|parsed| is_supported_argon2id_verifier(&parsed));
   }
   let Some(encoded) = stored.strip_prefix(DISCOURSE_PBKDF2_PREFIX) else {
     return false;
@@ -98,6 +102,47 @@ pub fn is_supported_password_verifier(stored: &str) -> bool {
   };
   encode_discourse_pbkdf2_verifier(&format!("$pbkdf2-sha256${params}$"), salt, digest).as_deref()
     == Some(stored)
+}
+
+fn is_supported_bcrypt_verifier(stored: &str) -> bool {
+  let bytes = stored.as_bytes();
+  if bytes.len() != 60
+    || ![b"$2a$", b"$2b$", b"$2x$", b"$2y$"]
+      .iter()
+      .any(|prefix| bytes.starts_with(*prefix))
+    || bytes[6] != b'$'
+  {
+    return false;
+  }
+  let Ok(cost_text) = std::str::from_utf8(&bytes[4..6]) else {
+    return false;
+  };
+  let Ok(cost) = cost_text.parse::<u32>() else {
+    return false;
+  };
+  (4..=MAX_BCRYPT_COST).contains(&cost)
+    && bytes[7..]
+      .iter()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'/'))
+}
+
+fn is_supported_argon2id_verifier(parsed: &PasswordHash<'_>) -> bool {
+  parsed.algorithm.as_str() == "argon2id"
+    && parsed.version == Some(19)
+    && parsed.salt.is_some()
+    && parsed.hash.is_some()
+    && parsed
+      .params
+      .get_decimal("m")
+      .is_some_and(|memory| (8..=MAX_ARGON2_MEMORY_KIB).contains(&memory))
+    && parsed
+      .params
+      .get_decimal("t")
+      .is_some_and(|iterations| (1..=MAX_ARGON2_ITERATIONS).contains(&iterations))
+    && parsed
+      .params
+      .get_decimal("p")
+      .is_some_and(|parallelism| (1..=MAX_ARGON2_PARALLELISM).contains(&parallelism))
 }
 
 fn verify_discourse_pbkdf2(password: &str, stored: &str) -> bool {

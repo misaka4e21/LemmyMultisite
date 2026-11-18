@@ -19,31 +19,364 @@ const DEFAULT_MAX_EXPANDED_BYTES: u64 = 137_438_953_472;
 const MAX_ARCHIVE_MEMBERS: usize = 250_000;
 const MAX_MEMBER_NAME_BYTES: usize = 4_096;
 const MAX_MEMBER_LIST_BYTES: u64 = 67_108_864;
-const CLASSIFIED_TABLES: &[&str] = &[
-  "users",
-  "user_emails",
-  "user_profiles",
-  "user_options",
-  "user_passwords",
-  "categories",
-  "category_users",
-  "category_groups",
-  "topics",
-  "posts",
-  "post_actions",
+const IMPORTED_TABLES: &[&str] = &[
   "bookmarks",
-  "user_actions",
-  "post_revisions",
-  "private_messages",
-  "topic_allowed_users",
-  "polls",
+  "categories",
   "poll_options",
   "poll_votes",
-  "uploads",
+  "polls",
+  "post_actions",
+  "posts",
   "tags",
+  "topic_allowed_users",
   "topic_tags",
-  "groups",
+  "topics",
+  "uploads",
+  "user_emails",
+  "user_options",
+  "user_passwords",
+  "user_profiles",
+  "users",
+];
+const PARTIALLY_IMPORTED_TABLES: &[&str] = &[
+  "category_groups",
+  "chat_channels",
+  "chat_messages",
+  "direct_message_channels",
+  "direct_message_users",
+  "optimized_images",
+];
+const IGNORED_METADATA_TABLES: &[&str] = &["ar_internal_metadata", "schema_migrations"];
+
+const KNOWN_UNSUPPORTED_TABLES: &[&str] = &[
+  "access_control_lists",
+  "ad_plugin_house_ads",
+  "ad_plugin_house_ads_categories",
+  "ad_plugin_house_ads_groups",
+  "ad_plugin_house_ads_routes",
+  "ad_plugin_impressions",
+  "admin_dashboard_reports",
+  "admin_dashboard_sections",
+  "admin_notices",
+  "ai_agent_mcp_servers",
+  "ai_agents",
+  "ai_api_audit_logs",
+  "ai_api_request_stats",
+  "ai_artifact_key_values",
+  "ai_artifact_versions",
+  "ai_artifacts",
+  "ai_document_fragments_embeddings",
+  "ai_mcp_oauth_tokens",
+  "ai_mcp_servers",
+  "ai_moderation_settings",
+  "ai_post_image_captions",
+  "ai_posts_embeddings",
+  "ai_secrets",
+  "ai_spam_logs",
+  "ai_summaries",
+  "ai_tool_actions",
+  "ai_tool_secret_bindings",
+  "ai_tools",
+  "ai_topics_embeddings",
+  "allowed_pm_users",
+  "anonymous_users",
+  "api_key_scopes",
+  "api_keys",
+  "application_requests",
+  "assignments",
+  "associated_groups",
+  "backup_draft_posts",
+  "backup_draft_topics",
+  "backup_metadata",
+  "badge_groupings",
+  "badge_types",
+  "badges",
+  "browser_pageview_country_daily_rollups",
+  "browser_pageview_event_scores",
+  "browser_pageview_events",
+  "browser_pageview_referrer_daily_rollups",
+  "browser_pageview_session_engagement_daily_rollups",
+  "browser_pageview_session_engagements",
+  "calendar_events",
+  "categories_web_hooks",
+  "category_activity_daily_rollups",
+  "category_custom_fields",
+  "category_featured_topics",
+  "category_users",
+  "category_form_templates",
+  "category_localizations",
+  "category_moderation_groups",
+  "category_posting_review_groups",
+  "category_required_tag_groups",
+  "category_search_data",
+  "category_settings",
+  "category_tag_groups",
+  "category_tag_stats",
+  "category_tags",
+  "chat_channel_archives",
+  "chat_channel_custom_fields",
+  "chat_drafts",
+  "chat_mention_notifications",
+  "chat_mentions",
+  "chat_message_custom_fields",
+  "chat_message_custom_prompts",
+  "chat_message_interactions",
+  "chat_message_links",
+  "chat_message_reactions",
+  "chat_message_revisions",
+  "chat_message_search_data",
+  "chat_pinned_messages",
+  "chat_thread_custom_fields",
+  "chat_threads",
+  "chat_webhook_events",
+  "child_themes",
+  "classification_results",
+  "color_scheme_colors",
+  "color_schemes",
+  "completion_prompts",
+  "custom_emojis",
+  "data_explorer_queries",
+  "data_explorer_query_groups",
+  "data_explorer_query_stats",
+  "developers",
+  "directory_columns",
+  "directory_items",
+  "discourse_ai_ai_bot_conversation_stars",
+  "discourse_automation_automations",
+  "discourse_automation_fields",
+  "discourse_automation_pending_automations",
+  "discourse_automation_pending_pms",
+  "discourse_automation_stats",
+  "discourse_automation_user_global_notices",
+  "discourse_calendar_disabled_holidays",
+  "discourse_calendar_post_event_dates",
+  "discourse_post_event_events",
+  "discourse_post_event_invitees",
+  "discourse_reactions_reaction_users",
+  "discourse_reactions_reactions",
+  "discourse_rss_polling_poll_attempts",
+  "discourse_rss_polling_rss_feeds",
+  "discourse_solved_shared_issues",
+  "discourse_solved_solved_topics",
+  "discourse_solved_topic_answers",
+  "discourse_subscriptions_customers",
+  "discourse_subscriptions_products",
+  "discourse_subscriptions_subscriptions",
+  "discourse_templates_usage_count",
+  "discourse_workflows_ai_authoring_sessions",
+  "discourse_workflows_credentials",
+  "discourse_workflows_data_tables",
+  "discourse_workflows_execution_data",
+  "discourse_workflows_execution_stats",
+  "discourse_workflows_executions",
+  "discourse_workflows_tags",
+  "discourse_workflows_variables",
+  "discourse_workflows_webhooks",
+  "discourse_workflows_workflow_call_runs",
+  "discourse_workflows_workflow_dependencies",
+  "discourse_workflows_workflow_publish_history",
+  "discourse_workflows_workflow_tags",
+  "discourse_workflows_workflow_versions",
+  "discourse_workflows_workflows",
+  "dismissed_topic_users",
+  "do_not_disturb_timings",
+  "draft_sequences",
+  "drafts",
+  "email_change_requests",
+  "email_login_codes",
+  "email_logs",
+  "email_tokens",
+  "embeddable_host_tags",
+  "embeddable_hosts",
+  "embedding_definitions",
+  "external_upload_stubs",
+  "flags",
+  "form_templates",
+  "gamification_leaderboard_scores",
+  "gamification_leaderboards",
+  "gamification_score_events",
+  "gamification_scores",
+  "github_commits",
+  "github_repos",
+  "given_daily_likes",
+  "group_archived_messages",
+  "group_associated_groups",
+  "group_category_notification_defaults",
+  "group_custom_fields",
+  "group_histories",
+  "group_mentions",
+  "group_requests",
   "group_users",
+  "group_tag_notification_defaults",
+  "groups",
+  "groups_web_hooks",
+  "ignored_users",
+  "incoming_chat_webhooks",
+  "incoming_domains",
+  "incoming_emails",
+  "incoming_links",
+  "incoming_referers",
+  "inferred_concept_posts",
+  "inferred_concept_topics",
+  "inferred_concepts",
+  "invited_groups",
+  "invited_users",
+  "invites",
+  "javascript_caches",
+  "linked_topics",
+  "livestream_topic_chat_channels",
+  "llm_credit_allocations",
+  "llm_credit_daily_usages",
+  "llm_feature_credit_costs",
+  "llm_models",
+  "llm_quota_usages",
+  "llm_quotas",
+  "message_bus",
+  "model_accuracies",
+  "moved_posts",
+  "muted_users",
+  "nested_hot_post_scores",
+  "nested_hot_score_snapshots",
+  "nested_topics",
+  "nested_view_post_stats",
+  "notifications",
+  "oauth2_user_infos",
+  "onceoff_logs",
+  "optimized_videos",
+  "permalinks",
+  "plugin_store_rows",
+  "policy_users",
+  "post_action_types",
+  "post_custom_fields",
+  "post_custom_prompts",
+  "post_details",
+  "post_hotlinked_media",
+  "post_localizations",
+  "post_policies",
+  "post_policy_groups",
+  "post_replies",
+  "post_revisions",
+  "post_reply_keys",
+  "post_search_data",
+  "post_stats",
+  "post_timings",
+  "post_voting_comment_custom_fields",
+  "post_voting_comments",
+  "post_voting_votes",
+  "problem_check_trackers",
+  "published_pages",
+  "push_subscriptions",
+  "quoted_posts",
+  "rag_document_fragments",
+  "redelivering_webhook_events",
+  "remote_themes",
+  "reviewable_claimed_topics",
+  "reviewable_histories",
+  "reviewable_notes",
+  "reviewable_scores",
+  "reviewables",
+  "scheduler_stats",
+  "schema_migration_details",
+  "screened_emails",
+  "screened_ip_addresses",
+  "screened_urls",
+  "search_logs",
+  "shared_ai_conversations",
+  "shared_drafts",
+  "shelved_notifications",
+  "sidebar_section_links",
+  "sidebar_section_localizations",
+  "sidebar_sections",
+  "sidebar_url_localizations",
+  "sidebar_urls",
+  "silenced_assignments",
+  "single_sign_on_records",
+  "site_setting_groups",
+  "site_setting_localizations",
+  "site_settings",
+  "sitemaps",
+  "skipped_email_logs",
+  "stylesheet_cache",
+  "summary_sections",
+  "tag_group_memberships",
+  "tag_group_permissions",
+  "tag_groups",
+  "tag_localizations",
+  "tag_search_data",
+  "tag_users",
+  "tags_web_hooks",
+  "theme_fields",
+  "theme_modifier_sets",
+  "theme_settings",
+  "theme_settings_migrations",
+  "theme_site_settings",
+  "theme_svg_sprites",
+  "theme_translation_overrides",
+  "themes",
+  "top_topics",
+  "topic_allowed_groups",
+  "topic_custom_fields",
+  "topic_embeds",
+  "topic_groups",
+  "topic_hot_scores",
+  "topic_invites",
+  "topic_link_clicks",
+  "topic_links",
+  "topic_localizations",
+  "topic_search_data",
+  "topic_thumbnails",
+  "topic_timers",
+  "topic_users",
+  "topic_view_stats",
+  "topic_views",
+  "topic_voting_category_settings",
+  "topic_voting_topic_vote_count",
+  "topic_voting_votes",
+  "translation_overrides",
+  "unsubscribe_keys",
+  "upcoming_change_events",
+  "upload_references",
+  "user_api_key_client_scopes",
+  "user_api_key_clients",
+  "user_api_key_scopes",
+  "user_api_keys",
+  "user_archived_messages",
+  "user_associated_accounts",
+  "user_associated_groups",
+  "user_auth_token_logs",
+  "user_auth_tokens",
+  "user_avatars",
+  "user_badges",
+  "user_chat_channel_memberships",
+  "user_chat_thread_memberships",
+  "user_custom_fields",
+  "user_exports",
+  "user_field_options",
+  "user_fields",
+  "user_histories",
+  "user_ip_address_histories",
+  "user_notification_schedules",
+  "user_open_ids",
+  "user_profile_views",
+  "user_required_fields_versions",
+  "user_search_data",
+  "user_second_factors",
+  "user_security_keys",
+  "user_stats",
+  "user_statuses",
+  "user_actions",
+  "user_uploads",
+  "user_visit_daily_rollups",
+  "user_visits",
+  "user_warnings",
+  "watched_word_groups",
+  "watched_words",
+  "web_crawler_requests",
+  "web_hook_event_types",
+  "web_hook_event_types_hooks",
+  "web_hook_events",
+  "web_hook_events_daily_aggregates",
+  "web_hooks",
 ];
 
 #[derive(Parser)]
@@ -65,6 +398,20 @@ enum CommandLine {
     #[arg(long, value_enum, default_value_t = ConflictPolicy::Report)]
     account_conflicts: ConflictPolicy,
     /// JSON file path for the machine-readable preview report. Defaults to stdout.
+    #[arg(long)]
+    report: Option<PathBuf>,
+    #[arg(long, default_value_t = DEFAULT_MAX_EXPANDED_BYTES)]
+    max_expanded_bytes: u64,
+  },
+  /// Compare source account identities with a target site without creating the import ledger or accounts.
+  PreviewAccounts {
+    archive: PathBuf,
+    #[arg(long, env = "DISCOURSE_DATABASE_URL")]
+    source_database_url: String,
+    #[arg(long)]
+    site_id: i32,
+    #[arg(long, value_enum, default_value_t = ConflictPolicy::Report)]
+    account_conflicts: ConflictPolicy,
     #[arg(long)]
     report: Option<PathBuf>,
     #[arg(long, default_value_t = DEFAULT_MAX_EXPANDED_BYTES)]
@@ -219,6 +566,8 @@ struct Preview {
   expanded_sql_bytes: u64,
   table_row_counts: BTreeMap<String, u64>,
   restricted_category_ids: Vec<i32>,
+  partially_imported_tables: Vec<String>,
+  unsupported_tables: Vec<String>,
   unclassified_tables: Vec<String>,
   warnings: Vec<String>,
 }
@@ -245,6 +594,38 @@ async fn main() -> Result<()> {
       }
       if !preview_report.supported {
         std::process::exit(2);
+      }
+    }
+    CommandLine::PreviewAccounts {
+      archive,
+      source_database_url,
+      site_id,
+      account_conflicts,
+      report,
+      max_expanded_bytes,
+    } => {
+      anyhow::ensure!(site_id > 0, "--site-id must be a positive LocalSite ID");
+      let archive_report = preview(&archive, site_id, account_conflicts, max_expanded_bytes)?;
+      if !archive_report.supported {
+        bail!("unsupported Discourse archive; account conflict preview was not run");
+      }
+      let conflict_report = accounts::preview_account_conflicts(
+        &source_database_url,
+        site_id,
+        &archive_report.source_fingerprint_sha256,
+        account_conflicts.into(),
+      )
+      .await?;
+      let json = serde_json::to_string_pretty(&serde_json::json!({
+        "archive": archive_report,
+        "account_conflicts": conflict_report,
+        "target_database_modified": false
+      }))?;
+      if let Some(path) = report {
+        std::fs::write(&path, json)
+          .with_context(|| format!("failed to write report {}", path.display()))?;
+      } else {
+        println!("{json}");
       }
     }
     CommandLine::RestoreSource {
@@ -455,10 +836,13 @@ async fn main() -> Result<()> {
           .unwrap_or_default(),
       )
       .await?;
-      let mut map = String::new();
+      let mut map = String::from(
+        "map $uri $discourse_legacy_key {\n  default \"\";\n  ~^/t/(?:[^/]+/)?(?<discourse_legacy_root_topic>[0-9]+)$ \"$discourse_legacy_root_topic:1\";\n  ~^/t/(?:[^/]+/)?(?<discourse_legacy_reply_topic>[0-9]+)/(?<discourse_legacy_post_number>[0-9]+)$ \"$discourse_legacy_reply_topic:$discourse_legacy_post_number\";\n  ~^/t/(?:[^/]+/)?(?<discourse_legacy_last_topic>[0-9]+)/last$ \"$discourse_legacy_last_topic:last\";\n}\n\nmap $discourse_legacy_key $discourse_legacy_path {\n  default \"\";\n",
+      );
       for (source_path, target_path) in entries {
-        map.push_str(&format!("\"{source_path}\" \"{target_path}\";\n"));
+        map.push_str(&format!("  \"{source_path}\" \"{target_path}\";\n"));
       }
+      map.push_str("}\n");
       std::fs::write(&output, map)
         .with_context(|| format!("failed to write legacy URL map {}", output.display()))?;
       let json = serde_json::to_string_pretty(&mapping_report)?;
@@ -680,6 +1064,7 @@ fn restore_source_dump(archive: &Path, database_url: &str, max_bytes: u64) -> Re
       .clear()
       .extend_pairs(safe_query);
   }
+  ensure_restore_database_empty(database_url.as_str(), password.as_deref())?;
   let filename = archive
     .file_name()
     .and_then(|name| name.to_str())
@@ -747,6 +1132,50 @@ fn restore_source_dump(archive: &Path, database_url: &str, max_bytes: u64) -> Re
     bail!("psql failed to restore the archive into the source database");
   }
   Ok(expanded_bytes)
+}
+
+fn ensure_restore_database_empty(database_url: &str, password: Option<&str>) -> Result<()> {
+  const EMPTY_DATABASE_QUERY: &str = "SELECT \
+    NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') \
+        AND n.nspname NOT LIKE 'pg_toast%' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) \
+    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace \
+      WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'public') \
+        AND nspname NOT LIKE 'pg_toast%')";
+  let mut command = Command::new("psql");
+  command
+    .args([
+      "--no-psqlrc",
+      "--set=ON_ERROR_STOP=1",
+      "--tuples-only",
+      "--no-align",
+      "--quiet",
+      "--dbname",
+      database_url,
+      "--command",
+      EMPTY_DATABASE_QUERY,
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+  if let Some(password) = password {
+    command.env("PGPASSWORD", password);
+  }
+  let output = command
+    .output()
+    .context("failed to check the source database before restore")?;
+  if !output.status.success() {
+    bail!(
+      "could not verify that the restore database is empty: {}",
+      String::from_utf8_lossy(&output.stderr).trim()
+    );
+  }
+  if String::from_utf8_lossy(&output.stdout).trim() != "t" {
+    bail!(
+      "restore database contains user tables, views, sequences, or custom schemas; use a fresh empty database"
+    );
+  }
+  Ok(())
 }
 
 fn stream_sanitized_dump(
@@ -887,14 +1316,33 @@ fn preview(
     .filter(|table| {
       table.as_str() != "schema_migrations"
         && table.as_str() != "ar_internal_metadata"
-        && !CLASSIFIED_TABLES.contains(&table.as_str())
+        && !IGNORED_METADATA_TABLES.contains(&table.as_str())
+        && !IMPORTED_TABLES.contains(&table.as_str())
+        && !PARTIALLY_IMPORTED_TABLES.contains(&table.as_str())
+        && !KNOWN_UNSUPPORTED_TABLES.contains(&table.as_str())
     })
+    .cloned()
+    .collect::<Vec<_>>();
+  let unsupported_tables = table_row_counts
+    .keys()
+    .filter(|table| KNOWN_UNSUPPORTED_TABLES.contains(&table.as_str()))
+    .cloned()
+    .collect::<Vec<_>>();
+  let partially_imported_tables = table_row_counts
+    .keys()
+    .filter(|table| PARTIALLY_IMPORTED_TABLES.contains(&table.as_str()))
     .cloned()
     .collect::<Vec<_>>();
   if !unclassified_tables.is_empty() {
     warnings.push(format!(
       "{} source tables are not classified by this importer adapter; review them as plugin or unsupported data",
       unclassified_tables.len()
+    ));
+  }
+  if !unsupported_tables.is_empty() {
+    warnings.push(format!(
+      "{} known source tables contain data not imported by this adapter; review unsupported_tables and retain the source archive",
+      unsupported_tables.len()
     ));
   }
   Ok(Preview {
@@ -911,6 +1359,8 @@ fn preview(
     expanded_sql_bytes,
     table_row_counts,
     restricted_category_ids,
+    partially_imported_tables,
+    unsupported_tables,
     unclassified_tables,
     warnings,
   })
@@ -983,6 +1433,7 @@ fn open_dump_reader(archive: &Path, member: Option<&str>) -> Result<Box<dyn Read
     let mut child = Command::new("tar")
       .args(["-xOzf"])
       .arg(archive)
+      .arg("--")
       .arg(member)
       .stdout(Stdio::piped())
       .spawn()
@@ -1011,6 +1462,7 @@ fn read_archive_member(archive: &Path, member: &str, max_bytes: u64) -> Result<V
   let mut child = Command::new("tar")
     .args(["-xOzf"])
     .arg(archive)
+    .arg("--")
     .arg(member)
     .stdout(Stdio::piped())
     .spawn()

@@ -4707,12 +4707,14 @@ version = "1.0.0-beta.3"
 dependencies = [
  "activitypub_federation",
  "anyhow",
+ "aws-sdk-s3",
  "chrono",
  "clap",
  "diesel",
  "diesel-async",
  "flate2",
  "hex",
+ "infer 0.22.0",
  "lemmy_db_schema 1.0.0-beta.3",
  "lemmy_db_schema_file",
  "lemmy_diesel_utils",
@@ -4726,6 +4728,8 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "url",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]

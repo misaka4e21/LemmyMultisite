@@ -34,7 +34,7 @@ The importer will live in a dedicated workspace crate or binary and share Lemmy 
 
 The importer must use domain insertion paths or dedicated import helpers that establish `origin_local_site_id`, actor identifiers/keys, presence rows, site ownership, timestamps, aggregates, and media references. It must not call activity submission paths. Imported local actors and content remain local-only; no outbound queue records are created.
 
-**Alternative considered:** drive Lemmy's public REST API. Normal create endpoints impose registration and community permissions, assign current timestamps, trigger notifications and activity submission, and cannot directly preserve all source relationships. **Alternative considered:** raw SQL-only inserts. They bypass transaction helpers and tenant invariants. A dedicated Rust path can use typed forms and transactions while deliberately excluding side effects.
+**Alternative considered:** drive Lemmy's public REST API. Normal create endpoints impose registration and community permissions, assign current timestamps, trigger user-facing notifications and activity submission, and cannot directly preserve all source relationships. Imported private messages still need read notification rows because Lemmy uses them to list message history; the importer inserts those rows transactionally as already read without invoking notification hooks, email, or activity submission. **Alternative considered:** raw SQL-only inserts. They bypass transaction helpers and tenant invariants. A dedicated Rust path can use typed forms and transactions while deliberately excluding external side effects.
 
 ### Import order and source-to-target mappings
 
@@ -79,7 +79,7 @@ The importer will export a data file of source URL paths and target frontend pat
 - [Direct imports can violate model invariants] -> Use typed domain helpers, per-phase transactions, and pre-completion SQL integrity audits; never mark a phase complete on partial failure.
 - [Source-to-target feature mismatch] -> Keep a per-record loss report and preserve unsupported source data in a manifest where feasible.
 - [Redirect map can contain stale IDs] -> Generate it from the completed ledger and provide a validation mode that checks all target IDs before publishing.
-- [Federation-disabled controls may still permit local event side effects] -> Use import-specific helpers that do not submit activities or notifications and assert no outbound deliveries were created.
+- [Federation-disabled controls may still permit local event side effects] -> Use import-specific helpers that persist only the read notification rows required to display imported private messages, do not invoke notification hooks or submit activities, and assert no outbound deliveries were created.
 
 ## Migration Plan
 

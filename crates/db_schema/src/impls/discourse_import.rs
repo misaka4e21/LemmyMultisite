@@ -15,12 +15,12 @@ use crate::{
 use chrono::{DateTime, Utc};
 use diesel::{
   OptionalExtension, QueryableByName,
-  sql_types::{BigInt, Integer, Text, Timestamptz},
+  sql_types::{BigInt, Bool, Integer, Text, Timestamptz},
 };
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use lemmy_db_schema_file::{
   PersonId,
-  newtypes::{CommentId, LanguageId, LocalSiteId, PostId},
+  newtypes::{CommentId, LanguageId, LocalSiteId, PostId, PrivateMessageId},
 };
 use lemmy_diesel_utils::{
   connection::{DbPool, get_conn},
@@ -258,6 +258,7 @@ pub async fn create_imported_private_message(
   source_key: &str,
   source_post_id: &str,
   local_site_id: LocalSiteId,
+  notification_read: bool,
   form: &PrivateMessageInsertForm,
 ) -> LemmyResult<PrivateMessage> {
   if form.origin_local_site_id != Some(local_site_id) || form.local != Some(true) {
@@ -287,6 +288,8 @@ pub async fn create_imported_private_message(
       .bind::<Integer, _>(message.id.0)
       .execute(&mut get_conn(inner_pool).await?)
       .await?;
+      ensure_imported_private_message_notification(inner_pool, message.id, notification_read)
+        .await?;
       record_mapping(
         inner_pool,
         run_id,
@@ -314,6 +317,31 @@ pub async fn create_imported_private_message(
       Ok(message)
     })
     .await
+}
+
+/// Add the normal recipient notification without invoking hooks, emails, or activity delivery.
+/// This makes an imported message visible in Lemmy's message notification view while preserving
+/// the import path's no-side-effects guarantee.
+pub async fn ensure_imported_private_message_notification(
+  pool: &mut DbPool<'_>,
+  private_message_id: PrivateMessageId,
+  read: bool,
+) -> LemmyResult<()> {
+  let conn = &mut get_conn(pool).await?;
+  diesel::sql_query(
+    "INSERT INTO notification (recipient_id, creator_id, kind, private_message_id, read, published_at) \
+     SELECT pm.recipient_id, pm.creator_id, 'PrivateMessage'::notification_type_enum, \
+       pm.id, $2, pm.published_at \
+     FROM private_message pm WHERE pm.id = $1 AND NOT EXISTS ( \
+       SELECT 1 FROM notification n WHERE n.private_message_id = pm.id \
+         AND n.recipient_id = pm.recipient_id AND n.kind = 'PrivateMessage'::notification_type_enum) \
+     ON CONFLICT DO NOTHING",
+  )
+  .bind::<Integer, _>(private_message_id.0)
+  .bind::<Bool, _>(read)
+  .execute(conn)
+  .await?;
+  Ok(())
 }
 
 /// Import a vote with the normal aggregate update path and a resumable source mapping.

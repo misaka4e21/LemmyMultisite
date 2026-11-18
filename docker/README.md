@@ -25,11 +25,13 @@ Lemmy's needs, see [the image repository][image-repo].
 The standard Compose deployment fetches the Elm frontend source from GitHub
 during the image build and serves its production assets from an internal
 static Nginx container. It does not require a frontend checkout on the host.
-The default source revision is `main`; set `LEMMYMS_FRONTEND_REF` to a branch,
+The default source revision is `lemmy-ms`; set `LEMMYMS_FRONTEND_REF` to a branch,
 tag, or commit to select another revision. For repeatable deployments, use an
-immutable commit. The builder needs network access to GitHub.
+immutable commit. The builder needs network access to GitHub and the package
+registry. Set `NPM_PROXY` to use an HTTP proxy for build downloads; it is empty
+by default.
 
-The frontend image uses Node.js 22, Corepack, pnpm 10.6.5, and a writable Elm
+The frontend image uses Node.js 22, Corepack, pnpm 10.26.0, and a writable Elm
 cache to install the locked dependencies and build the static assets. Building
 requires Docker Compose 2.17 or newer with BuildKit support for additional
 build contexts. Run:

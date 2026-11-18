@@ -20,7 +20,7 @@ The current Compose stack runs `dessalines/lemmy-ui:nightly` on port 1234. The l
 
 ## Decisions
 
-- **Use a dedicated frontend image build stage/service with a remote Git build context.** Fetch `misaka4e21/lemmyms-frontend` directly from GitHub through BuildKit, select a configurable Git revision, and use Node.js 22 with Corepack and the checked-in package lock to install frozen dependencies. Set a writable `ELM_HOME`, run the production build, and expose the generated static assets through a small web server. This avoids requiring or documenting a host checkout and keeps the frontend toolchain separate from the Rust backend image.
+- **Use a dedicated frontend image build stage/service with a remote Git build context.** Fetch `misaka4e21/lemmyms-frontend` directly from GitHub through BuildKit, default to the `lemmy-ms` branch, and allow a configurable Git revision. Use Node.js 22 with Corepack and pnpm 10.26.0 to read the checked-in package lock and honor the repository's explicit dependency build approvals. Set a writable `ELM_HOME`, run the production build, and expose the generated static assets through a small web server. An optional `NPM_PROXY` Compose build setting maps to the BuildKit HTTP(S) proxy variables; when empty, all proxy variables are cleared so the build connects directly. This avoids requiring or documenting a host checkout and keeps the frontend toolchain separate from the Rust backend image.
 - **Let the public Nginx proxy own routing.** The frontend static server serves assets and falls back to `index.html` for client routes; the existing public Nginx remains the one exposed entry point and routes `/api/` plus backend protocol/media paths to Lemmy. Preserve ActivityPub content negotiation for paths that overlap with frontend routes, notably `/communities/`.
 - **Keep the browser API URL relative.** The frontend production app uses same-origin API paths; no build-time backend hostname or browser CORS configuration is needed. Internal upstream hostnames remain Docker service names.
 - **Retain the stable proxy upstream role.** The Compose service and Nginx upstream can use a neutral frontend name so replacing the implementation does not require frontend-specific behavior in routing rules.
@@ -29,7 +29,7 @@ Alternatives considered: requiring a local checkout makes deployment depend on a
 
 ## Risks / Trade-offs
 
-- [GitHub is unavailable during a clean image build] → Make the frontend revision configurable and document that the source must be fetched during the build.
+- [GitHub or the package registry is unavailable during a clean image build] → Make the frontend revision configurable and allow an optional build proxy, disabled by default.
 - [A moving frontend revision produces different builds over time] → Allow deployment operators to select an immutable commit revision.
 - [Elm compilation needs a writable cache and can lengthen clean builds] → Set `ELM_HOME` within the build stage and use normal Docker layer caching for dependency installation.
 - [An incomplete backend route list can return SPA HTML for protocol requests] → Compare Nginx routes with the frontend deployment sample and preserve backend paths and content-negotiation routing.

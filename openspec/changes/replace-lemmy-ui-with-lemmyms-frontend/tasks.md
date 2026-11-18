@@ -2,8 +2,8 @@
 
 ## 1. Build and serve the frontend
 
-- [ ] 1.1 Add a frontend production Docker build that fetches the GitHub source, installs dependencies with Corepack and `pnpm install --frozen-lockfile`, builds with a writable Elm cache, and serves the generated assets; verify a clean image build succeeds without a host frontend checkout.
-- [x] 1.2 Add the frontend service to Compose with a configurable Git revision, remove any local frontend directory setting and the upstream `lemmy-ui` image and obsolete environment variables; verify `docker compose config` resolves the remote source and expected services.
+- [x] 1.1 Add a frontend production Docker build that fetches the GitHub source, installs dependencies with Corepack and pnpm honoring approved build scripts, builds with a writable Elm cache, and serves the generated assets; verify the proxy is disabled by default and a configured proxy reaches the package registry.
+- [x] 1.2 Add the frontend service to Compose with `lemmy-ms` as the default Git revision and configurable revision override, remove any local frontend directory setting and the upstream `lemmy-ui` image and obsolete environment variables; verify `docker compose config` resolves the remote source and expected services.
 
 ## 2. Route the public site
 
@@ -13,4 +13,4 @@
 ## 3. Document and integrate
 
 - [x] 3.1 Document the remote frontend source and revision selection, required build tooling and network access, and same-origin routing behavior in the Docker deployment guide; verify the documented commands and configuration match Compose without prescribing a local directory.
-- [ ] 3.2 Build and start the deployment, then verify the site root, a deep frontend route, an API request, a media request, and ActivityPub content-negotiated requests through the public proxy.
+- [ ] 3.2 Start the full deployment, then verify the site root, a deep frontend route, an API request, a media request, and ActivityPub content-negotiated requests through the public proxy. The frontend image build and its root/deep-route responses are verified independently; full-stack routing awaits an available Lemmy deployment.

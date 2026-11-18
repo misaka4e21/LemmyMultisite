@@ -4,7 +4,10 @@ FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 ENV ELM_HOME=/tmp/elm-home
 
-RUN corepack enable && corepack prepare pnpm@10.6.5 --activate
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN corepack enable && corepack prepare pnpm@10.26.0 --activate
 
 COPY --from=frontend /package.json /pnpm-lock.yaml /pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile

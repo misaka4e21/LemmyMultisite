@@ -51,8 +51,15 @@ services:
     build:
       context: ../
       dockerfile: docker/frontend.Dockerfile
+      args:
+        HTTP_PROXY: ${NPM_PROXY:-}
+        HTTPS_PROXY: ${NPM_PROXY:-}
+        http_proxy: ${NPM_PROXY:-}
+        https_proxy: ${NPM_PROXY:-}
+        NO_PROXY: ""
+        no_proxy: ""
       additional_contexts:
-        frontend: https://github.com/misaka4e21/lemmyms-frontend.git#${LEMMYMS_FRONTEND_REF:-main}
+        frontend: https://github.com/misaka4e21/lemmyms-frontend.git#${LEMMYMS_FRONTEND_REF:-lemmy-ms}
     restart: unless-stopped
     logging: *default-logging
     init: true

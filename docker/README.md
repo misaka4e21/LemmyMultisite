@@ -20,6 +20,30 @@ Lemmy's needs, see [the image repository][image-repo].
 [tldp-lib]: https://tldp.org/HOWTO/Program-Library-HOWTO/shared-libraries.html
 [image-repo]: https://github.com/raskyld/lemmy-cross-toolchains
 
+## Building the frontend image
+
+The standard Compose deployment builds the Elm frontend from a separate
+`lemmyms-frontend` checkout and serves its production assets from an internal
+static Nginx container. Clone the frontend adjacent to this repository at
+`../js/elm/lemmyms-frontend` relative to the `docker/` directory, or set
+`LEMMYMS_FRONTEND_DIR` in `docker/.env` to the checkout path. The path can be
+absolute or relative to this directory. Copy `docker/.env.example` to
+`docker/.env` to use the adjacent-checkout default.
+
+The frontend image uses Node.js 22, Corepack, pnpm 10.6.5, and a writable Elm
+cache to build the checked-in `pnpm-lock.yaml` dependencies into `dist/`.
+Building requires Docker Compose 2.17 or newer with BuildKit support for
+additional build contexts. From this directory, run:
+
+```sh
+docker compose up --build
+```
+
+The public Nginx proxy serves the frontend and forwards API, media, discovery,
+and ActivityPub requests to Lemmy under the same public origin. Keep the
+frontend and API behind the same external HTTPS hostname so authentication
+cookies and browser origin checks work correctly.
+
 ## S3-compatible media storage
 
 The compose stack stores pict-rs blobs and generic documents in separate

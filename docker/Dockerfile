@@ -49,6 +49,13 @@ RUN if [ "${RUST_RELEASE_MODE}" = "release" ]; \
   mv target/debug/lemmy_server .; \
   fi 
 
+RUN if [ "${RUST_RELEASE_MODE}" = "release" ]; \
+  then \
+  mv target/release/lemmy-discourse-import .; \
+  else \
+  mv target/debug/lemmy-discourse-import .; \
+  fi 
+
 # Runner
 FROM ${RUNNER_IMAGE} AS runner
 
@@ -56,9 +63,10 @@ FROM ${RUNNER_IMAGE} AS runner
 RUN apt update && apt install -y libssl-dev libpq-dev ca-certificates curl git
 
 COPY --from=builder --chmod=0755 /lemmy/lemmy_server /usr/local/bin
+COPY --from=builder --chmod=0755 /lemmy/lemmy-discourse-import /usr/local/bin
 
-LABEL org.opencontainers.image.authors="The Lemmy Authors"
-LABEL org.opencontainers.image.source="https://github.com/LemmyNet/lemmy"
+LABEL org.opencontainers.image.authors="The LemmyMultisite Authors"
+LABEL org.opencontainers.image.source="https://github.com/misaka4e21/LemmyMultisite"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 LABEL org.opencontainers.image.description="A link aggregator and forum for the fediverse"
 

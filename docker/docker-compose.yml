@@ -23,14 +23,12 @@ services:
     logging: *default-logging
 
   lemmy:
-    build:
-      context: ../
-      dockerfile: docker/Dockerfile
+    image: ghcr.io/misaka4e21/lemmymultisite-backend:${LEMMY_IMAGE_TAG:-multisite}
+    pull_policy: always
     hostname: lemmy
     restart: unless-stopped
     environment:
       - RUST_LOG=warn,extism=info,lemmy_server=debug,lemmy_api=debug,lemmy_api_common=debug,lemmy_api_crud=debug,lemmy_apub=debug,lemmy_db_schema=debug,lemmy_db_views=debug,lemmy_routes=debug,lemmy_utils=debug,lemmy_websocket=debug,lemmy_diesel_utils=debug
-      - LEMMY_DISABLE_ACTIVITY_SENDING=true
       - LEMMY_S3_ENDPOINT=${S3_ENDPOINT:-http://rustfs:9000}
       - LEMMY_S3_BUCKET=${S3_FILE_BUCKET:-lemmy-files}
       - LEMMY_S3_REGION=${S3_REGION:-us-east-1}
@@ -48,18 +46,8 @@ services:
     logging: *default-logging
 
   frontend:
-    build:
-      context: ../
-      dockerfile: docker/frontend.Dockerfile
-      args:
-        HTTP_PROXY: ${NPM_PROXY:-}
-        HTTPS_PROXY: ${NPM_PROXY:-}
-        http_proxy: ${NPM_PROXY:-}
-        https_proxy: ${NPM_PROXY:-}
-        NO_PROXY: ""
-        no_proxy: ""
-      additional_contexts:
-        frontend: https://github.com/misaka4e21/lemmyms-frontend.git#${LEMMYMS_FRONTEND_REF:-lemmy-ms}
+    image: ghcr.io/misaka4e21/lemmymultisite-frontend:${LEMMY_IMAGE_TAG:-multisite}
+    pull_policy: always
     restart: unless-stopped
     logging: *default-logging
     init: true

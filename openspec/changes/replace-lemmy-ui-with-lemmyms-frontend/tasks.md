@@ -2,15 +2,15 @@
 
 ## 1. Build and serve the frontend
 
-- [x] 1.1 Add a frontend production Docker build that fetches the GitHub source, installs dependencies with Corepack and pnpm honoring approved build scripts, builds with a writable Elm cache, and serves the generated assets; verify the proxy is disabled by default and a configured proxy reaches the package registry.
-- [x] 1.2 Add the frontend service to Compose with `lemmy-ms` as the default Git revision and configurable revision override, remove any local frontend directory setting and the upstream `lemmy-ui` image and obsolete environment variables; verify `docker compose config` resolves the remote source and expected services.
+- [x] 1.1 Add or update GitHub Actions to check out backend submodules, build backend and frontend images, and publish both to GHCR with branch and commit SHA tags; verify workflow YAML syntax and image metadata configuration.
+- [x] 1.2 Keep the frontend production Docker build on the `lemmyms-frontend` GitHub source, with `lemmy-ms` as its default revision, approved pnpm build scripts, a writable Elm cache, and optional proxy build arguments; verify the proxy defaults to disabled.
 
 ## 2. Route the public site
 
 - [x] 2.1 Update Nginx so frontend assets and deep links reach the static frontend while API, federation, and media paths reach Lemmy; preserve ActivityPub content negotiation and return 404 for missing translation assets, verifying the route rules against the frontend deployment sample.
-- [x] 2.2 Update proxy dependencies and internal upstream names to match the new frontend service; verify the parsed Compose YAML has the expected frontend/proxy wiring and no stale `lemmy-ui` references in the standard deployment.
+- [x] 2.2 Change standard Compose services to pull the backend and frontend GHCR packages using one configurable image tag, remove the process-wide activity sending disable flag, and verify `docker compose config` contains only published image references while the existing tenant-scoped federation settings remain controlling.
 
 ## 3. Document and integrate
 
-- [x] 3.1 Document the remote frontend source and revision selection, required build tooling and network access, and same-origin routing behavior in the Docker deployment guide; verify the documented commands and configuration match Compose without prescribing a local directory.
-- [ ] 3.2 Start the full deployment, then verify the site root, a deep frontend route, an API request, a media request, and ActivityPub content-negotiated requests through the public proxy. The frontend image build and its root/deep-route responses are verified independently; full-stack routing awaits an available Lemmy deployment.
+- [x] 3.1 Document image publication, GHCR authentication/visibility, tag selection, optional Actions npm proxy setup, and same-origin routing; verify the documented deployment commands match Compose without prescribing host paths.
+- [ ] 3.2 Verify the workflow definition, Compose image/tag resolution, and published images, then exercise root, deep route, API, media, and ActivityPub routes through the public proxy with one federation-disabled tenant and one enabled tenant.

@@ -6,9 +6,11 @@ The Docker deployment currently serves the upstream Lemmy UI, while this project
 
 ## What Changes
 
-- Fetch the `lemmyms-frontend` source directly from GitHub during the Docker build, build the static application, and serve its generated assets without requiring a host checkout.
+- Build the Lemmy backend and `lemmyms-frontend` images in GitHub Actions and publish them to GHCR with branch and commit SHA tags.
+- Configure Docker Compose to pull the published GHCR images, with a selectable image tag and no local source checkout requirement.
 - Replace the upstream `lemmy-ui` service and update Nginx routing so frontend pages, API requests, ActivityPub traffic, and media use the same public origin and correct backend routes.
-- Document the remote frontend source, revision selection, and build requirements without prescribing a host directory.
+- Keep federation behavior isolated per tenant so a federation-disabled site neither sends nor receives federation traffic while enabled tenants continue operating.
+- Document image selection, publication, and deployment without prescribing host paths.
 
 ## Capabilities
 
@@ -22,4 +24,4 @@ None.
 
 ## Impact
 
-Impacts the container build, service orchestration, reverse proxy, and deployment guidance. The frontend production build requires Node.js 20 or newer plus a writable Elm cache. Backend APIs and data storage are unchanged.
+Impacts the container build workflow, GHCR packages, service orchestration, reverse proxy, and deployment guidance. Tenant federation settings remain independent; disabling federation for one tenant must not disable it for other tenants in the same server process. Backend APIs and data storage are unchanged.

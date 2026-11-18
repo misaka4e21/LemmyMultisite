@@ -30,3 +30,21 @@ The deployment SHALL return the frontend application document for valid client-s
 #### Scenario: Direct navigation to a frontend route
 - **WHEN** a browser loads a frontend route directly
 - **THEN** the deployment returns the frontend application document
+
+### Requirement: Compose deploys published container images
+The standard Docker Compose deployment SHALL pull the backend and frontend images from GHCR using a configurable tag, and the image publication workflow SHALL publish both branch and commit SHA tags.
+
+#### Scenario: Deploy a selected image revision
+- **WHEN** an operator starts the standard Compose deployment with an image tag selected
+- **THEN** Compose pulls the matching backend and frontend images from GHCR
+
+#### Scenario: Select a commit-pinned image
+- **WHEN** an operator selects a commit SHA tag
+- **THEN** both services run the image pair published by the workflow for that LemmyMultisite commit
+
+### Requirement: Federation configuration is isolated per tenant
+The deployment SHALL preserve tenant-specific federation settings and SHALL NOT disable federation process-wide when one tenant has federation disabled.
+
+#### Scenario: A federation-disabled tenant shares a server with enabled tenants
+- **WHEN** one tenant has federation disabled and another tenant has federation enabled
+- **THEN** the disabled tenant neither sends nor receives federation traffic, while the enabled tenant continues to send and receive federation traffic

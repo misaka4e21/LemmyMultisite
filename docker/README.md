@@ -20,30 +20,31 @@ Lemmy's needs, see [the image repository][image-repo].
 [tldp-lib]: https://tldp.org/HOWTO/Program-Library-HOWTO/shared-libraries.html
 [image-repo]: https://github.com/raskyld/lemmy-cross-toolchains
 
-## Building the frontend image
+## Container images
 
-The standard Compose deployment fetches the Elm frontend source from GitHub
-during the image build and serves its production assets from an internal
-static Nginx container. It does not require a frontend checkout on the host.
-The default source revision is `lemmy-ms`; set `LEMMYMS_FRONTEND_REF` to a branch,
-tag, or commit to select another revision. For repeatable deployments, use an
-immutable commit. The builder needs network access to GitHub and the package
-registry. Set `NPM_PROXY` to use an HTTP proxy for build downloads; it is empty
-by default.
+GitHub Actions builds the Lemmy backend and `lemmyms-frontend` images and
+publishes them to GHCR on branch and release updates. The frontend source uses
+the `lemmy-ms` branch. Pull requests build both images without publishing them.
+The frontend build uses Node.js 22, Corepack, pnpm 10.26.0, and a writable Elm
+cache.
 
-The frontend image uses Node.js 22, Corepack, pnpm 10.26.0, and a writable Elm
-cache to install the locked dependencies and build the static assets. Building
-requires Docker Compose 2.17 or newer with BuildKit support for additional
-build contexts. Run:
+The Compose deployment pulls matching backend and frontend images. Set
+`LEMMY_IMAGE_TAG` to a published branch, release, or full commit SHA; its
+default is the `multisite` branch. A SHA tag pins both images to the same
+backend commit. Compose checks GHCR for the selected tag whenever services
+start.
 
-```sh
-docker compose up --build
-```
+GHCR packages may be private by default. Make both packages public in GitHub
+package settings for unauthenticated pulls, or authenticate the deployment host
+to `ghcr.io` with a GitHub account and a token that can read packages.
 
-The public Nginx proxy serves the frontend and forwards API, media, discovery,
-and ActivityPub requests to Lemmy under the same public origin. Keep the
-frontend and API behind the same external HTTPS hostname so authentication
-cookies and browser origin checks work correctly.
+To use an npm registry proxy in GitHub Actions, configure the repository secret
+`NPM_PROXY` with the proxy URL. If it is absent, the frontend build uses a direct
+connection. The same-origin public Nginx proxy serves the frontend and forwards
+API, media, discovery, and ActivityPub requests to Lemmy.
+
+Keep the frontend and API behind the same external HTTPS hostname so
+authentication cookies and browser origin checks work correctly.
 
 ## S3-compatible media storage
 
@@ -52,7 +53,7 @@ S3-compatible buckets. RustFS is
 the default local backend, but the settings are provider-neutral.
 
 1. Copy `docker/.env.example` to `docker/.env` and replace the credentials.
-2. Start the stack with `docker compose up --build` from this directory.
+2. Start the stack with `docker compose up -d`.
 3. `rustfs-init` creates the `S3_BUCKET` and `S3_FILE_BUCKET` buckets before
    pict-rs starts. Both buckets are private; Lemmy serves content through its
    own API endpoints.

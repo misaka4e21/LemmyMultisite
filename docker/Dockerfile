@@ -42,10 +42,10 @@ COPY . .
 
 RUN if [ "${RUST_RELEASE_MODE}" = "release" ]; \
   then \
-  cargo build --features "${CARGO_BUILD_FEATURES}" --release --all-features; \
+  cargo build --features "${CARGO_BUILD_FEATURES}" --release --all-features && \
   mv target/release/lemmy_server .; \
   else \
-  cargo build --features "${CARGO_BUILD_FEATURES}"; \
+  cargo build --features "${CARGO_BUILD_FEATURES}" && \
   mv target/debug/lemmy_server .; \
   fi 
 

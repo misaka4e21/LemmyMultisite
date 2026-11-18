@@ -6,9 +6,9 @@ The Docker deployment currently serves the upstream Lemmy UI, while this project
 
 ## What Changes
 
-- Build the `lemmyms-frontend` static application as part of the Docker deployment and serve its generated assets.
+- Fetch the `lemmyms-frontend` source directly from GitHub during the Docker build, build the static application, and serve its generated assets without requiring a host checkout.
 - Replace the upstream `lemmy-ui` service and update Nginx routing so frontend pages, API requests, ActivityPub traffic, and media use the same public origin and correct backend routes.
-- Document the frontend build input and deployment configuration needed by Compose.
+- Document the remote frontend source, revision selection, and build requirements without prescribing a host directory.
 
 ## Capabilities
 
@@ -22,4 +22,4 @@ None.
 
 ## Impact
 
-Impacts `docker/Dockerfile`, `docker/docker-compose.yml`, `docker/nginx.conf`, and deployment documentation. The frontend source is maintained in the adjacent `lemmyms-frontend` checkout and its production build requires Node.js 20 or newer plus an Elm cache. Backend APIs and data storage are unchanged.
+Impacts the container build, service orchestration, reverse proxy, and deployment guidance. The frontend production build requires Node.js 20 or newer plus a writable Elm cache. Backend APIs and data storage are unchanged.

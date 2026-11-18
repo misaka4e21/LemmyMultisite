@@ -22,18 +22,17 @@ Lemmy's needs, see [the image repository][image-repo].
 
 ## Building the frontend image
 
-The standard Compose deployment builds the Elm frontend from a separate
-`lemmyms-frontend` checkout and serves its production assets from an internal
-static Nginx container. Clone the frontend adjacent to this repository at
-`../js/elm/lemmyms-frontend` relative to the `docker/` directory, or set
-`LEMMYMS_FRONTEND_DIR` in `docker/.env` to the checkout path. The path can be
-absolute or relative to this directory. Copy `docker/.env.example` to
-`docker/.env` to use the adjacent-checkout default.
+The standard Compose deployment fetches the Elm frontend source from GitHub
+during the image build and serves its production assets from an internal
+static Nginx container. It does not require a frontend checkout on the host.
+The default source revision is `main`; set `LEMMYMS_FRONTEND_REF` to a branch,
+tag, or commit to select another revision. For repeatable deployments, use an
+immutable commit. The builder needs network access to GitHub.
 
 The frontend image uses Node.js 22, Corepack, pnpm 10.6.5, and a writable Elm
-cache to build the checked-in `pnpm-lock.yaml` dependencies into `dist/`.
-Building requires Docker Compose 2.17 or newer with BuildKit support for
-additional build contexts. From this directory, run:
+cache to install the locked dependencies and build the static assets. Building
+requires Docker Compose 2.17 or newer with BuildKit support for additional
+build contexts. Run:
 
 ```sh
 docker compose up --build

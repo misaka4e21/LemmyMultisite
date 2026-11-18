@@ -2,8 +2,8 @@
 
 ## 1. Build and serve the frontend
 
-- [ ] 1.1 Add a frontend production Docker build that installs dependencies with Corepack and `pnpm install --frozen-lockfile`, builds with a writable Elm cache, and serves `dist/`; verify the image build succeeds from the documented frontend checkout.
-- [ ] 1.2 Add the frontend service to Compose with a configurable local build context and remove the upstream `lemmy-ui` image and its obsolete environment variables; verify `docker compose config` resolves the expected services and paths.
+- [ ] 1.1 Add a frontend production Docker build that fetches the GitHub source, installs dependencies with Corepack and `pnpm install --frozen-lockfile`, builds with a writable Elm cache, and serves the generated assets; verify a clean image build succeeds without a host frontend checkout.
+- [x] 1.2 Add the frontend service to Compose with a configurable Git revision, remove any local frontend directory setting and the upstream `lemmy-ui` image and obsolete environment variables; verify `docker compose config` resolves the remote source and expected services.
 
 ## 2. Route the public site
 
@@ -12,5 +12,5 @@
 
 ## 3. Document and integrate
 
-- [x] 3.1 Document the frontend checkout location, configurable Compose build context, required build tools, and same-origin routing behavior in the Docker deployment guide; verify documented commands and defaults match Compose.
+- [x] 3.1 Document the remote frontend source and revision selection, required build tooling and network access, and same-origin routing behavior in the Docker deployment guide; verify the documented commands and configuration match Compose without prescribing a local directory.
 - [ ] 3.2 Build and start the deployment, then verify the site root, a deep frontend route, an API request, a media request, and ActivityPub content-negotiated requests through the public proxy.

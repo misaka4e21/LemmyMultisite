@@ -52,7 +52,7 @@ services:
       context: ../
       dockerfile: docker/frontend.Dockerfile
       additional_contexts:
-        frontend: ${LEMMYMS_FRONTEND_DIR:-../../js/elm/lemmyms-frontend}
+        frontend: https://github.com/misaka4e21/lemmyms-frontend.git#${LEMMYMS_FRONTEND_REF:-main}
     restart: unless-stopped
     logging: *default-logging
     init: true

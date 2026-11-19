@@ -1561,12 +1561,17 @@ pub async fn import_private_messages(
     for source_post in batch {
       last_source_post_id = source_post.id;
       report.source_pm_post_count += 1;
+      let Some(source_sender_id) = source_post.user_id else {
+        report.unresolved_source_pm_post_ids.push(source_post.id);
+        continue;
+      };
       let participants = if let Some(participants) = participant_cache.get(&source_post.topic_id) {
         participants.clone()
       } else {
         let participants = diesel::sql_query(
           "SELECT user_id FROM topic_allowed_users WHERE topic_id = $1 \
-           UNION SELECT user_id FROM posts WHERE topic_id = $1 ORDER BY user_id",
+           UNION SELECT user_id FROM posts WHERE topic_id = $1 AND user_id IS NOT NULL \
+           ORDER BY user_id",
         )
         .bind::<Integer, _>(source_post.topic_id)
         .load::<SourceParticipant>(&mut source)
@@ -1581,7 +1586,7 @@ pub async fn import_private_messages(
       let recipients = participants
         .iter()
         .copied()
-        .filter(|user_id| *user_id != source_post.user_id)
+        .filter(|user_id| *user_id != source_sender_id)
         .collect::<Vec<_>>();
       if recipients.is_empty() {
         report.unresolved_source_pm_post_ids.push(source_post.id);
@@ -1594,7 +1599,7 @@ pub async fn import_private_messages(
       {
         report.pairwise_group_topic_ids.push(source_post.topic_id);
       }
-      let sender = read_mapping(pool, run.id, "user", &source_post.user_id.to_string())
+      let sender = read_mapping(pool, run.id, "user", &source_sender_id.to_string())
         .await
         .map_err(convert_lemmy_error)?;
       let Some(sender_id) = sender else {
@@ -4430,8 +4435,8 @@ struct SourcePrivateMessagePost {
   id: i32,
   #[diesel(sql_type = Integer)]
   topic_id: i32,
-  #[diesel(sql_type = Integer)]
-  user_id: i32,
+  #[diesel(sql_type = Nullable<Integer>)]
+  user_id: Option<i32>,
   #[diesel(sql_type = Text)]
   raw: String,
   #[diesel(sql_type = diesel::sql_types::Timestamptz)]

@@ -13,8 +13,6 @@ use std::{
 
 mod accounts;
 
-const SUPPORTED_DISCOURSE_VERSION: &str = "2026.7.4";
-const SUPPORTED_DATABASE_VERSION: i64 = 20261014065735;
 const DEFAULT_MAX_EXPANDED_BYTES: u64 = 137_438_953_472;
 const MAX_ARCHIVE_MEMBERS: usize = 250_000;
 const MAX_MEMBER_NAME_BYTES: usize = 4_096;
@@ -425,6 +423,23 @@ enum CommandLine {
     #[arg(long, default_value_t = DEFAULT_MAX_EXPANDED_BYTES)]
     max_expanded_bytes: u64,
   },
+  /// Restore an archive and run every supported import phase in one staged extraction.
+  ImportAll {
+    archive: PathBuf,
+    #[arg(long, env = "DISCOURSE_RESTORE_DATABASE_URL")]
+    source_database_url: String,
+    #[arg(long)]
+    site_id: i32,
+    #[arg(long, value_enum, default_value_t = ConflictPolicy::Report)]
+    account_conflicts: ConflictPolicy,
+    /// Optionally write the generated Nginx legacy URL map.
+    #[arg(long)]
+    legacy_urls_output: Option<PathBuf>,
+    #[arg(long)]
+    report: Option<PathBuf>,
+    #[arg(long, default_value_t = DEFAULT_MAX_EXPANDED_BYTES)]
+    max_expanded_bytes: u64,
+  },
   /// Import local accounts from a restored Discourse database into one selected site.
   ImportAccounts {
     archive: PathBuf,
@@ -543,7 +558,7 @@ enum CommandLine {
   },
 }
 
-#[derive(Clone, Copy, Debug, clap::ValueEnum, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ConflictPolicy {
   Report,
@@ -561,6 +576,8 @@ struct Preview {
   database_version_from_filename: Option<i64>,
   database_version_from_dump: Option<i64>,
   supported: bool,
+  required_extensions: Vec<String>,
+  required_schemas: Vec<String>,
   archive_member_count: usize,
   upload_file_count: usize,
   expanded_sql_bytes: u64,
@@ -637,16 +654,49 @@ async fn main() -> Result<()> {
       if !preview_report.supported {
         bail!("unsupported Discourse archive; source database was not modified");
       }
-      let expanded_bytes = restore_source_dump(&archive, &database_url, max_expanded_bytes)?;
+      let expanded_bytes = restore_source_dump(
+        &archive,
+        &database_url,
+        &preview_report.required_extensions,
+        max_expanded_bytes,
+      )?;
       println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
           "source_fingerprint_sha256": preview_report.source_fingerprint_sha256,
           "database_version": preview_report.database_version_from_dump,
+          "required_extensions": preview_report.required_extensions,
           "restored_sql_bytes": expanded_bytes,
           "source_database_modified": true
         }))?
       );
+    }
+    CommandLine::ImportAll {
+      archive,
+      source_database_url,
+      site_id,
+      account_conflicts,
+      legacy_urls_output,
+      report,
+      max_expanded_bytes,
+    } => {
+      anyhow::ensure!(site_id > 0, "--site-id must be a positive LocalSite ID");
+      let result = run_import_all(
+        &archive,
+        &source_database_url,
+        site_id,
+        account_conflicts,
+        legacy_urls_output.as_deref(),
+        max_expanded_bytes,
+      )
+      .await?;
+      let json = serde_json::to_string_pretty(&result)?;
+      if let Some(path) = report {
+        std::fs::write(&path, json)
+          .with_context(|| format!("failed to write import report {}", path.display()))?;
+      } else {
+        println!("{json}");
+      }
     }
     CommandLine::ImportAccounts {
       archive,
@@ -1032,7 +1082,401 @@ impl From<ConflictPolicy> for accounts::AccountConflictPolicy {
   }
 }
 
-fn restore_source_dump(archive: &Path, database_url: &str, max_bytes: u64) -> Result<u64> {
+async fn run_import_all(
+  archive: &Path,
+  source_database_url: &str,
+  site_id: i32,
+  account_conflicts: ConflictPolicy,
+  legacy_urls_output: Option<&Path>,
+  max_expanded_bytes: u64,
+) -> Result<serde_json::Value> {
+  let archive_name = archive
+    .file_name()
+    .and_then(|name| name.to_str())
+    .context("archive filename must be valid UTF-8")?;
+  eprintln!("[import-all] Extracting the archive once...");
+  let staging = extract_archive_once(archive, max_expanded_bytes)?;
+  eprintln!("[import-all] Archive extraction complete.");
+  eprintln!("[import-all] Checking source database state...");
+  let restore_dump = prompt_clear_source_database_if_needed(source_database_url)?;
+  eprintln!("[import-all] Reading archive metadata...");
+  let (preview_report, restored_bytes) = if restore_dump {
+    let preview_report = preview_named(
+      &staging.path,
+      Some(archive_name),
+      site_id,
+      account_conflicts,
+      max_expanded_bytes,
+    )?;
+    eprintln!("[import-all] Restoring the Discourse database with psql...");
+    let restored_bytes = restore_source_dump(
+      &staging.path,
+      source_database_url,
+      &preview_report.required_extensions,
+      max_expanded_bytes,
+    )?;
+    eprintln!("[import-all] Discourse database restore complete.");
+    (preview_report, Some(restored_bytes))
+  } else {
+    // The existing source database is already restored. Preview archive metadata
+    // for the fingerprint and media count, then continue with the Lemmy imports.
+    eprintln!("[import-all] Skipping database restore; continuing Lemmy migration.");
+    (
+      preview_named(
+        &staging.path,
+        Some(archive_name),
+        site_id,
+        account_conflicts,
+        max_expanded_bytes,
+      )?,
+      None,
+    )
+  };
+
+  let discourse_version = preview_report
+    .discourse_version
+    .as_deref()
+    .unwrap_or_default();
+  let schema_version = preview_report
+    .database_version_from_dump
+    .unwrap_or_default();
+  let fingerprint = &preview_report.source_fingerprint_sha256;
+  eprintln!("[import-all] Migrating accounts...");
+  let account_report = accounts::import_accounts(
+    source_database_url,
+    site_id,
+    fingerprint,
+    discourse_version,
+    schema_version,
+    account_conflicts.into(),
+  )
+  .await?;
+  if account_report.skipped_user_count > 0 && account_conflicts != ConflictPolicy::Skip {
+    let examples = account_report
+      .conflicts
+      .iter()
+      .take(5)
+      .cloned()
+      .collect::<Vec<_>>()
+      .join("; ");
+    bail!(
+      "account migration has {} unresolved conflicts; categories and later phases require every source account to be mapped. Re-run import-all with --account-conflicts rename to assign conflict-free names. Examples: {}",
+      account_report.skipped_user_count,
+      examples
+    );
+  }
+  if account_report.skipped_user_count > 0 {
+    eprintln!(
+      "[import-all] Skipped {} conflicting accounts by request; dependent content for those accounts may also be skipped.",
+      account_report.skipped_user_count
+    );
+  }
+  eprintln!("[import-all] Migrating categories...");
+  let category_report = accounts::import_categories(
+    source_database_url,
+    site_id,
+    fingerprint,
+    discourse_version,
+    schema_version,
+  )
+  .await?;
+  eprintln!("[import-all] Migrating discussions...");
+  let discussion_report = accounts::import_discussions(
+    source_database_url,
+    site_id,
+    fingerprint,
+    discourse_version,
+    schema_version,
+  )
+  .await?;
+  eprintln!("[import-all] Migrating private messages...");
+  let private_message_report = accounts::import_private_messages(
+    source_database_url,
+    site_id,
+    fingerprint,
+    discourse_version,
+    schema_version,
+  )
+  .await?;
+  eprintln!("[import-all] Migrating interactions...");
+  let interaction_report = accounts::import_interactions(
+    source_database_url,
+    site_id,
+    fingerprint,
+    discourse_version,
+    schema_version,
+  )
+  .await?;
+  eprintln!("[import-all] Migrating tags...");
+  let tag_report = accounts::import_tags(
+    source_database_url,
+    site_id,
+    fingerprint,
+    discourse_version,
+    schema_version,
+  )
+  .await?;
+  eprintln!("[import-all] Migrating media...");
+  let media_report = accounts::import_media(
+    &staging.path,
+    source_database_url,
+    site_id,
+    fingerprint,
+    discourse_version,
+    schema_version,
+    preview_report.upload_file_count,
+  )
+  .await?;
+
+  let legacy_urls_report = if let Some(output) = legacy_urls_output {
+    eprintln!("[import-all] Exporting legacy URLs...");
+    let (entries, report) = accounts::export_legacy_urls(
+      source_database_url,
+      site_id,
+      fingerprint,
+      discourse_version,
+      schema_version,
+    )
+    .await?;
+    std::fs::write(output, render_legacy_url_map(&entries))
+      .with_context(|| format!("failed to write legacy URL map {}", output.display()))?;
+    Some(serde_json::json!({ "output": output.display().to_string(), "report": report }))
+  } else {
+    None
+  };
+  eprintln!("[import-all] Validating migration...");
+  let validation_report = accounts::validate_import(
+    source_database_url,
+    site_id,
+    fingerprint,
+    discourse_version,
+    schema_version,
+    preview_report.upload_file_count,
+  )
+  .await?;
+  eprintln!("[import-all] All migration phases complete.");
+
+  Ok(serde_json::json!({
+    "preview": &preview_report,
+    "source_restore": {
+      "restored_sql_bytes": restored_bytes,
+      "skipped": restored_bytes.is_none(),
+      "required_extensions": &preview_report.required_extensions,
+      "required_schemas": &preview_report.required_schemas,
+      "source_database_modified": restored_bytes.is_some()
+    },
+    "accounts": account_report,
+    "categories": category_report,
+    "discussions": discussion_report,
+    "private_messages": private_message_report,
+    "interactions": interaction_report,
+    "tags": tag_report,
+    "media": media_report,
+    "legacy_urls": legacy_urls_report,
+    "validation": validation_report
+  }))
+}
+
+fn render_legacy_url_map(entries: &[(String, String)]) -> String {
+  let mut map = String::from(
+    "map $uri $discourse_legacy_key {\n  default \"\";\n  ~^/t/(?:[^/]+/)?(?<discourse_legacy_root_topic>[0-9]+)$ \"$discourse_legacy_root_topic:1\";\n  ~^/t/(?:[^/]+/)?(?<discourse_legacy_reply_topic>[0-9]+)/(?<discourse_legacy_post_number>[0-9]+)$ \"$discourse_legacy_reply_topic:$discourse_legacy_post_number\";\n  ~^/t/(?:[^/]+/)?(?<discourse_legacy_last_topic>[0-9]+)/last$ \"$discourse_legacy_last_topic:last\";\n}\n\nmap $discourse_legacy_key $discourse_legacy_path {\n  default \"\";\n",
+  );
+  for (source_path, target_path) in entries {
+    map.push_str(&format!("  \"{source_path}\" \"{target_path}\";\n"));
+  }
+  map.push_str("}\n");
+  map
+}
+
+struct ImportStagingDirectory {
+  path: PathBuf,
+}
+
+impl Drop for ImportStagingDirectory {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.path);
+  }
+}
+
+fn extract_archive_once(archive: &Path, max_bytes: u64) -> Result<ImportStagingDirectory> {
+  let filename = archive
+    .file_name()
+    .and_then(|name| name.to_str())
+    .context("archive filename must be valid UTF-8")?;
+  if !filename.ends_with(".tar.gz") {
+    bail!("import-all requires a .tar.gz Discourse archive");
+  }
+  let staging_path = std::env::temp_dir().join(format!(
+    "lemmy-discourse-import-{}-{}",
+    std::process::id(),
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .context("system clock is before Unix epoch")?
+      .as_nanos()
+  ));
+  std::fs::create_dir(&staging_path)
+    .context("failed to create a temporary archive extraction directory")?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o700))?;
+  }
+  let staging = ImportStagingDirectory { path: staging_path };
+  let mut tar = Command::new("tar");
+  tar
+    .args(["--extract", "--file"])
+    .arg(archive)
+    .args(["--directory"])
+    .arg(&staging.path)
+    .args(["--no-same-owner", "--no-same-permissions"]);
+  if pigz_available() {
+    tar.arg("--use-compress-program=pigz");
+  } else {
+    tar.arg("--gzip");
+  }
+  let status = tar
+    .status()
+    .context("failed to run tar to extract the archive once")?;
+  if !status.success() {
+    bail!("tar could not extract the backup archive");
+  }
+
+  let members = list_extracted_members(&staging.path)?;
+  let dumps = ["dump.sql", "dump.sql.gz"]
+    .iter()
+    .filter(|dump| members.iter().any(|member| member.as_str() == **dump))
+    .copied()
+    .collect::<Vec<_>>();
+  if dumps.len() != 1 {
+    bail!("archive must contain exactly one dump.sql.gz or dump.sql member");
+  }
+  if dumps[0] == "dump.sql.gz" {
+    let mut input = open_gzip_reader(&staging.path.join("dump.sql.gz"))?;
+    let mut output = File::create(staging.path.join("dump.sql"))
+      .context("failed to create the expanded SQL dump")?;
+    let mut expanded_bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+      let count = input.read(&mut buffer)?;
+      if count == 0 {
+        break;
+      }
+      expanded_bytes = expanded_bytes
+        .checked_add(count as u64)
+        .context("expanded SQL size overflow")?;
+      if expanded_bytes > max_bytes {
+        bail!("expanded SQL dump exceeds --max-expanded-bytes");
+      }
+      output.write_all(&buffer[..count])?;
+    }
+    output.flush()?;
+    std::fs::remove_file(staging.path.join("dump.sql.gz"))?;
+  }
+  list_extracted_members(&staging.path)?;
+  Ok(staging)
+}
+
+fn list_extracted_members(root: &Path) -> Result<Vec<String>> {
+  fn visit(
+    root: &Path,
+    directory: &Path,
+    members: &mut Vec<String>,
+    listing_bytes: &mut u64,
+    expanded_bytes: &mut u64,
+  ) -> Result<()> {
+    let mut entries = std::fs::read_dir(directory)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+      let path = entry.path();
+      let metadata = std::fs::symlink_metadata(&path)?;
+      if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+        bail!("extracted archive contains a symlink or special file");
+      }
+      let relative = path
+        .strip_prefix(root)
+        .context("extracted archive path escaped its staging directory")?;
+      let name = relative
+        .to_str()
+        .context("archive member path is not UTF-8")?
+        .replace(std::path::MAIN_SEPARATOR, "/");
+      if name.is_empty()
+        || name.len() > MAX_MEMBER_NAME_BYTES
+        || name.contains('\\')
+        || relative.is_absolute()
+        || relative
+          .components()
+          .any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
+      {
+        bail!("archive contains an unsafe or overlong member path");
+      }
+      *listing_bytes = listing_bytes
+        .checked_add(name.len() as u64 + 1)
+        .context("archive member listing size overflow")?;
+      if *listing_bytes > MAX_MEMBER_LIST_BYTES || members.len() >= MAX_ARCHIVE_MEMBERS {
+        bail!("archive member listing exceeds configured safety limits");
+      }
+      if metadata.is_dir() {
+        members.push(format!("{name}/"));
+        visit(root, &path, members, listing_bytes, expanded_bytes)?;
+      } else {
+        *expanded_bytes = expanded_bytes
+          .checked_add(metadata.len())
+          .context("expanded archive size overflow")?;
+        if *expanded_bytes > DEFAULT_MAX_EXPANDED_BYTES {
+          bail!("expanded archive exceeds configured safety limits");
+        }
+        members.push(name);
+      }
+    }
+    Ok(())
+  }
+
+  let mut members = Vec::new();
+  let mut listing_bytes = 0;
+  let mut expanded_bytes = 0;
+  visit(
+    root,
+    root,
+    &mut members,
+    &mut listing_bytes,
+    &mut expanded_bytes,
+  )?;
+  Ok(members)
+}
+
+fn pigz_available() -> bool {
+  Command::new("pigz")
+    .arg("--version")
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status()
+    .is_ok_and(|status| status.success())
+}
+
+fn open_gzip_reader(path: &Path) -> Result<Box<dyn Read>> {
+  if pigz_available() {
+    let mut child = Command::new("pigz")
+      .args(["--decompress", "--stdout", "--"])
+      .arg(path)
+      .stdout(Stdio::piped())
+      .spawn()
+      .context("failed to launch pigz for SQL decompression")?;
+    let stdout = child
+      .stdout
+      .take()
+      .context("pigz did not provide decompressed output")?;
+    Ok(Box::new(ChildReader {
+      reader: Some(Box::new(stdout)),
+      child: Some(child),
+    }))
+  } else {
+    Ok(Box::new(GzDecoder::new(
+      File::open(path).context("failed to open compressed SQL dump")?,
+    )))
+  }
+}
+
+fn database_connection_details(database_url: &str) -> Result<(String, Option<String>)> {
   let mut database_url = url::Url::parse(database_url).context("invalid source database URL")?;
   if !matches!(database_url.scheme(), "postgres" | "postgresql") {
     bail!("source database URL must use PostgreSQL");
@@ -1055,21 +1499,30 @@ fn restore_source_dump(archive: &Path, database_url: &str, max_bytes: u64) -> Re
     database_url
       .set_password(None)
       .map_err(|_| anyhow::anyhow!("could not remove database password from connection URL"))?;
-    let safe_query = query_pairs
-      .into_iter()
-      .filter(|(key, _)| key != "password")
-      .collect::<Vec<_>>();
     database_url
       .query_pairs_mut()
       .clear()
-      .extend_pairs(safe_query);
+      .extend_pairs(query_pairs.into_iter().filter(|(key, _)| key != "password"));
   }
-  ensure_restore_database_empty(database_url.as_str(), password.as_deref())?;
+  Ok((database_url.to_string(), password))
+}
+
+fn restore_source_dump(
+  archive: &Path,
+  database_url: &str,
+  required_extensions: &[String],
+  max_bytes: u64,
+) -> Result<u64> {
+  let (database_url, password) = database_connection_details(database_url)?;
+  ensure_restore_database_empty(&database_url, password.as_deref())?;
+  create_restore_extensions(&database_url, password.as_deref(), required_extensions)?;
   let filename = archive
     .file_name()
     .and_then(|name| name.to_str())
     .context("archive filename must be valid UTF-8")?;
-  let dump_member = if filename.ends_with(".tar.gz") {
+  let dump_member = if archive.is_dir() {
+    Some("dump.sql".to_string())
+  } else if filename.ends_with(".tar.gz") {
     let members = list_tar_members(archive)?;
     let dump_members = members
       .iter()
@@ -1084,57 +1537,122 @@ fn restore_source_dump(archive: &Path, database_url: &str, max_bytes: u64) -> Re
   } else {
     bail!("unsupported backup suffix; expected .tar.gz or .sql.gz");
   };
-  let mut dump = open_dump_reader(archive, dump_member.as_deref())?;
-  let mut nonce = [0_u8; 32];
-  File::open("/dev/urandom")
-    .context("secure randomness is required to protect the psql restore session")?
-    .read_exact(&mut nonce)
-    .context("failed to generate a psql restore restriction token")?;
-  let nonce = hex::encode(nonce);
+  let extracted_dump = archive.is_dir().then(|| archive.join("dump.sql"));
+  let mut dump = if extracted_dump.is_none() {
+    Some(open_dump_reader(archive, dump_member.as_deref())?)
+  } else {
+    None
+  };
   let mut command = Command::new("psql");
-  command
-    .args([
-      "--no-psqlrc",
-      "--set=ON_ERROR_STOP=1",
-      "--single-transaction",
-      "--quiet",
-      "--dbname",
-      database_url.as_str(),
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::inherit())
-    .stderr(Stdio::inherit());
+  command.args([
+    "--no-psqlrc",
+    "--set=ON_ERROR_STOP=1",
+    "--single-transaction",
+    "--quiet",
+    "--dbname",
+    &database_url,
+  ]);
+  if let Some(path) = &extracted_dump {
+    command.args(["--file"]).arg(path);
+  } else {
+    command.stdin(Stdio::piped());
+  }
+  command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
   if let Some(password) = password {
     command.env("PGPASSWORD", password);
   }
   let mut child = command
     .spawn()
     .context("failed to launch psql; install PostgreSQL client tools")?;
-  let Some(mut stdin) = child.stdin.take() else {
-    let _ = child.kill();
-    let _ = child.wait();
-    bail!("psql did not provide standard input");
+  let expanded_bytes = if let Some(path) = extracted_dump {
+    let expanded_bytes = std::fs::metadata(path)
+      .context("failed to inspect the extracted SQL dump")?
+      .len();
+    if expanded_bytes > max_bytes {
+      let _ = child.kill();
+      let _ = child.wait();
+      bail!("expanded SQL dump exceeds --max-expanded-bytes");
+    }
+    expanded_bytes
+  } else {
+    let Some(mut stdin) = child.stdin.take() else {
+      let _ = child.kill();
+      let _ = child.wait();
+      bail!("psql did not provide standard input");
+    };
+    let mut expanded_bytes = 0_u64;
+    let copy_result = copy_dump_to_psql(
+      dump
+        .as_mut()
+        .context("SQL dump stream is missing")?
+        .as_mut(),
+      &mut stdin,
+      max_bytes,
+      &mut expanded_bytes,
+    );
+    drop(stdin);
+    if copy_result.is_err() {
+      let _ = child.kill();
+    }
+    copy_result?;
+    expanded_bytes
   };
-  let mut expanded_bytes = 0_u64;
-  let copy_result = (|| -> Result<()> {
-    writeln!(stdin, "\\restrict {nonce}")?;
-    stream_sanitized_dump(&mut dump, &mut stdin, max_bytes, &mut expanded_bytes)?;
-    writeln!(stdin, "\\unrestrict {nonce}")?;
-    Ok(())
-  })();
-  drop(stdin);
-  if copy_result.is_err() {
-    let _ = child.kill();
-  }
   let status = child.wait().context("failed waiting for psql restore")?;
-  copy_result?;
   if !status.success() {
     bail!("psql failed to restore the archive into the source database");
   }
   Ok(expanded_bytes)
 }
 
+fn create_restore_extensions(
+  database_url: &str,
+  password: Option<&str>,
+  extensions: &[String],
+) -> Result<()> {
+  for extension in extensions {
+    let statement = if extension == "vector" {
+      "CREATE EXTENSION IF NOT EXISTS \"vector\" WITH SCHEMA public".to_string()
+    } else {
+      format!("CREATE EXTENSION IF NOT EXISTS \"{extension}\"")
+    };
+    let mut command = Command::new("psql");
+    command
+      .args([
+        "--no-psqlrc",
+        "--set=ON_ERROR_STOP=1",
+        "--dbname",
+        database_url,
+        "--command",
+      ])
+      .arg(statement)
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped());
+    if let Some(password) = password {
+      command.env("PGPASSWORD", password);
+    }
+    let output = command
+      .output()
+      .context("failed to launch psql while creating required source extensions")?;
+    if !output.status.success() {
+      bail!(
+        "could not create required PostgreSQL extension {extension} before restore: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+      );
+    }
+  }
+  Ok(())
+}
+
 fn ensure_restore_database_empty(database_url: &str, password: Option<&str>) -> Result<()> {
+  if !restore_database_is_empty(database_url, password)? {
+    bail!(
+      "restore database contains user tables, views, sequences, or custom schemas; use a fresh empty database"
+    );
+  }
+  Ok(())
+}
+
+fn restore_database_is_empty(database_url: &str, password: Option<&str>) -> Result<bool> {
   const EMPTY_DATABASE_QUERY: &str = "SELECT \
     NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -1170,27 +1688,78 @@ fn ensure_restore_database_empty(database_url: &str, password: Option<&str>) -> 
       String::from_utf8_lossy(&output.stderr).trim()
     );
   }
-  if String::from_utf8_lossy(&output.stdout).trim() != "t" {
+  Ok(String::from_utf8_lossy(&output.stdout).trim() == "t")
+}
+
+fn prompt_clear_source_database_if_needed(database_url: &str) -> Result<bool> {
+  let (safe_url, password) = database_connection_details(database_url)?;
+  if restore_database_is_empty(&safe_url, password.as_deref())? {
+    return Ok(true);
+  }
+  eprintln!(
+    "The source database is not empty. Choose an action:\n  1) Clear the database and continue\n  2) Skip import\n  3) Cancel"
+  );
+  let mut answer = String::new();
+  std::io::stdin()
+    .read_line(&mut answer)
+    .context("failed to read the source database action")?;
+  match answer.trim().to_ascii_lowercase().as_str() {
+    "1" | "clear" => {
+      clear_source_database(&safe_url, password.as_deref())?;
+      ensure_restore_database_empty(&safe_url, password.as_deref())?;
+      Ok(true)
+    }
+    "2" | "skip" => Ok(false),
+    "3" | "cancel" | "" => bail!("restore cancelled; the source database was not modified"),
+    _ => bail!("invalid choice; the source database was not modified"),
+  }
+}
+
+fn clear_source_database(database_url: &str, password: Option<&str>) -> Result<()> {
+  const CLEAR_DATABASE_SQL: &str = "DO $$ DECLARE schema_to_drop text; BEGIN \
+    FOR schema_to_drop IN SELECT nspname FROM pg_catalog.pg_namespace \
+      WHERE nspname NOT IN ('pg_catalog', 'information_schema') \
+        AND nspname NOT LIKE 'pg_toast%' LOOP \
+      EXECUTE format('DROP SCHEMA %I CASCADE', schema_to_drop); \
+    END LOOP; END $$; \
+    CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public";
+  let mut command = Command::new("psql");
+  command
+    .args([
+      "--no-psqlrc",
+      "--set=ON_ERROR_STOP=1",
+      "--single-transaction",
+      "--dbname",
+      database_url,
+      "--command",
+      CLEAR_DATABASE_SQL,
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+  if let Some(password) = password {
+    command.env("PGPASSWORD", password);
+  }
+  let output = command
+    .output()
+    .context("failed to launch psql while clearing the source database")?;
+  if !output.status.success() {
     bail!(
-      "restore database contains user tables, views, sequences, or custom schemas; use a fresh empty database"
+      "could not clear the source database: {}",
+      String::from_utf8_lossy(&output.stderr).trim()
     );
   }
   Ok(())
 }
 
-fn stream_sanitized_dump(
+fn copy_dump_to_psql(
   dump: &mut dyn Read,
   destination: &mut dyn Write,
   max_bytes: u64,
   expanded_bytes: &mut u64,
 ) -> Result<()> {
-  let mut dump = BufReader::new(dump);
-  let mut line = Vec::new();
-  let mut in_copy_data = false;
-  let mut skip_until: Option<&[u8]> = None;
+  let mut buffer = [0_u8; 64 * 1024];
   loop {
-    line.clear();
-    let count = dump.read_until(b'\n', &mut line)?;
+    let count = dump.read(&mut buffer)?;
     if count == 0 {
       break;
     }
@@ -1200,60 +1769,9 @@ fn stream_sanitized_dump(
     if *expanded_bytes > max_bytes {
       bail!("expanded SQL dump exceeds --max-expanded-bytes");
     }
-    if in_copy_data {
-      destination.write_all(&line)?;
-      if line.as_slice() == b"\\.\n" || line.as_slice() == b"\\.\r\n" || line == b"\\." {
-        in_copy_data = false;
-      }
-      continue;
-    }
-    if let Some(end_marker) = skip_until {
-      if line.trim_ascii() == end_marker {
-        skip_until = None;
-      }
-      continue;
-    }
-    let trimmed = line.trim_ascii();
-    if trimmed.starts_with(b"CREATE FUNCTION discourse_functions") {
-      skip_until = Some(b"$$;");
-      continue;
-    }
-    if trimmed.starts_with(b"CREATE SERVER")
-      || trimmed.starts_with(b"CREATE USER MAPPING")
-      || trimmed.starts_with(b"CREATE FOREIGN TABLE")
-    {
-      skip_until = Some(b");");
-      continue;
-    }
-    if trimmed.starts_with(b"DROP SCHEMA")
-      || trimmed.starts_with(b"CREATE SCHEMA")
-      || trimmed.starts_with(b"COMMENT ON SCHEMA")
-      || trimmed.starts_with(b"SET default_table_access_method")
-      || trimmed.starts_with(b"SET transaction_timeout")
-      || trimmed.starts_with(b"CREATE EXTENSION")
-      || trimmed.starts_with(b"COMMENT ON EXTENSION")
-      || trimmed.starts_with(b"\\restrict")
-      || trimmed.starts_with(b"\\unrestrict")
-    {
-      continue;
-    }
-    destination.write_all(&line)?;
-    if is_copy_data_start(&line) {
-      in_copy_data = true;
-    }
-  }
-  if in_copy_data || skip_until.is_some() {
-    bail!("SQL dump ended inside a COPY section or an unsupported DDL block");
+    destination.write_all(&buffer[..count])?;
   }
   Ok(())
-}
-
-fn is_copy_data_start(line: &[u8]) -> bool {
-  line.strip_prefix(b"COPY public.").is_some_and(|rest| {
-    rest
-      .windows(b"FROM stdin;".len())
-      .any(|window| window == b"FROM stdin;")
-  })
 }
 
 fn preview(
@@ -1262,46 +1780,67 @@ fn preview(
   account_conflict_policy: ConflictPolicy,
   max_expanded_bytes: u64,
 ) -> Result<Preview> {
-  let filename = archive
-    .file_name()
-    .and_then(|name| name.to_str())
+  preview_named(
+    archive,
+    None,
+    target_site_id,
+    account_conflict_policy,
+    max_expanded_bytes,
+  )
+}
+
+fn preview_named(
+  archive: &Path,
+  archive_name: Option<&str>,
+  target_site_id: i32,
+  account_conflict_policy: ConflictPolicy,
+  max_expanded_bytes: u64,
+) -> Result<Preview> {
+  let filename = archive_name
+    .map(str::to_string)
+    .or_else(|| {
+      archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+    })
     .context("archive filename must be valid UTF-8")?;
   let fingerprint = fingerprint(archive)?;
-  let (members, dump_member, upload_file_count) = if filename.ends_with(".tar.gz") {
-    let members = list_tar_members(archive)?;
-    let mut dump_members = members
-      .iter()
-      .filter(|name| name.as_str() == "dump.sql.gz" || name.as_str() == "dump.sql")
-      .cloned()
-      .collect::<Vec<_>>();
-    if dump_members.len() != 1 {
-      bail!("archive must contain exactly one dump.sql.gz or dump.sql member");
-    }
-    let dump_member = dump_members.remove(0);
-    let upload_file_count = members
-      .iter()
-      .filter(|name| name.starts_with("uploads/") && !name.ends_with('/'))
-      .count();
-    (members, Some(dump_member), upload_file_count)
-  } else if filename.ends_with(".sql.gz") {
-    (vec![filename.to_string()], None, 0)
-  } else {
-    bail!("unsupported backup suffix; expected .tar.gz or .sql.gz");
-  };
+  let (members, dump_member, upload_file_count) =
+    if archive.is_dir() || filename.ends_with(".tar.gz") {
+      let members = list_tar_members(archive)?;
+      let mut dump_members = members
+        .iter()
+        .filter(|name| name.as_str() == "dump.sql.gz" || name.as_str() == "dump.sql")
+        .cloned()
+        .collect::<Vec<_>>();
+      if dump_members.len() != 1 {
+        bail!("archive must contain exactly one dump.sql.gz or dump.sql member");
+      }
+      let dump_member = dump_members.remove(0);
+      let upload_file_count = members
+        .iter()
+        .filter(|name| name.starts_with("uploads/") && !name.ends_with('/'))
+        .count();
+      (members, Some(dump_member), upload_file_count)
+    } else if filename.ends_with(".sql.gz") {
+      (vec![filename.to_string()], None, 0)
+    } else {
+      bail!("unsupported backup suffix; expected .tar.gz or .sql.gz");
+    };
 
   let mut reader = open_dump_reader(archive, dump_member.as_deref())?;
-  let (expanded_sql_bytes, table_row_counts, database_version_from_dump, restricted_category_ids) =
-    inspect_dump(&mut reader, max_expanded_bytes)?;
-  let (discourse_version, database_version_from_filename) = parse_backup_version(filename);
-  let supported = discourse_version.as_deref() == Some(SUPPORTED_DISCOURSE_VERSION)
-    && database_version_from_filename == Some(SUPPORTED_DATABASE_VERSION)
-    && database_version_from_dump == Some(SUPPORTED_DATABASE_VERSION);
+  let (
+    expanded_sql_bytes,
+    table_row_counts,
+    database_version_from_dump,
+    restricted_category_ids,
+    required_extensions,
+    required_schemas,
+  ) = inspect_dump(&mut reader, max_expanded_bytes)?;
+  let (discourse_version, database_version_from_filename) = parse_backup_version(&filename);
+  let supported = true;
   let mut warnings = Vec::new();
-  if !supported {
-    warnings.push(format!(
-      "only Discourse {SUPPORTED_DISCOURSE_VERSION} with database schema {SUPPORTED_DATABASE_VERSION} is supported by this importer build"
-    ));
-  }
   if upload_file_count == 0 {
     warnings.push("no archived uploads were found; S3-only or database-only uploads are not available in this archive".into());
   }
@@ -1346,7 +1885,7 @@ fn preview(
     ));
   }
   Ok(Preview {
-    archive: filename.to_string(),
+    archive: filename,
     target_site_id,
     account_conflict_policy,
     source_fingerprint_sha256: fingerprint,
@@ -1354,6 +1893,8 @@ fn preview(
     database_version_from_filename,
     database_version_from_dump,
     supported,
+    required_extensions,
+    required_schemas,
     archive_member_count: members.len(),
     upload_file_count,
     expanded_sql_bytes,
@@ -1367,6 +1908,9 @@ fn preview(
 }
 
 fn list_tar_members(archive: &Path) -> Result<Vec<String>> {
+  if archive.is_dir() {
+    return list_extracted_members(archive);
+  }
   let mut child = Command::new("tar")
     .args(["-tzf"])
     .arg(archive)
@@ -1430,6 +1974,11 @@ fn list_tar_members(archive: &Path) -> Result<Vec<String>> {
 
 fn open_dump_reader(archive: &Path, member: Option<&str>) -> Result<Box<dyn Read>> {
   if let Some(member) = member {
+    if archive.is_dir() {
+      return Ok(Box::new(
+        File::open(archive.join(member)).context("failed to open the extracted SQL dump")?,
+      ));
+    }
     let mut child = Command::new("tar")
       .args(["-xOzf"])
       .arg(archive)
@@ -1459,6 +2008,19 @@ fn open_dump_reader(archive: &Path, member: Option<&str>) -> Result<Box<dyn Read
 }
 
 fn read_archive_member(archive: &Path, member: &str, max_bytes: u64) -> Result<Vec<u8>> {
+  if archive.is_dir() {
+    let mut file = File::open(archive.join(member))
+      .with_context(|| format!("failed to open extracted archive member {member}"))?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+      .take(max_bytes.saturating_add(1))
+      .read_to_end(&mut bytes)
+      .with_context(|| format!("failed to read extracted archive member {member}"))?;
+    if bytes.len() as u64 > max_bytes {
+      bail!("archived upload exceeds the configured per-file size limit");
+    }
+    return Ok(bytes);
+  }
   let mut child = Command::new("tar")
     .args(["-xOzf"])
     .arg(archive)
@@ -1523,7 +2085,14 @@ impl Drop for ChildReader {
 fn inspect_dump(
   reader: &mut dyn Read,
   max_bytes: u64,
-) -> Result<(u64, BTreeMap<String, u64>, Option<i64>, Vec<i32>)> {
+) -> Result<(
+  u64,
+  BTreeMap<String, u64>,
+  Option<i64>,
+  Vec<i32>,
+  Vec<String>,
+  Vec<String>,
+)> {
   let mut reader = BufReader::new(reader);
   let mut line = Vec::new();
   let mut expanded_bytes = 0_u64;
@@ -1533,6 +2102,9 @@ fn inspect_dump(
   let mut active_restricted_index: Option<usize> = None;
   let mut database_version = None;
   let mut restricted_category_ids = BTreeSet::new();
+  let mut required_extensions = BTreeSet::new();
+  let mut declared_extensions = BTreeSet::new();
+  let mut required_schemas = BTreeSet::from(["discourse_functions".to_string()]);
   loop {
     line.clear();
     let bytes_read = reader.read_until(b'\n', &mut line)?;
@@ -1546,7 +2118,7 @@ fn inspect_dump(
       bail!("expanded SQL dump exceeds --max-expanded-bytes");
     }
     if let Some(table) = &active_table {
-      if line.as_slice() == b"\\.\n" || line.as_slice() == b"\\.\r\n" {
+      if line.trim_ascii() == b"\\." {
         active_table = None;
         active_category_id_index = None;
         active_restricted_index = None;
@@ -1587,11 +2159,28 @@ fn inspect_dump(
       }
       continue;
     }
+    if let Some(extension) = parse_create_extension_name(&line) {
+      declared_extensions.insert(extension);
+    }
+    if let Some(schema) = parse_create_schema_name(&line) {
+      required_schemas.insert(schema);
+    }
+    if [
+      b"public.halfvec".as_slice(),
+      b"public.sparsevec",
+      b"public.vector",
+      b"\"public\".\"halfvec\"",
+      b"\"public\".\"sparsevec\"",
+      b"\"public\".\"vector\"",
+    ]
+    .iter()
+    .any(|type_name| contains_ascii_case_insensitive(&line, type_name))
+    {
+      required_extensions.insert("vector".to_string());
+    }
     if let Some(rest) = line.strip_prefix(b"COPY public.")
       && let Some((table, tail)) = copy_section_parts(rest)
-      && tail
-        .windows(b"FROM stdin;\n".len())
-        .any(|window| window == b"FROM stdin;\n")
+      && copy_section_ends_with_stdin(tail)
     {
       if let Ok(table) = std::str::from_utf8(table) {
         let table = table.trim_matches('"').to_string();
@@ -1626,7 +2215,74 @@ fn inspect_dump(
     table_counts,
     database_version,
     restricted_category_ids.into_iter().collect(),
+    required_extensions
+      .difference(&declared_extensions)
+      .cloned()
+      .collect(),
+    required_schemas.into_iter().collect(),
   ))
+}
+
+fn parse_create_extension_name(line: &[u8]) -> Option<String> {
+  let trimmed = line.trim_ascii();
+  let prefix = b"CREATE EXTENSION";
+  if trimmed.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
+    let mut remainder = trimmed[prefix.len()..].trim_ascii_start();
+    let conditional = b"IF NOT EXISTS";
+    if remainder
+      .get(..conditional.len())
+      .is_some_and(|value| value.eq_ignore_ascii_case(conditional))
+    {
+      remainder = remainder[conditional.len()..].trim_ascii_start();
+    }
+    let token = remainder.split(|byte| byte.is_ascii_whitespace()).next()?;
+    let token = token.strip_suffix(b";").unwrap_or(token);
+    let name = token.strip_prefix(b"\"").unwrap_or(token);
+    let name = name.strip_suffix(b"\"").unwrap_or(name);
+    if !name.is_empty()
+      && name
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
+    {
+      return std::str::from_utf8(name).ok().map(str::to_string);
+    }
+  }
+  None
+}
+
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+  !needle.is_empty()
+    && haystack
+      .windows(needle.len())
+      .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn parse_create_schema_name(line: &[u8]) -> Option<String> {
+  let trimmed = line.trim_ascii();
+  let prefix = b"CREATE SCHEMA";
+  if !trimmed.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
+    return None;
+  }
+  let mut remainder = trimmed[prefix.len()..].trim_ascii_start();
+  let conditional = b"IF NOT EXISTS";
+  if remainder
+    .get(..conditional.len())
+    .is_some_and(|value| value.eq_ignore_ascii_case(conditional))
+  {
+    remainder = remainder[conditional.len()..].trim_ascii_start();
+  }
+  let token = remainder.split(|byte| byte.is_ascii_whitespace()).next()?;
+  let token = token.strip_suffix(b";").unwrap_or(token);
+  let name = token.strip_prefix(b"\"").unwrap_or(token);
+  let name = name.strip_suffix(b"\"").unwrap_or(name);
+  if !name.is_empty()
+    && name
+      .iter()
+      .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
+  {
+    return std::str::from_utf8(name).ok().map(str::to_string);
+  }
+  None
 }
 
 fn copy_section_parts(rest: &[u8]) -> Option<(&[u8], &[u8])> {
@@ -1634,7 +2290,34 @@ fn copy_section_parts(rest: &[u8]) -> Option<(&[u8], &[u8])> {
   Some((parts.next()?, parts.next()?))
 }
 
+fn copy_section_ends_with_stdin(tail: &[u8]) -> bool {
+  tail
+    .split(|byte| *byte == b'\n')
+    .any(|line| line.trim_ascii().ends_with(b"FROM stdin;"))
+}
+
 fn fingerprint(path: &Path) -> Result<String> {
+  if path.is_dir() {
+    let mut hasher = Sha256::new();
+    for member in list_extracted_members(path)? {
+      if member.ends_with('/') {
+        continue;
+      }
+      let member_path = path.join(&member);
+      hasher.update((member.len() as u64).to_be_bytes());
+      hasher.update(member.as_bytes());
+      let mut file = File::open(member_path).context("failed to open extracted archive member")?;
+      let mut buffer = [0_u8; 64 * 1024];
+      loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+          break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+      }
+    }
+    return Ok(hex::encode(hasher.finalize()));
+  }
   let mut file = File::open(path).context("failed to open backup archive")?;
   let mut hasher = Sha256::new();
   let mut buffer = [0_u8; 64 * 1024];

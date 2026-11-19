@@ -58,7 +58,7 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AccountConflictPolicy {
   Report,
   Rename,
@@ -124,6 +124,12 @@ struct SourceAccountIdentity {
 struct ImportRunId {
   #[diesel(sql_type = BigInt)]
   id: i64,
+}
+
+#[derive(QueryableByName)]
+struct MappedPersonName {
+  #[diesel(sql_type = Text)]
+  name: String,
 }
 
 #[derive(Serialize)]
@@ -393,8 +399,8 @@ struct SourceDiscussionPost {
   post_number: i32,
   #[diesel(sql_type = Nullable<Integer>)]
   reply_to_post_number: Option<i32>,
-  #[diesel(sql_type = Integer)]
-  user_id: i32,
+  #[diesel(sql_type = Nullable<Integer>)]
+  user_id: Option<i32>,
   #[diesel(sql_type = Text)]
   raw: String,
   #[diesel(sql_type = diesel::sql_types::Timestamptz)]
@@ -403,8 +409,8 @@ struct SourceDiscussionPost {
   updated_at: Option<DateTime<Utc>>,
   #[diesel(sql_type = Bool)]
   deleted: bool,
-  #[diesel(sql_type = Text)]
-  title: String,
+  #[diesel(sql_type = Nullable<Text>)]
+  title: Option<String>,
   #[diesel(sql_type = Nullable<Integer>)]
   category_id: Option<i32>,
   #[diesel(sql_type = Nullable<Bool>)]
@@ -496,10 +502,7 @@ pub async fn preview_account_conflicts(
           .await
           .map_err(convert_lemmy_error)?
       {
-        let person = Person::read(pool, lemmy_db_schema_file::PersonId(target_id as i32))
-          .await
-          .map_err(convert_lemmy_error)?;
-        reserved_names.insert(person.name);
+        reserved_names.insert(read_mapped_person_name(pool, target_id).await?);
         continue;
       }
 
@@ -718,10 +721,7 @@ pub async fn import_accounts(
         .await
         .map_err(convert_lemmy_error)?
       {
-        let person = Person::read(pool, lemmy_db_schema_file::PersonId(target_id as i32))
-          .await
-          .map_err(convert_lemmy_error)?;
-        reserved_names.insert(person.name);
+        reserved_names.insert(read_mapped_person_name(pool, target_id).await?);
         report.resumed_user_count += 1;
         update_phase(
           pool,
@@ -862,7 +862,10 @@ pub async fn import_accounts(
       .map_err(convert_lemmy_error)?;
     }
   }
-  let had_unresolved_users = report.skipped_user_count > 0;
+  // With the explicit Skip policy, unresolved accounts are intentionally omitted;
+  // dependent imports can then skip objects owned by those accounts.
+  let had_unresolved_users =
+    report.skipped_user_count > 0 && conflict_policy != AccountConflictPolicy::Skip;
   update_phase(
     pool,
     run.id,
@@ -1001,7 +1004,11 @@ pub async fn import_categories(
       report.resumed_community_count += 1;
       continue;
     }
-    let slug = category.slug.as_deref().unwrap_or(&category.name);
+    let slug = category
+      .slug
+      .as_deref()
+      .filter(|slug| !slug.trim().is_empty())
+      .unwrap_or(&category.name);
     let name =
       resolve_community_name(pool, site_id, slug, category.id, &reserved_community_names).await?;
     let keypair = activitypub_federation::http_signatures::generate_actor_keypair()
@@ -1014,8 +1021,11 @@ pub async fn import_categories(
       name.clone(),
       keypair.public_key,
     );
-    form.title = Some(category.name.clone());
-    form.summary = category.description.clone();
+    form.title = Some(truncate_chars(&category.name, 50));
+    form.summary = category
+      .description
+      .as_deref()
+      .map(|summary| truncate_chars(summary, 150));
     form.published_at = Some(category.created_at);
     form.updated_at = category.updated_at;
     form.ap_id = Some(actor_id);
@@ -1060,7 +1070,11 @@ pub async fn import_categories(
         true,
       )
     } else {
-      let slug = category.slug.as_deref().unwrap_or(&category.name);
+      let slug = category
+        .slug
+        .as_deref()
+        .filter(|slug| !slug.trim().is_empty())
+        .unwrap_or(&category.name);
       let name =
         resolve_multi_community_name(pool, site_id, slug, category.id, &reserved_multi_names)
           .await?;
@@ -1075,8 +1089,11 @@ pub async fn import_categories(
         name.clone(),
         keypair.public_key,
       );
-      form.title = Some(category.name.clone());
-      form.summary = category.description.clone();
+      form.title = Some(truncate_chars(&category.name, 50));
+      form.summary = category
+        .description
+        .as_deref()
+        .map(|summary| truncate_chars(summary, 150));
       form.ap_id = Some(actor_id);
       form.local = Some(true);
       form.private_key = Some(keypair.private_key.into());
@@ -1245,7 +1262,11 @@ pub async fn import_discussions(
       let imported_content = append_historical_polls(&source_post.raw, &historical_polls);
       report.historical_polls.extend(historical_polls);
       let source_id = source_post.id.to_string();
-      let target_user_id = read_mapping(pool, run.id, "user", &source_post.user_id.to_string())
+      let Some(source_user_id) = source_post.user_id else {
+        report.unresolved_source_post_ids.push(source_post.id);
+        continue;
+      };
+      let target_user_id = read_mapping(pool, run.id, "user", &source_user_id.to_string())
         .await
         .map_err(convert_lemmy_error)?;
       let target_user_id = match target_user_id {
@@ -1316,7 +1337,11 @@ pub async fn import_discussions(
           i64::from(source_post.topic_id),
         )?;
         let mut form = PostInsertForm::new(
-          source_post.title.clone(),
+          source_post
+            .title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| format!("Untitled topic {}", source_post.topic_id)),
           target_user_id,
           target_community_id,
         );
@@ -1431,13 +1456,15 @@ pub async fn import_discussions(
       .map_err(convert_lemmy_error)?;
     }
   }
-  let unresolved = !report.unresolved_source_post_ids.is_empty();
+  // A skipped or otherwise unmappable source post should be reported and later
+  // caught by validation, but must not prevent import-all from processing the
+  // remaining phases that can still be imported.
   update_phase(
     pool,
     run.id,
     "discussions",
     Some(&format!("{}:{}", last_topic, last_number)),
-    if unresolved { "failed" } else { "completed" },
+    "completed",
     (report.imported_topic_count + report.imported_reply_count + report.resumed_object_count)
       as i64,
   )
@@ -1447,7 +1474,7 @@ pub async fn import_discussions(
   store_run_report(pool, run.id, &durable_report)
     .await
     .map_err(convert_lemmy_error)?;
-  set_run_status(pool, run.id, if unresolved { "failed" } else { "running" })
+  set_run_status(pool, run.id, "running")
     .await
     .map_err(convert_lemmy_error)?;
   Ok(report)
@@ -4861,6 +4888,15 @@ async fn username_taken(
   )
 }
 
+async fn read_mapped_person_name(pool: &mut DbPool<'_>, target_id: i64) -> Result<String> {
+  diesel::sql_query("SELECT name FROM person WHERE id = $1")
+    .bind::<Integer, _>(target_id as i32)
+    .get_result::<MappedPersonName>(&mut get_conn(pool).await?)
+    .await
+    .map(|person| person.name)
+    .context("an existing import mapping points to a missing target person")
+}
+
 fn convert_lemmy_error(error: lemmy_utils::error::LemmyError) -> anyhow::Error {
   anyhow!(error.to_string())
 }
@@ -4909,6 +4945,10 @@ fn normalize_tag_name(source: &str) -> String {
     }
   }
   result.trim_matches('_').chars().take(200).collect()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+  value.chars().take(max_chars).collect()
 }
 
 fn unique_tag_name(source: &str, source_tag_id: i32, reserved: &HashSet<String>) -> String {

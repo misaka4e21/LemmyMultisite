@@ -2163,14 +2163,14 @@ pub async fn import_interactions(
   .context("failed to count unsupported Discourse post actions")?;
   report.unsupported_action_count = unsupported_action_count.count as usize;
 
-  let mut bookmark_cursor = 0_i64;
+  let mut bookmark_cursor = 0_i32;
   loop {
     let bookmarks = diesel::sql_query(
       "SELECT id, user_id, bookmarkable_id, bookmarkable_type, \
        created_at AT TIME ZONE 'UTC' AS created_at \
        FROM bookmarks WHERE id > $1 ORDER BY id LIMIT 500",
     )
-    .bind::<BigInt, _>(bookmark_cursor)
+    .bind::<Integer, _>(bookmark_cursor)
     .load::<SourceBookmark>(&mut source)
     .await
     .context("failed to read Discourse bookmarks")?;
@@ -2184,7 +2184,7 @@ pub async fn import_interactions(
         .await
         .map_err(convert_lemmy_error)?;
       let Some(target_person) = target_person else {
-        report.unresolved_interaction_ids.push(bookmark.id);
+        report.unresolved_interaction_ids.push(i64::from(bookmark.id));
         continue;
       };
       let (target_object, is_post) = match (
@@ -2246,7 +2246,7 @@ pub async fn import_interactions(
         }
       };
       let Some(target_object) = target_object else {
-        report.unresolved_interaction_ids.push(bookmark.id);
+        report.unresolved_interaction_ids.push(i64::from(bookmark.id));
         continue;
       };
       let inserted = create_imported_bookmark(
@@ -4361,8 +4361,8 @@ struct SourceLike {
 
 #[derive(QueryableByName)]
 struct SourceBookmark {
-  #[diesel(sql_type = BigInt)]
-  id: i64,
+  #[diesel(sql_type = Integer)]
+  id: i32,
   #[diesel(sql_type = Integer)]
   user_id: i32,
   #[diesel(sql_type = Nullable<BigInt>)]

@@ -10,4 +10,4 @@
 
 - [x] 2.1 Verify the admin detail route returns the requested current-site `LocalUserView`, including the target account's admin flag, using an API handler test.
 - [x] 2.2 Verify a non-admin receives the standard not-admin error and a site admin requesting another site's account receives NotFound; assert neither response contains the target account.
-- [ ] 2.3 Verify the route is registered alongside `/users` and run the focused API crate checks for the new handler tests.
+- [x] 2.3 Verify the route is registered alongside `/users` and run the focused API crate checks for the new handler tests.

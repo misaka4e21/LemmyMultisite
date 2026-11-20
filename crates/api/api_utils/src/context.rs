@@ -1,6 +1,7 @@
 use crate::{request::client_builder, tenant::TenantContext};
 use activitypub_federation::config::{Data, FederationConfig};
 use lemmy_db_schema::source::secret::Secret;
+use lemmy_db_schema_file::newtypes::LocalSiteId;
 use lemmy_db_views_site::SiteView;
 use lemmy_diesel_utils::connection::{ActualDbPool, DbPool, build_db_pool_for_tests};
 use lemmy_utils::{
@@ -135,5 +136,26 @@ impl LemmyContext {
   pub async fn init_test_context() -> Data<LemmyContext> {
     let config = Self::init_test_federation_config().await;
     config.to_request_data()
+  }
+
+  pub async fn with_test_tenant(
+    context: &Data<LemmyContext>,
+    local_site_id: LocalSiteId,
+  ) -> LemmyResult<Data<LemmyContext>> {
+    let base = context.app_data();
+    let site_view = SiteView::read_by_id(&mut base.pool(), local_site_id).await?;
+    let tenant = TenantContext {
+      hostname: site_view.local_site.hostname.clone(),
+      scheme: site_view.site.ap_id.scheme().to_string(),
+      site_view,
+    };
+    let config = FederationConfig::builder()
+      .domain(tenant.hostname.clone())
+      .app_data(base.with_tenant(Arc::new(tenant)))
+      .debug(true)
+      .http_fetch_limit(0)
+      .build()
+      .await?;
+    Ok(config.to_request_data())
   }
 }

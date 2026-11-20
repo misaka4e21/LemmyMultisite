@@ -608,7 +608,7 @@ mod tests {
       bio: None,
       local: true,
       bot_account: false,
-      origin_local_site_id: None,
+      origin_local_site_id: Some(data.local_site.id),
       private_key: None,
       public_key: "pubkey".to_owned(),
       last_refreshed_at: data.person.published_at,
@@ -685,7 +685,10 @@ mod tests {
     let pool = &mut pool.into();
     let data = TestData::create(pool).await?;
 
-    let person_form_2 = PersonInsertForm::test_form(data.instance.id, "michele");
+    let person_form_2 = PersonInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..PersonInsertForm::test_form(data.instance.id, "michele")
+    };
     let person_2 = Person::create(pool, &person_form_2).await?;
 
     let follow_form = PersonFollowerForm::new(data.person.id, person_2.id, false);

@@ -986,7 +986,7 @@ async fn site_configuration_is_isolated_and_cache_is_invalidated() -> LemmyResul
     pool,
     &PersonInsertForm {
       origin_local_site_id: Some(first.local_site.id),
-      ..PersonInsertForm::test_form(first.instance.id, "new-admin")
+      ..PersonInsertForm::test_form(first.instance.id, "new_admin")
     },
   )
   .await?;
@@ -1086,6 +1086,7 @@ async fn site_configuration_is_isolated_and_cache_is_invalidated() -> LemmyResul
     account_linking_enabled: None,
     use_pkce: None,
     enabled: Some(true),
+    username_claim: None,
   };
   let first_provider = create_oauth_provider(
     Json(provider.clone()),
@@ -1121,6 +1122,7 @@ async fn site_configuration_is_isolated_and_cache_is_invalidated() -> LemmyResul
     account_linking_enabled: None,
     use_pkce: None,
     enabled: None,
+    username_claim: None,
   };
   assert!(
     edit_oauth_provider(

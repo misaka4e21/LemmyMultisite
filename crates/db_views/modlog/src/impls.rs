@@ -237,11 +237,10 @@ mod tests {
     comment::{Comment, CommentInsertForm},
     community::{Community, CommunityInsertForm},
     instance::Instance,
-    local_site::LocalSiteInsertForm,
+    local_user::{LocalUser, LocalUserInsertForm},
     modlog::{Modlog, ModlogInsertForm},
     person::{Person, PersonInsertForm},
     post::{Post, PostInsertForm},
-    site::{Site, SiteUpsertForm},
   };
   use lemmy_db_schema_file::enums::ModlogKind;
   use lemmy_diesel_utils::{
@@ -267,14 +266,9 @@ mod tests {
   }
 
   async fn init_data(pool: &mut DbPool<'_>) -> LemmyResult<Data> {
-    let instance = Instance::read_or_create(pool, "my_domain.tld").await?;
-    let site_form = SiteUpsertForm::new("test site".to_string(), instance.id);
-    let site = Site::create(pool, &site_form).await?;
-    let system_acct =
-      Person::create(pool, &PersonInsertForm::test_form(instance.id, "langs")).await?;
-    let local_site_form =
-      LocalSiteInsertForm::new(site.id, system_acct.id, instance.domain.clone());
-    let local_site = LocalSite::create(pool, &local_site_form).await?;
+    let test_data = lemmy_db_schema::test_data::TestData::create(pool).await?;
+    let instance = test_data.instance;
+    let local_site = test_data.local_site;
 
     let timmy_form = PersonInsertForm::test_form(instance.id, "timmy_rcv");
     let timmy = Person::create(pool, &timmy_form).await?;
@@ -284,6 +278,14 @@ mod tests {
 
     let jessica_form = PersonInsertForm::test_form(instance.id, "jessica_mrv");
     let jessica = Person::create(pool, &jessica_form).await?;
+
+    for person in [&timmy, &jessica] {
+      let local_user_form = LocalUserInsertForm {
+        local_site_id: local_site.id,
+        ..LocalUserInsertForm::test_form(person.id)
+      };
+      LocalUser::create(pool, &local_user_form, vec![]).await?;
+    }
 
     let community_form = CommunityInsertForm::new(
       instance.id,

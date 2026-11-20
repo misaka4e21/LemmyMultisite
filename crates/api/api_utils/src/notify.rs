@@ -397,17 +397,19 @@ mod tests {
     notify::{NotifyData, notify_private_message_internal},
   };
   use lemmy_db_schema::{
-    NotificationTypeFilter,
-    assert_length,
-    impls::presence::default_local_site_id,
+    NotificationTypeFilter, assert_length,
     source::{
       comment::{Comment, CommentInsertForm},
       community::{Community, CommunityInsertForm},
       instance::{Instance, InstanceActions, InstancePersonsBlockForm},
+      local_site::{LocalSite, LocalSiteInsertForm},
+      local_site_rate_limit::{LocalSiteRateLimit, LocalSiteRateLimitInsertForm},
+      local_user::{LocalUser, LocalUserInsertForm},
       notification::{Notification, NotificationInsertForm},
       person::{Person, PersonActions, PersonBlockForm, PersonInsertForm, PersonUpdateForm},
       post::{Post, PostInsertForm},
       private_message::{PrivateMessage, PrivateMessageInsertForm, PrivateMessageUpdateForm},
+      site::{Site, SiteUpsertForm},
     },
     traits::Blockable,
   };
@@ -432,16 +434,38 @@ mod tests {
     timmy_post: Post,
     jessica_post: Post,
     timmy_comment: Comment,
+    local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
+    domain: String,
+    remote_instance: Instance,
   }
 
   async fn init_data(pool: &mut DbPool<'_>) -> LemmyResult<Data> {
-    let instance = Instance::read_or_create(pool, "lemmy-alpha").await?;
+    let domain = format!("notification-{}.test", uuid::Uuid::new_v4());
+    let instance = Instance::read_or_create(pool, &domain).await?;
+    let site = Site::create(
+      pool,
+      &SiteUpsertForm::new("notification test".into(), instance.id),
+    )
+    .await?;
+    let system_person = Person::create(
+      pool,
+      &PersonInsertForm::test_form(instance.id, &format!("system_{}", uuid::Uuid::new_v4())),
+    )
+    .await?;
+    let local_site = LocalSite::create(
+      pool,
+      &LocalSiteInsertForm::new(site.id, system_person.id, domain.clone()),
+    )
+    .await?;
+    LocalSiteRateLimit::create(pool, &LocalSiteRateLimitInsertForm::new(local_site.id)).await?;
 
-    let timmy = LocalUserView::create_test_user(pool, "timmy_pcv", "", false).await?;
+    let timmy = create_local_user(pool, instance.id, local_site.id, "timmy_pcv").await?;
 
-    let sara = LocalUserView::create_test_user(pool, "sara_pcv", "", false).await?;
+    let sara = create_local_user(pool, instance.id, local_site.id, "sara_pcv").await?;
 
-    let jessica_form = PersonInsertForm::test_form(instance.id, "jessica_mrv");
+    let remote_instance =
+      Instance::read_or_create(pool, &format!("remote-{}.test", uuid::Uuid::new_v4())).await?;
+    let jessica_form = PersonInsertForm::test_form(remote_instance.id, "jessica_mrv");
     let jessica = Person::create(pool, &jessica_form).await?;
 
     let community_form = CommunityInsertForm::new(
@@ -451,8 +475,10 @@ mod tests {
     );
     let community = Community::create(pool, &community_form).await?;
 
-    let timmy_post_form =
-      PostInsertForm::new("timmy post prv".into(), timmy.person.id, community.id);
+    let timmy_post_form = PostInsertForm {
+      origin_local_site_id: Some(local_site.id),
+      ..PostInsertForm::new("timmy post prv".into(), timmy.person.id, community.id)
+    };
     let timmy_post = Post::create(pool, &timmy_post_form).await?;
 
     let jessica_post_form =
@@ -465,6 +491,10 @@ mod tests {
       community.id,
       "timmy comment prv".into(),
     );
+    let timmy_comment_form = CommentInsertForm {
+      origin_local_site_id: Some(local_site.id),
+      ..timmy_comment_form
+    };
     let timmy_comment = Comment::create(pool, &timmy_comment_form, None).await?;
 
     Ok(Data {
@@ -476,17 +506,45 @@ mod tests {
       timmy_post,
       jessica_post,
       timmy_comment,
+      local_site_id: local_site.id,
+      domain,
+      remote_instance,
     })
+  }
+
+  async fn create_local_user(
+    pool: &mut DbPool<'_>,
+    instance_id: lemmy_db_schema_file::InstanceId,
+    local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
+    name: &str,
+  ) -> LemmyResult<LocalUserView> {
+    let person = Person::create(
+      pool,
+      &PersonInsertForm {
+        local: Some(true),
+        origin_local_site_id: Some(local_site_id),
+        ..PersonInsertForm::test_form(instance_id, name)
+      },
+    )
+    .await?;
+    let local_user = LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        local_site_id,
+        ..LocalUserInsertForm::test_form(person.id)
+      },
+      vec![],
+    )
+    .await?;
+    LocalUserView::read(pool, local_user.id).await
   }
 
   async fn insert_private_message(
     form: PrivateMessageInsertForm,
     context: &LemmyContext,
+    local_site_id: lemmy_db_schema_file::newtypes::LocalSiteId,
   ) -> LemmyResult<()> {
     let pool = &mut context.pool();
-    let local_site_id = default_local_site_id(pool)
-      .await?
-      .expect("test database must have one local site");
     let pm = PrivateMessage::create(pool, &form).await?;
     let view = PrivateMessageView::read(pool, pm.id, None, local_site_id).await?;
     notify_private_message_internal(&view, false, context).await?;
@@ -498,35 +556,35 @@ mod tests {
       data.timmy.person.id,
       "sara to timmy".into(),
     );
-    insert_private_message(sara_timmy_message_form, context).await?;
+    insert_private_message(sara_timmy_message_form, context, data.local_site_id).await?;
 
     let sara_jessica_message_form = PrivateMessageInsertForm::new(
       data.sara.person.id,
       data.jessica.id,
       "sara to jessica".into(),
     );
-    insert_private_message(sara_jessica_message_form, context).await?;
+    insert_private_message(sara_jessica_message_form, context, data.local_site_id).await?;
 
     let timmy_sara_message_form = PrivateMessageInsertForm::new(
       data.timmy.person.id,
       data.sara.person.id,
       "timmy to sara".into(),
     );
-    insert_private_message(timmy_sara_message_form, context).await?;
+    insert_private_message(timmy_sara_message_form, context, data.local_site_id).await?;
 
     let jessica_timmy_message_form = PrivateMessageInsertForm::new(
       data.jessica.id,
       data.timmy.person.id,
       "jessica to timmy".into(),
     );
-    insert_private_message(jessica_timmy_message_form, context).await?;
+    insert_private_message(jessica_timmy_message_form, context, data.local_site_id).await?;
 
     Ok(())
   }
 
   async fn cleanup(data: Data, pool: &mut DbPool<'_>) -> LemmyResult<()> {
     Instance::delete(pool, data.instance.id).await?;
-    Instance::delete(pool, data.timmy.person.instance_id).await?;
+    Instance::delete(pool, data.remote_instance.id).await?;
 
     Ok(())
   }
@@ -543,7 +601,7 @@ mod tests {
       data.sara.person.id,
       data.timmy_post.id,
       data.community.id,
-      "@timmy_notify@lemmy-alpha".into(),
+      format!("@timmy_notify@{}", data.domain).into(),
     );
     let sara_comment =
       Comment::create(pool, &sara_comment_form, Some(&data.timmy_comment.path)).await?;
@@ -939,10 +997,7 @@ mod tests {
     assert_ne!(pm, None);
 
     if let Some(pm) = pm {
-      let local_site_id = default_local_site_id(pool)
-        .await?
-        .expect("test database must have one local site");
-      let view = PrivateMessageView::read(pool, pm.id, None, local_site_id).await?;
+      let view = PrivateMessageView::read(pool, pm.id, None, data.local_site_id).await?;
       let num_sender_messages_before = NotificationQuery::default()
         .list(pool, &view.creator)
         .await?

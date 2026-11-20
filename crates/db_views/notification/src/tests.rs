@@ -159,7 +159,10 @@ async fn test_private_message() -> LemmyResult<()> {
 #[serial]
 async fn site_removed_private_message_is_hidden_from_notifications() -> LemmyResult<()> {
   use lemmy_db_schema::{
-    impls::presence::{ensure_local_person_site, set_creator_content_site_removed},
+    impls::presence::{
+      ensure_comment_site, ensure_local_person_site, ensure_post_site,
+      ensure_private_message_site, set_creator_content_site_removed,
+    },
     test_data::TestData,
   };
 
@@ -170,7 +173,10 @@ async fn site_removed_private_message_is_hidden_from_notifications() -> LemmyRes
   let recipient = Person::read(pool, data.person.id).await?;
   let sender = Person::create(
     pool,
-    &PersonInsertForm::test_form(data.instance.id, "notification_sender"),
+    &PersonInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..PersonInsertForm::test_form(data.instance.id, "notification_sender")
+    },
   )
   .await?;
   let message = PrivateMessage::create(
@@ -180,25 +186,41 @@ async fn site_removed_private_message_is_hidden_from_notifications() -> LemmyRes
   .await?;
   let community = Community::create(
     pool,
-    &CommunityInsertForm::new(data.instance.id, "notifications".into(), "key".into()),
+    &CommunityInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..CommunityInsertForm::new(data.instance.id, "notifications".into(), "key".into())
+    },
   )
   .await?;
   let post = Post::create(
     pool,
-    &PostInsertForm::new("post".into(), sender.id, community.id),
+    &PostInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..PostInsertForm::new("post".into(), sender.id, community.id)
+    },
   )
   .await?;
   let other_post = Post::create(
     pool,
-    &PostInsertForm::new("other".into(), recipient.id, community.id),
+    &PostInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..PostInsertForm::new("other".into(), recipient.id, community.id)
+    },
   )
   .await?;
   let comment = Comment::create(
     pool,
-    &CommentInsertForm::new(sender.id, other_post.id, community.id, "comment".into()),
+    &CommentInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..CommentInsertForm::new(sender.id, other_post.id, community.id, "comment".into())
+    },
     None,
   )
   .await?;
+  ensure_private_message_site(pool, data.local_site.id, message.id, "both").await?;
+  ensure_post_site(pool, data.local_site.id, post.id).await?;
+  ensure_post_site(pool, data.local_site.id, other_post.id).await?;
+  ensure_comment_site(pool, data.local_site.id, comment.id).await?;
   let notifications = Notification::create(
     pool,
     &[

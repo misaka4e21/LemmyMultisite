@@ -274,26 +274,27 @@ mod tests {
   }
 
   async fn init_data(pool: &mut DbPool<'_>) -> LemmyResult<Data> {
-    let instance = Instance::read_or_create(pool, "my_domain.tld").await?;
-    let site_form = SiteUpsertForm::new("test_site".to_string(), instance.id);
-    let site = Site::create(pool, &site_form).await?;
-    let system_acct =
-      Person::create(pool, &PersonInsertForm::test_form(instance.id, "langs")).await?;
-    let local_site_form =
-      LocalSiteInsertForm::new(site.id, system_acct.id, instance.domain.clone());
-    let local_site = LocalSite::create(pool, &local_site_form).await?;
+    let fixture = lemmy_db_schema::test_data::TestData::create(pool).await?;
+    let instance = fixture.instance;
+    let site = fixture.site;
+    let local_site = fixture.local_site;
 
     let alice_form = PersonInsertForm {
+      origin_local_site_id: Some(local_site.id),
       local: Some(true),
       ..PersonInsertForm::test_form(instance.id, "alice")
     };
     let alice = Person::create(pool, &alice_form).await?;
-    let alice_local_user_form = LocalUserInsertForm::test_form(alice.id);
+    let alice_local_user_form = LocalUserInsertForm {
+      local_site_id: local_site.id,
+      ..LocalUserInsertForm::test_form(alice.id)
+    };
     let alice_local_user = LocalUser::create(pool, &alice_local_user_form, vec![]).await?;
 
     let bob_form = PersonInsertForm {
       bot_account: Some(true),
       local: Some(false),
+      origin_local_site_id: Some(local_site.id),
       ..PersonInsertForm::test_form(instance.id, "bob")
     };
     let bob = Person::create(pool, &bob_form).await?;
@@ -302,11 +303,13 @@ mod tests {
     // Create a post like to give bob a higher post score for sorting tests
     let community_form = CommunityInsertForm {
       summary: Some("bobs comm".into()),
+      origin_local_site_id: Some(local_site.id),
       ..CommunityInsertForm::new(instance.id, "bobs_comm".to_string(), "pubkey".to_string())
     };
     let community = Community::create(pool, &community_form).await?;
     let bob_post_form = PostInsertForm {
       body: Some("person query list inside here".into()),
+      origin_local_site_id: Some(local_site.id),
       ..PostInsertForm::new("bob post".into(), bob.id, community.id)
     };
     let bob_post = Post::create(pool, &bob_post_form).await?;
@@ -465,7 +468,7 @@ mod tests {
 
     // Person search
     let list_all = PersonQuery::default().list(&data.site, pool).await?;
-    assert_length!(2, list_all);
+    assert_length!(3, list_all);
     assert_eq!(data.bob.id, list_all[0].person.id);
     assert_eq!(data.alice.id, list_all[1].person.id);
 
@@ -487,7 +490,7 @@ mod tests {
     }
     .list(&data.site, pool)
     .await?;
-    assert_length!(2, list_sort_top);
+    assert_length!(3, list_sort_top);
     // Bobs should be at the top
     assert_eq!(data.bob.id, list_sort_top[0].person.id);
 

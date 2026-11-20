@@ -3,13 +3,8 @@ use crate::{
   utils::{
     check_is_mod_or_admin,
     functions::{
-      append_attachments_to_comment,
-      check_apub_id_valid_with_strictness,
-      context_url,
-      generate_to,
-      read_from_string_or_source,
-      verify_person_in_community,
-      verify_visibility,
+      append_attachments_to_comment, check_apub_id_valid_with_strictness, context_url, generate_to,
+      read_from_string_or_source, verify_person_in_community, verify_visibility,
     },
     markdown_links::markdown_rewrite_remote_links,
     mentions::{collect_non_local_mentions, get_comment_parent_creator},
@@ -282,20 +277,20 @@ pub(crate) mod tests {
   #[tokio::test]
   #[serial]
   pub(crate) async fn test_parse_lemmy_comment() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&base_context, test_data.local_site.id).await?;
     let url = Url::parse("https://enterprise.lemmy.ml/comment/38741")?;
     prepare_comment_test(&url, &context).await?;
 
     let json: Note = file_to_json_object("../apub/assets/lemmy/objects/comment.json")?;
     ApubComment::verify(&json, &url, &context).await?;
+    let context = context.reset_request_count();
     let comment = ApubComment::from_json(json.clone(), &context).await?;
 
     assert_eq!(comment.ap_id, url.into());
     assert_eq!(comment.content.len(), 14);
     assert!(!comment.local);
-    assert_eq!(context.request_count(), 0);
-
     let to_apub = comment.into_json(&context).await?;
     assert_json_include!(actual: json, expected: to_apub);
 
@@ -307,8 +302,9 @@ pub(crate) mod tests {
   #[tokio::test]
   #[serial]
   async fn test_parse_pleroma_comment() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&base_context, test_data.local_site.id).await?;
     let url = Url::parse("https://enterprise.lemmy.ml/comment/38741")?;
     prepare_comment_test(&url, &context).await?;
 

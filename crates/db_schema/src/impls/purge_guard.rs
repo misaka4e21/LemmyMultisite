@@ -169,13 +169,14 @@ mod tests {
       },
     )
     .await?;
+    let community_name = format!("purgeguard{}", first.local_site.id.0);
     let community = Community::create(
       pool,
       &CommunityInsertForm {
         origin_local_site_id: Some(first.local_site.id),
         ..CommunityInsertForm::new(
           first.instance.id,
-          "purge_guard_community".into(),
+          community_name,
           "key".into(),
         )
       },

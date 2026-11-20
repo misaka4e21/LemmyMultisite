@@ -310,18 +310,22 @@ mod tests {
     let pool = &mut pool.into();
 
     // insert test data
+    Instance::delete_all(pool).await?;
     let instance0 = Instance::read_or_create(pool, "example0.com").await?;
     let instance1 = Instance::read_or_create(pool, "example1.com").await?;
+    let local_instance = Instance::read_or_create(pool, "local.example.com").await?;
+    let local_site_form = SiteUpsertForm::new("Local".to_string(), local_instance.id);
+    let local_site_site = Site::create(pool, &local_site_form).await?;
     let site_form = SiteUpsertForm::new("Example".to_string(), instance0.id);
     let site = Site::create(pool, &site_form).await?;
     let system = Person::create(
       pool,
-      &PersonInsertForm::test_form(instance0.id, "federated_site_system"),
+      &PersonInsertForm::test_form(local_instance.id, "federated_site_system"),
     )
     .await?;
     let local_site = LocalSite::create(
       pool,
-      &LocalSiteInsertForm::new(site.id, system.id, instance0.domain.clone()),
+      &LocalSiteInsertForm::new(local_site_site.id, system.id, local_instance.domain.clone()),
     )
     .await?;
     let local_site_id = local_site.id;

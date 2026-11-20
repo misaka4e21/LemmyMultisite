@@ -1,6 +1,7 @@
 pub mod admin_allow_instance;
 pub mod admin_block_instance;
 pub mod admin_change_username;
+pub mod admin_get_user;
 pub mod admin_list_users;
 pub mod federated_instances;
 pub mod list_all_media;
@@ -14,3 +15,5 @@ mod configuration_tenant_tests;
 mod oauth_tenant_tests;
 #[cfg(test)]
 mod local_name_tests;
+#[cfg(test)]
+mod admin_user_tests;

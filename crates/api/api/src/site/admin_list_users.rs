@@ -15,6 +15,7 @@ pub async fn admin_list_users(
 
   let users = LocalUserQuery {
     local_site_id: tenant.local_site().id,
+    search_term: data.search_term,
     banned_only: data.banned_only,
     page_cursor: data.page_cursor,
     limit: data.limit,

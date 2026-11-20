@@ -92,6 +92,7 @@ mod tests {
 
   use super::*;
   use lemmy_db_schema_file::enums::ActorType;
+  use crate::test_data::TestData;
   use lemmy_diesel_utils::connection::build_db_pool_for_tests;
   use lemmy_utils::error::LemmyResult;
   use pretty_assertions::assert_eq;
@@ -104,13 +105,15 @@ mod tests {
   async fn receive_activity_duplicate() -> LemmyResult<()> {
     let pool = &build_db_pool_for_tests();
     let pool = &mut pool.into();
+    let test_data = TestData::create(pool).await?;
     let ap_id: DbUrl = Url::parse("http://example.com/activity/531")?.into();
 
     // inserting activity should only work once
-    ReceivedActivity::create(pool, LocalSiteId(1), &ap_id).await?;
-    let second = ReceivedActivity::create(pool, LocalSiteId(1), &ap_id).await;
+    ReceivedActivity::create(pool, test_data.local_site.id, &ap_id).await?;
+    let second = ReceivedActivity::create(pool, test_data.local_site.id, &ap_id).await;
     assert!(second.is_err());
 
+    test_data.delete(pool).await?;
     Ok(())
   }
 
@@ -119,6 +122,7 @@ mod tests {
   async fn sent_activity_write_read() -> LemmyResult<()> {
     let pool = &build_db_pool_for_tests();
     let pool = &mut pool.into();
+    let test_data = TestData::create(pool).await?;
     let ap_id: DbUrl = Url::parse("http://example.com/activity/412")?.into();
     let data = json!({
         "key1": "0xF9BA143B95FF6D82",
@@ -135,7 +139,7 @@ mod tests {
       send_all_instances: false,
       send_community_followers_of: None,
       send_inboxes: vec![],
-      local_site_id: LocalSiteId(1),
+      local_site_id: test_data.local_site.id,
     };
 
     SentActivity::create(pool, form).await?;
@@ -145,6 +149,7 @@ mod tests {
     assert_eq!(res.data, data);
     assert_eq!(res.sensitive, sensitive);
 
+    test_data.delete(pool).await?;
     Ok(())
   }
 }

@@ -109,15 +109,19 @@ mod tests {
   #[serial]
   #[tokio::test]
   async fn test_markdown_rewrite_remote_links() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let data = TestData::create(&mut base_context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&base_context, data.local_site.id).await?;
     let community = Community::create(
       &mut context.pool(),
-      &CommunityInsertForm::new(
-        data.instance.id,
-        "my_community".to_string(),
-        "pubkey".to_string(),
-      ),
+      &CommunityInsertForm {
+        origin_local_site_id: Some(data.local_site.id),
+        ..CommunityInsertForm::new(
+          data.instance.id,
+          "my_community".to_string(),
+          "pubkey".to_string(),
+        )
+      },
     )
     .await?;
     let user =
@@ -129,42 +133,44 @@ mod tests {
       ..PostInsertForm::new("My post".to_string(), user.person.id, community.id)
     };
     let post = Post::create(&mut context.pool(), &post_form).await?;
-    let markdown_local_post_url = format!("[link](https://lemmy-alpha/post/{})", post.id);
+    let local_origin = context.protocol_and_hostname();
+    let markdown_local_post_url = format!("[link]({local_origin}/post/{})", post.id);
 
-    let tests: Vec<_> = vec![
+    let tests: Vec<(&str, String, String)> = vec![
       (
         "rewrite remote post link",
         format!("[link]({})", post.ap_id),
-        markdown_local_post_url.as_ref(),
+        markdown_local_post_url,
       ),
       (
         "rewrite community link",
         format!("[link]({})", community.ap_id),
-        "[link](https://lemmy-alpha/c/my_community@changeme.invalid)",
+        format!("[link]({local_origin}/c/my_community@changeme.invalid)"),
       ),
       (
         "dont rewrite local post link",
-        "[link](https://lemmy-alpha/post/2)".to_string(),
-        "[link](https://lemmy-alpha/post/2)",
+        format!("[link]({local_origin}/post/2)"),
+        format!("[link]({local_origin}/post/2)"),
       ),
       (
         "dont rewrite local community link",
-        "[link](https://lemmy-alpha/c/test)".to_string(),
-        "[link](https://lemmy-alpha/c/test)",
+        format!("[link]({local_origin}/c/test)"),
+        format!("[link]({local_origin}/c/test)"),
       ),
       (
         "dont rewrite non-fediverse link",
         "[link](https://example.com/)".to_string(),
-        "[link](https://example.com/)",
+        "[link](https://example.com/)".to_string(),
       ),
       (
         "dont rewrite invalid url",
         "[link](example-com)".to_string(),
-        "[link](example-com)",
+        "[link](example-com)".to_string(),
       ),
     ];
 
-    let context = LemmyContext::init_test_context().await;
+    let base_context = LemmyContext::init_test_context().await;
+    let context = LemmyContext::with_test_tenant(&base_context, data.local_site.id).await?;
     for (msg, input, expected) in &tests {
       let result = markdown_rewrite_remote_links(input.clone(), &context).await;
 

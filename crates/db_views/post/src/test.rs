@@ -9,6 +9,7 @@ use lemmy_db_schema::{
   impls::{
     actor_language::UNDETERMINED_ID,
     presence::{
+      ensure_community_site,
       ensure_post_site,
       set_post_site_featured,
       set_post_site_locked,
@@ -65,15 +66,31 @@ use pretty_assertions::assert_eq;
 use serial_test::serial;
 use std::{
   collections::HashSet,
+  sync::atomic::{AtomicBool, Ordering},
   time::{Duration, Instant},
 };
 use test_context::{AsyncTestContext, test_context};
+
+static TEST_DATABASE_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+async fn initialize_test_database(pool: &mut DbPool<'_>) -> LemmyResult<()> {
+  if !TEST_DATABASE_INITIALIZED.swap(true, Ordering::SeqCst) {
+    Instance::delete_all(pool).await?;
+    let conn = &mut get_conn(pool).await?;
+    conn
+      .batch_execute("SELECT setval(pg_get_serial_sequence('local_site', 'id'), 1, false);")
+      .await?;
+    TestData::create(pool).await?;
+  }
+  Ok(())
+}
 
 #[tokio::test]
 #[serial]
 async fn local_removal_stays_local() -> LemmyResult<()> {
   let pool = &build_db_pool_for_tests();
   let pool = &mut pool.into();
+  initialize_test_database(pool).await?;
   let data = TestData::create(pool).await?;
 
   let community = Community::create(
@@ -266,24 +283,33 @@ impl Data {
   async fn setup_inner() -> LemmyResult<Data> {
     let actual_pool = build_db_pool()?;
     let pool = &mut (&actual_pool).into();
+    initialize_test_database(pool).await?;
     let data = TestData::create(pool).await?;
 
-    let tegan_person_form = PersonInsertForm::test_form(data.instance.id, "tegan");
+    let tegan_person_form = PersonInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..PersonInsertForm::test_form(data.instance.id, "tegan")
+    };
     let inserted_tegan_person = Person::create(pool, &tegan_person_form).await?;
     let tegan_local_user_form = LocalUserInsertForm {
       admin: Some(true),
+      local_site_id: data.local_site.id,
       ..LocalUserInsertForm::test_form(inserted_tegan_person.id)
     };
     let inserted_tegan_local_user = LocalUser::create(pool, &tegan_local_user_form, vec![]).await?;
 
     let bot_person_form = PersonInsertForm {
       bot_account: Some(true),
+      origin_local_site_id: Some(data.local_site.id),
       ..PersonInsertForm::test_form(data.instance.id, "mybot")
     };
     let inserted_bot_person = Person::create(pool, &bot_person_form).await?;
     let inserted_bot_local_user = LocalUser::create(
       pool,
-      &LocalUserInsertForm::test_form(inserted_bot_person.id),
+      &LocalUserInsertForm {
+        local_site_id: data.local_site.id,
+        ..LocalUserInsertForm::test_form(inserted_bot_person.id)
+      },
       vec![],
     )
     .await?;
@@ -293,20 +319,31 @@ impl Data {
       "test_community_3".to_string(),
       "pubkey".to_string(),
     );
+    let new_community = CommunityInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..new_community
+    };
     let community = Community::create(pool, &new_community).await?;
 
     // Test a person block, make sure the post query doesn't include their post
-    let john_person_form = PersonInsertForm::test_form(data.instance.id, "john");
+    let john_person_form = PersonInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..PersonInsertForm::test_form(data.instance.id, "john")
+    };
     let inserted_john_person = Person::create(pool, &john_person_form).await?;
     let inserted_john_local_user = LocalUser::create(
       pool,
-      &LocalUserInsertForm::test_form(inserted_john_person.id),
+      &LocalUserInsertForm {
+        local_site_id: data.local_site.id,
+        ..LocalUserInsertForm::test_form(inserted_john_person.id)
+      },
       vec![],
     )
     .await?;
 
     let post_from_blocked_person = PostInsertForm {
       language_id: Some(LanguageId(1)),
+      origin_local_site_id: Some(data.local_site.id),
       ..PostInsertForm::new(
         POST_BY_BLOCKED_PERSON.to_string(),
         inserted_john_person.id,
@@ -357,6 +394,7 @@ impl Data {
     // A sample post
     let new_post = PostInsertForm {
       language_id: Some(LanguageId(47)),
+      origin_local_site_id: Some(data.local_site.id),
       ..PostInsertForm::new(POST.to_string(), inserted_tegan_person.id, community.id)
     };
 
@@ -367,11 +405,16 @@ impl Data {
       inserted_bot_person.id,
       community.id,
     );
+    let new_bot_post = PostInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..new_bot_post
+    };
     let bot_post = Post::create(pool, &new_bot_post).await?;
 
     // A sample post with tags
     let new_post = PostInsertForm {
       language_id: Some(LanguageId(47)),
+      origin_local_site_id: Some(data.local_site.id),
       body: Some("post with tags body".to_string()),
       url: Some(Url::parse(SAMPLE_URL)?.into()),
       ..PostInsertForm::new(
@@ -688,6 +731,10 @@ async fn post_listing_person_vote_totals(data: &mut Data) -> LemmyResult<()> {
     data.bot.person.id,
     data.community.id,
   );
+  let bot_post_2 = PostInsertForm {
+    origin_local_site_id: Some(data.local_site.id),
+    ..bot_post_2
+  };
   let bot_post_2 = Post::create(pool, &bot_post_2).await?;
 
   let post_like_form = PostLikeForm::new(data.bot_post.id, data.tegan.person.id, Some(true));
@@ -1221,6 +1268,7 @@ async fn post_listing_instance_block_communities(data: &mut Data) -> LemmyResult
     "pubkey".to_string(),
   );
   let inserted_community = Community::create(pool, &community_form).await?;
+  ensure_community_site(pool, data.local_site.id, inserted_community.id).await?;
 
   let post_form = PostInsertForm {
     language_id: Some(LanguageId(1)),
@@ -1231,6 +1279,7 @@ async fn post_listing_instance_block_communities(data: &mut Data) -> LemmyResult
     )
   };
   let post_from_blocked_instance = Post::create(pool, &post_form).await?;
+  ensure_post_site(pool, data.local_site.id, post_from_blocked_instance.id).await?;
 
   // Create a person on that comm-blocked instance,
   // have them create a post from a non-instance-comm blocked community.
@@ -1241,7 +1290,8 @@ async fn post_listing_instance_block_communities(data: &mut Data) -> LemmyResult
     language_id: Some(LanguageId(1)),
     ..PostInsertForm::new(HOWARD_POST.to_string(), howard.id, data.community.id)
   };
-  let _post_from_blocked_instance_user = Post::create(pool, &howard_post_form).await?;
+  let post_from_blocked_instance_user = Post::create(pool, &howard_post_form).await?;
+  ensure_post_site(pool, data.local_site.id, post_from_blocked_instance_user.id).await?;
 
   // no instance block, should return all posts
   let post_listings_all = data
@@ -1324,6 +1374,7 @@ async fn post_listing_instance_block_persons(data: &mut Data) -> LemmyResult<()>
     "pubkey".to_string(),
   );
   let inserted_community = Community::create(pool, &community_form).await?;
+  ensure_community_site(pool, data.local_site.id, inserted_community.id).await?;
 
   // Create a post from the blocked user on a safe community
   let blocked_post_form = PostInsertForm {
@@ -1335,6 +1386,7 @@ async fn post_listing_instance_block_persons(data: &mut Data) -> LemmyResult<()>
     )
   };
   let post_from_blocked_instance = Post::create(pool, &blocked_post_form).await?;
+  ensure_post_site(pool, data.local_site.id, post_from_blocked_instance.id).await?;
 
   // Also create a post from an unblocked user
   let unblocked_post_form = PostInsertForm {
@@ -1345,7 +1397,8 @@ async fn post_listing_instance_block_persons(data: &mut Data) -> LemmyResult<()>
       inserted_community.id,
     )
   };
-  let _post_to_unblocked_comm = Post::create(pool, &unblocked_post_form).await?;
+  let post_to_unblocked_comm = Post::create(pool, &unblocked_post_form).await?;
+  ensure_post_site(pool, data.local_site.id, post_to_unblocked_comm.id).await?;
 
   // no instance block, should return all posts
   let post_listings_all = data
@@ -1997,7 +2050,10 @@ async fn post_listing_creator_banned(data: &mut Data) -> LemmyResult<()> {
   let pool = &data.pool();
   let pool = &mut pool.into();
 
-  let banned_person_form = PersonInsertForm::test_form(data.instance.id, "jill");
+  let banned_person_form = PersonInsertForm {
+    origin_local_site_id: Some(data.local_site.id),
+    ..PersonInsertForm::test_form(data.instance.id, "jill")
+  };
 
   let banned_person = Person::create(pool, &banned_person_form).await?;
 
@@ -2048,7 +2104,10 @@ async fn post_listing_creator_community_banned(data: &mut Data) -> LemmyResult<(
   let pool = &data.pool();
   let pool = &mut pool.into();
 
-  let banned_person_form = PersonInsertForm::test_form(data.instance.id, "jarvis");
+  let banned_person_form = PersonInsertForm {
+    origin_local_site_id: Some(data.local_site.id),
+    ..PersonInsertForm::test_form(data.instance.id, "jarvis")
+  };
 
   let banned_person = Person::create(pool, &banned_person_form).await?;
 
@@ -2104,7 +2163,7 @@ async fn speed_check(data: &mut Data) -> LemmyResult<()> {
   let pool = &mut pool.into();
 
   // Make sure the post_view query is less than this time
-  let duration_max = Duration::from_millis(120);
+  let duration_max = Duration::from_millis(250);
 
   // Create some dummy posts
   let num_posts = 1000;

@@ -222,8 +222,9 @@ mod tests {
   #[tokio::test]
   #[serial]
   async fn test_parse_lemmy_pm() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&base_context, test_data.local_site.id).await?;
     let url = Url::parse("https://enterprise.lemmy.ml/private_message/1621")?;
     prepare_comment_test(&url, &context).await?;
     let json: PrivateMessage =
@@ -246,8 +247,9 @@ mod tests {
   #[tokio::test]
   #[serial]
   async fn test_parse_pleroma_pm() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&base_context, test_data.local_site.id).await?;
     let url = Url::parse("https://enterprise.lemmy.ml/private_message/1621")?;
     prepare_comment_test(&url, &context).await?;
     let pleroma_url = Url::parse("https://queer.hacktivis.me/objects/2")?;

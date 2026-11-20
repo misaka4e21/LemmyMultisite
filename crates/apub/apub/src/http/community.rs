@@ -1,10 +1,8 @@
 use super::{ActorPath, check_community_content_fetchable};
 use crate::{
   collections::{
-    community_featured::ApubCommunityFeatured,
-    community_follower::ApubCommunityFollower,
-    community_moderators::ApubCommunityModerators,
-    community_outbox::ApubCommunityOutbox,
+    community_featured::ApubCommunityFeatured, community_follower::ApubCommunityFollower,
+    community_moderators::ApubCommunityModerators, community_outbox::ApubCommunityOutbox,
   },
   http::{check_community_fetchable, get_instance_id},
 };
@@ -15,16 +13,13 @@ use activitypub_federation::{
   traits::{Collection, Object},
 };
 use actix_web::{
-  HttpRequest,
-  HttpResponse,
+  HttpRequest, HttpResponse,
   web::{Path, Query},
 };
 use lemmy_api_utils::context::LemmyContext;
 use lemmy_apub_objects::{
   objects::{
-    SiteOrMultiOrCommunityOrUser,
-    community::ApubCommunity,
-    multi_community::ApubMultiCommunity,
+    SiteOrMultiOrCommunityOrUser, community::ApubCommunity, multi_community::ApubMultiCommunity,
     multi_community_collection::ApubFeedCollection,
   },
   protocol::tags::ApubCommunityTag,
@@ -266,6 +261,7 @@ pub(crate) mod tests {
   use super::*;
   use activitypub_federation::protocol::tombstone::Tombstone;
   use actix_web::{body::to_bytes, test::TestRequest};
+  use lemmy_api_utils::context::LemmyContext;
   use lemmy_apub_objects::protocol::group::Group;
   use lemmy_db_schema::{
     source::{
@@ -284,13 +280,15 @@ pub(crate) mod tests {
     deleted: bool,
     visibility: CommunityVisibility,
     context: &Data<LemmyContext>,
-  ) -> LemmyResult<(TestData, Community, Path<ActorPath>)> {
+  ) -> LemmyResult<(Data<LemmyContext>, TestData, Community, Path<ActorPath>)> {
     let data = TestData::create(&mut context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(context, data.local_site.id).await?;
 
     let community_form = CommunityInsertForm {
       deleted: Some(deleted),
-      ap_id: Some(Url::parse("http://lemmy-alpha")?.into()),
+      ap_id: Some(Url::parse(&format!("{}/c/testcom6", context.protocol_and_hostname()))?.into()),
       visibility: Some(visibility),
+      origin_local_site_id: Some(data.local_site.id),
       ..CommunityInsertForm::new(
         data.instance.id,
         "testcom6".to_string(),
@@ -302,7 +300,7 @@ pub(crate) mod tests {
       name: community.name.clone(),
     }
     .into();
-    Ok((data, community, path))
+    Ok((context, data, community, path))
   }
 
   async fn decode_response<T: DeserializeOwned>(res: HttpResponse) -> LemmyResult<T> {
@@ -314,8 +312,8 @@ pub(crate) mod tests {
   #[tokio::test]
   #[serial]
   async fn test_get_community() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let (data, community, path) = init(false, CommunityVisibility::Public, &context).await?;
+    let base = LemmyContext::init_test_context().await;
+    let (context, data, community, path) = init(false, CommunityVisibility::Public, &base).await?;
     let request = TestRequest::default().to_http_request();
 
     // fetch invalid community
@@ -353,8 +351,8 @@ pub(crate) mod tests {
   #[tokio::test]
   #[serial]
   async fn test_get_deleted_community() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let (data, _, path) = init(true, CommunityVisibility::Public, &context).await?;
+    let base = LemmyContext::init_test_context().await;
+    let (context, data, _, path) = init(true, CommunityVisibility::Public, &base).await?;
     let request = TestRequest::default().to_http_request();
 
     // should return tombstone
@@ -383,8 +381,9 @@ pub(crate) mod tests {
   #[tokio::test]
   #[serial]
   async fn test_get_local_only_community() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let (data, _, path) = init(false, CommunityVisibility::LocalOnlyPrivate, &context).await?;
+    let base = LemmyContext::init_test_context().await;
+    let (context, data, _, path) =
+      init(false, CommunityVisibility::LocalOnlyPrivate, &base).await?;
     let request = TestRequest::default().to_http_request();
 
     let res = get_apub_community_http(path.clone().into(), context.clone()).await;
@@ -409,8 +408,8 @@ pub(crate) mod tests {
   #[tokio::test]
   #[serial]
   async fn test_outbox_deleted_user() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let (data, community, path) = init(false, CommunityVisibility::Public, &context).await?;
+    let base = LemmyContext::init_test_context().await;
+    let (context, data, community, path) = init(false, CommunityVisibility::Public, &base).await?;
     let request = TestRequest::default().to_http_request();
 
     // post from deleted user shouldnt break outbox

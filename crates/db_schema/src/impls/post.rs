@@ -54,7 +54,15 @@ impl Crud for Post {
         if form.local.unwrap_or(form.ap_id.is_none()) {
           let local_site_id = match form.origin_local_site_id {
             Some(local_site_id) => Some(local_site_id),
-            None => default_local_site_id(&mut conn.into()).await?,
+            None => {
+              let creator_origin = person::table
+                .filter(person::id.eq(form.creator_id))
+                .select(person::origin_local_site_id)
+                .first::<Option<LocalSiteId>>(conn)
+                .await?;
+              creator_origin
+                .or(default_local_site_id(&mut conn.into()).await?)
+            }
           };
           if let Some(local_site_id) = local_site_id {
             ensure_post_site(&mut conn.into(), local_site_id, post.id).await?;

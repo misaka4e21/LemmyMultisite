@@ -38,6 +38,7 @@ mod tests {
 
   use super::*;
   use crate::source::instance::Instance;
+  use crate::test_data::TestData;
   use lemmy_diesel_utils::connection::build_db_pool_for_tests;
   use pretty_assertions::assert_eq;
   use serial_test::serial;
@@ -47,6 +48,7 @@ mod tests {
   async fn test_allowlist_insert_and_clear() -> LemmyResult<()> {
     let pool = &build_db_pool_for_tests();
     let pool = &mut pool.into();
+    let data = TestData::create(pool).await?;
     let instances = vec![
       Instance::read_or_create(pool, "tld1.xyz").await?,
       Instance::read_or_create(pool, "tld2.xyz").await?,
@@ -54,7 +56,7 @@ mod tests {
     ];
     let forms: Vec<_> = instances
       .iter()
-      .map(|i| FederationAllowListForm::new(i.id, LocalSiteId(1)))
+      .map(|i| FederationAllowListForm::new(i.id, data.local_site.id))
       .collect();
 
     for f in &forms {
@@ -68,11 +70,12 @@ mod tests {
 
     // Now test clearing them
     for f in forms {
-      FederationAllowList::unallow(pool, LocalSiteId(1), f.instance_id).await?;
+      FederationAllowList::unallow(pool, data.local_site.id, f.instance_id).await?;
     }
     let allows = Instance::allowlist(pool).await?;
     assert_eq!(0, allows.len());
 
+    data.delete(pool).await?;
     Instance::delete_all(pool).await?;
 
     Ok(())

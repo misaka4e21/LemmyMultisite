@@ -6,6 +6,7 @@ use diesel::{
   NullableExpressionMethods,
   QueryDsl,
   SelectableHelper,
+  TextExpressionMethods,
 };
 use diesel_async::RunQueryDsl;
 use i_love_jesus::asc_if;
@@ -189,6 +190,7 @@ impl LocalUserView {
 #[derive(Default)]
 pub struct LocalUserQuery {
   pub local_site_id: LocalSiteId,
+  pub search_term: Option<String>,
   pub banned_only: Option<bool>,
   pub page_cursor: Option<PaginationCursor>,
   pub limit: Option<i64>,
@@ -223,6 +225,15 @@ impl LocalUserQuery {
                   .gt(now().nullable()),
               ),
           ),
+      );
+    }
+
+    if let Some(search_term) = self.search_term.filter(|term| !term.trim().is_empty()) {
+      let search_pattern = format!("%{}%", search_term.trim().to_lowercase());
+      query = query.filter(
+        lower(person::name)
+          .like(search_pattern.clone())
+          .or(lower(coalesce(local_user::email, "")).like(search_pattern)),
       );
     }
 
@@ -303,7 +314,10 @@ mod tests {
       ..PersonInsertForm::test_form(instance.id, "alice")
     };
     let alice = Person::create(pool, &alice_form).await?;
-    let alice_local_user_form = LocalUserInsertForm::test_form(alice.id);
+    let alice_local_user_form = LocalUserInsertForm {
+      email: Some("alice@example.com".to_string()),
+      ..LocalUserInsertForm::test_form(alice.id)
+    };
     LocalUser::create(pool, &alice_local_user_form, vec![]).await?;
 
     Ok(Data { alice })
@@ -312,6 +326,55 @@ mod tests {
   async fn cleanup(data: Data, pool: &mut DbPool<'_>) -> LemmyResult<()> {
     Instance::delete(pool, data.alice.instance_id).await?;
     Ok(())
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn search_by_username_and_email() -> LemmyResult<()> {
+    let pool = &build_db_pool_for_tests();
+    let pool = &mut pool.into();
+    let data = init_data(pool).await?;
+
+    let username_matches = LocalUserQuery {
+      local_site_id: LocalSiteId(1),
+      search_term: Some("ALIC".to_string()),
+      ..Default::default()
+    }
+    .list(pool)
+    .await?;
+    assert_length!(1, username_matches.items);
+    assert_eq!(username_matches.items[0].person.id, data.alice.id);
+
+    let email_matches = LocalUserQuery {
+      local_site_id: LocalSiteId(1),
+      search_term: Some("EXAMPLE.COM".to_string()),
+      ..Default::default()
+    }
+    .list(pool)
+    .await?;
+    assert_length!(1, email_matches.items);
+    assert_eq!(email_matches.items[0].person.id, data.alice.id);
+
+    let empty_search = LocalUserQuery {
+      local_site_id: LocalSiteId(1),
+      search_term: Some("   ".to_string()),
+      ..Default::default()
+    }
+    .list(pool)
+    .await?;
+    assert_length!(1, empty_search.items);
+    assert_eq!(empty_search.items[0].person.id, data.alice.id);
+
+    let no_matches = LocalUserQuery {
+      local_site_id: LocalSiteId(1),
+      search_term: Some("missing-user".to_string()),
+      ..Default::default()
+    }
+    .list(pool)
+    .await?;
+    assert!(no_matches.items.is_empty());
+
+    cleanup(data, pool).await
   }
 
   #[tokio::test]

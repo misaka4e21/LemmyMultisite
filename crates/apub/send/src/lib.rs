@@ -207,6 +207,9 @@ mod test {
     federation_blocklist::{FederationBlockList, FederationBlockListForm},
     instance::InstanceForm,
     person::{Person, PersonInsertForm},
+    local_site::{LocalSite, LocalSiteInsertForm},
+    local_site_rate_limit::{LocalSiteRateLimit, LocalSiteRateLimitInsertForm},
+    site::{Site, SiteUpsertForm},
   };
   use lemmy_db_schema_file::newtypes::LocalSiteId;
   use lemmy_diesel_utils::traits::Crud;
@@ -222,6 +225,7 @@ mod test {
     send_manager: SendManager,
     context: Data<LemmyContext>,
     instances: Vec<Instance>,
+    local_site_id: LocalSiteId,
   }
   impl TestData {
     async fn init(process_count: i32, process_index: i32) -> LemmyResult<Self> {
@@ -244,19 +248,38 @@ mod test {
         concurrent_sends_per_instance,
       };
       let pool = &mut context.pool();
+      let local_instance = Instance::read_or_create(pool, "local.com").await?;
+      let site = Site::create(pool, &SiteUpsertForm::new("local test".into(), local_instance.id))
+        .await?;
+      let system = Person::create(
+        pool,
+        &PersonInsertForm::test_form(local_instance.id, "local_system"),
+      )
+      .await?;
+      let local_site = LocalSite::create(
+        pool,
+        &LocalSiteInsertForm::new(site.id, system.id, local_instance.domain.clone()),
+      )
+      .await?;
+      LocalSiteRateLimit::create(
+        pool,
+        &LocalSiteRateLimitInsertForm::new(local_site.id),
+      )
+      .await?;
       let instances = vec![
         Instance::read_or_create(pool, "alpha.com").await?,
         Instance::read_or_create(pool, "beta.com").await?,
         Instance::read_or_create(pool, "gamma.com").await?,
       ];
 
-      let configs = Arc::new(HashMap::from([(LocalSiteId(1), federation_config.clone())]));
+      let configs = Arc::new(HashMap::from([(local_site.id, federation_config.clone())]));
       let send_manager =
         SendManager::new(opts, federation_config, configs, federation_worker_config);
       Ok(Self {
         send_manager,
         context,
         instances,
+        local_site_id: local_site.id,
       })
     }
 
@@ -334,13 +357,13 @@ mod test {
     let instance_id = data.instances[0].id;
     let form = PersonInsertForm::new("tim".to_string(), String::new(), instance_id);
     let person = Person::create(&mut data.context.pool(), &form).await?;
-    let form = FederationBlockListForm::new(instance_id, LocalSiteId(1), None);
+    let form = FederationBlockListForm::new(instance_id, data.local_site_id, None);
     FederationBlockList::block(&mut data.context.pool(), &form).await?;
     data.run().await?;
     let workers = &data.send_manager.workers;
     assert_eq!(2, workers.len());
-    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[1].id)));
-    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[2].id)));
+    assert!(workers.contains_key(&(data.local_site_id, data.instances[1].id)));
+    assert!(workers.contains_key(&(data.local_site_id, data.instances[2].id)));
 
     Person::delete(&mut data.context.pool(), person.id).await?;
     data.cleanup().await?;
@@ -356,12 +379,12 @@ mod test {
     let instance_id = data.instances[0].id;
     let form = PersonInsertForm::new("tim".to_string(), String::new(), instance_id);
     let person = Person::create(&mut data.context.pool(), &form).await?;
-    let form = FederationAllowListForm::new(data.instances[0].id, LocalSiteId(1));
+    let form = FederationAllowListForm::new(data.instances[0].id, data.local_site_id);
     FederationAllowList::allow(&mut data.context.pool(), &form).await?;
     data.run().await?;
     let workers = &data.send_manager.workers;
     assert_eq!(1, workers.len());
-    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[0].id)));
+    assert!(workers.contains_key(&(data.local_site_id, data.instances[0].id)));
 
     Person::delete(&mut data.context.pool(), person.id).await?;
     data.cleanup().await?;
@@ -384,8 +407,8 @@ mod test {
     data.run().await?;
     let workers = &data.send_manager.workers;
     assert_eq!(2, workers.len());
-    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[1].id)));
-    assert!(workers.contains_key(&(LocalSiteId(1), data.instances[2].id)));
+    assert!(workers.contains_key(&(data.local_site_id, data.instances[1].id)));
+    assert!(workers.contains_key(&(data.local_site_id, data.instances[2].id)));
 
     data.cleanup().await?;
     Ok(())

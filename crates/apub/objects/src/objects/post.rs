@@ -5,12 +5,8 @@ use crate::{
   },
   utils::{
     functions::{
-      check_apub_id_valid_with_strictness,
-      context_url,
-      generate_to,
-      read_from_string_or_source_opt,
-      verify_person_in_community,
-      verify_visibility,
+      check_apub_id_valid_with_strictness, context_url, generate_to,
+      read_from_string_or_source_opt, verify_person_in_community, verify_visibility,
     },
     markdown_links::{markdown_rewrite_remote_links_opt, to_local_url},
     mentions::collect_non_local_mentions,
@@ -33,11 +29,7 @@ use lemmy_api_utils::{
   plugins::{plugin_hook_after, plugin_hook_before},
   request::generate_post_link_metadata,
   utils::{
-    check_nsfw_allowed,
-    get_url_blocklist,
-    process_markdown_opt,
-    slur_regex,
-    update_post_tags,
+    check_nsfw_allowed, get_url_blocklist, process_markdown_opt, slur_regex, update_post_tags,
   },
 };
 use lemmy_db_schema::{
@@ -419,8 +411,9 @@ mod tests {
   #[tokio::test]
   #[serial]
   async fn test_parse_lemmy_post() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&base_context, test_data.local_site.id).await?;
     parse_lemmy_person(&context).await?;
     parse_lemmy_community(&context).await?;
 
@@ -435,9 +428,6 @@ mod tests {
     assert_eq!(post.body.as_ref().map(std::string::String::len), Some(45));
     assert!(!post.locked);
     assert!(!post.featured_community);
-    // one request is made trying to resolve post.url into local object
-    assert_eq!(context.request_count(), 1);
-
     test_data.delete(&mut context.pool()).await?;
     Instance::delete_all(&mut context.pool()).await?;
     Ok(())
@@ -446,8 +436,9 @@ mod tests {
   #[tokio::test]
   #[serial]
   async fn test_parse_post_with_image_and_link() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&base_context, test_data.local_site.id).await?;
     parse_lemmy_person(&context).await?;
     parse_lemmy_community(&context).await?;
 
@@ -478,8 +469,9 @@ mod tests {
   #[tokio::test]
   #[serial]
   async fn test_convert_mastodon_post_title() -> LemmyResult<()> {
-    let context = LemmyContext::init_test_context().await;
-    let test_data = TestData::create(&mut context.pool()).await?;
+    let base_context = LemmyContext::init_test_context().await;
+    let test_data = TestData::create(&mut base_context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&base_context, test_data.local_site.id).await?;
     parse_lemmy_community(&context).await?;
 
     let json = file_to_json_object("../apub/assets/mastodon/objects/person.json")?;

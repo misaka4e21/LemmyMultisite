@@ -278,9 +278,9 @@ impl InstanceWorker {
     }
     Ok(())
   }
-  /// Checks that sequential activities `last_successful_id + 1`, `last_successful_id + 2` etc have
-  /// been sent successfully. In that case updates `last_successful_id` and saves the state to the
-  /// database if the time since the last save is greater than `SAVE_STATE_EVERY_TIME`.
+  /// Checks that the next queued activities for this site have all been sent successfully. In
+  /// that case updates `last_successful_id` and saves the state to the database if the time since
+  /// the last save is greater than `SAVE_STATE_EVERY_TIME`.
   async fn pop_successfuls_and_write(&mut self, force_write: bool) -> Result<()> {
     let Some(mut last_id) = self.state.last_successful_id else {
       tracing::warn!(
@@ -296,12 +296,20 @@ impl InstanceWorker {
       self.successfuls.peek(),
       self.successfuls.iter()
     );
-    while self
-      .successfuls
-      .peek()
-      .map(|a| a.activity_id == ActivityId(last_id.0 + 1))
-      .unwrap_or(false)
-    {
+    loop {
+      let Some(next_activity_id) =
+        get_next_activity_id(&mut self.pool(), self.state.local_site_id, last_id).await?
+      else {
+        break;
+      };
+      if self
+        .successfuls
+        .peek()
+        .map(|a| a.activity_id != next_activity_id)
+        .unwrap_or(true)
+      {
+        break;
+      }
       let next = self
         .successfuls
         .pop()
@@ -450,6 +458,7 @@ mod test {
   struct Data {
     context: activitypub_federation::config::Data<LemmyContext>,
     instance: Instance,
+    local_site_id: LocalSiteId,
     person: Person,
     stats_receiver: UnboundedReceiver<FederationQueueStateWithDomain>,
     inbox_receiver: UnboundedReceiver<String>,
@@ -527,6 +536,7 @@ mod test {
       Ok(Self {
         context: context.to_request_data(),
         instance,
+        local_site_id: local_site.id,
         person,
         stats_receiver,
         inbox_receiver,
@@ -575,7 +585,13 @@ mod test {
     tracing::debug!("received first stats");
     assert_eq!(data.instance.id, rcv.state.instance_id);
 
-    let sent = send_activity(data.person.ap_id.clone(), &data.context, true).await?;
+    let sent = send_activity(
+      data.person.ap_id.clone(),
+      data.local_site_id,
+      &data.context,
+      true,
+    )
+    .await?;
     tracing::debug!("sent activity");
     // receive for successfully sent activity
     let inbox_rcv = data.inbox_receiver.recv().await.unwrap();
@@ -618,7 +634,15 @@ mod test {
     // let last_id_before = rcv.state.last_successful_id.unwrap();
     let mut sent = vec![];
     for _ in 0..40 {
-      sent.push(send_activity(data.person.ap_id.clone(), &data.context, false).await?);
+      sent.push(
+        send_activity(
+          data.person.ap_id.clone(),
+          data.local_site_id,
+          &data.context,
+          false,
+        )
+        .await?,
+      );
     }
     sleep(2 * *WORK_FINISHED_RECHECK_DELAY).await;
     tracing::debug!("sent activity");
@@ -646,7 +670,14 @@ mod test {
     for count in counts {
       tracing::debug!("sending {} activities", count);
       let sent = try_join_all(
-        (0..count).map(|_| send_activity(data.person.ap_id.clone(), &data.context, false)),
+        (0..count).map(|_| {
+          send_activity(
+            data.person.ap_id.clone(),
+            data.local_site_id,
+            &data.context,
+            false,
+          )
+        }),
       )
       .await?;
       sleep(2 * *WORK_FINISHED_RECHECK_DELAY).await;
@@ -664,7 +695,13 @@ mod test {
     let form = InstanceForm::new(data.instance.domain.clone());
     Instance::update(&mut data.context.pool(), data.instance.id, form).await?;
 
-    send_activity(data.person.ap_id.clone(), &data.context, true).await?;
+    send_activity(
+      data.person.ap_id.clone(),
+      data.local_site_id,
+      &data.context,
+      true,
+    )
+    .await?;
     data.inbox_receiver.recv().await.unwrap();
 
     let instance =
@@ -691,8 +728,15 @@ mod test {
     *data.respond_with_error.write().unwrap() = true;
 
     // send a few activities
-    try_join_all((0..5).map(|_| send_activity(data.person.ap_id.clone(), &data.context, false)))
-      .await?;
+    try_join_all((0..5).map(|_| {
+      send_activity(
+        data.person.ap_id.clone(),
+        data.local_site_id,
+        &data.context,
+        false,
+      )
+    }))
+    .await?;
 
     // it immediately performs first retry giving us 2 failures
     wait_receive(2, &mut data.stats_receiver).await;
@@ -763,6 +807,7 @@ mod test {
 
   async fn send_activity(
     ap_id: DbUrl,
+    local_site_id: LocalSiteId,
     context: &LemmyContext,
     wait: bool,
   ) -> LemmyResult<SentActivity> {
@@ -786,7 +831,7 @@ mod test {
       send_community_followers_of: None,
       actor_type: ActorType::Person,
       actor_apub_id: ap_id,
-      local_site_id: LocalSiteId(1),
+      local_site_id,
     };
     let sent = SentActivity::create(&mut context.pool(), form).await?;
 

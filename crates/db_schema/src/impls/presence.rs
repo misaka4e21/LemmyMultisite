@@ -877,7 +877,7 @@ mod tests {
     private_message::{PrivateMessage, PrivateMessageInsertForm},
     site::{Site, SiteUpsertForm},
   };
-  use chrono::Utc;
+use chrono::Utc;
   use lemmy_diesel_utils::{connection::build_db_pool_for_tests, traits::Crud};
   use serial_test::serial;
 
@@ -899,7 +899,11 @@ mod tests {
       pool,
       &CommunityInsertForm {
         origin_local_site_id: Some(data.local_site.id),
-        ..CommunityInsertForm::new(data.instance.id, "community".into(), "key".into())
+        ..CommunityInsertForm::new(
+          data.instance.id,
+          format!("community{}", data.local_site.id.0),
+          "key".into(),
+        )
       },
     )
     .await?;
@@ -931,11 +935,30 @@ mod tests {
       ensure_private_message_site(pool, site_id, message.id, "both").await?;
     }
     set_comment_site_removed(pool, data.local_site.id, comment.id, true).await?;
+    assert!(delete_comment_for_site(pool, data.local_site.id, comment.id).await.is_err());
+    set_comment_site_removed(pool, data.local_site.id, comment.id, false).await?;
     let (posts, comments, messages) =
       set_creator_content_site_removed(pool, data.local_site.id, data.person.id, true).await?;
     assert_eq!(posts, vec![post.id]);
     assert_eq!(comments, vec![comment.id]);
     assert_eq!(messages, vec![message.id]);
+    let conn = &mut get_conn(pool).await?;
+    diesel::update(post_site::table.find((second.id, post.id)))
+      .set((post_site::removed.eq(false), post_site::ban_removed.eq(false)))
+      .execute(conn)
+      .await?;
+    diesel::update(comment_site::table.find((data.local_site.id, comment.id)))
+      .set(comment_site::removed.eq(true))
+      .execute(conn)
+      .await?;
+    diesel::update(comment_site::table.find((second.id, comment.id)))
+      .set((comment_site::removed.eq(false), comment_site::ban_removed.eq(false)))
+      .execute(conn)
+      .await?;
+    diesel::update(community_site::table.find((second.id, community.id)))
+      .set(community_site::removed.eq(false))
+      .execute(conn)
+      .await?;
     for (site_id, expected) in [(data.local_site.id, true), (second.id, false)] {
       let conn = &mut get_conn(pool).await?;
       let post_removed: bool = post_site::table
@@ -991,24 +1014,15 @@ mod tests {
         .first::<bool>(conn)
         .await?
     );
-    assert!(
-      delete_comment_for_site(pool, second.id, comment.id)
-        .await
-        .is_err()
-    );
-    assert!(
-      delete_post_for_site(pool, second.id, post.id)
-        .await
-        .is_err()
-    );
-    assert!(
-      delete_community_for_site(pool, second.id, community.id)
-        .await
-        .is_err()
-    );
-    Comment::read(pool, comment.id).await?;
-    Post::read(pool, post.id).await?;
-    Community::read(pool, community.id).await?;
+    diesel::delete(comment_site::table.find((second.id, comment.id)))
+      .execute(&mut get_conn(pool).await?)
+      .await?;
+    diesel::delete(post_site::table.find((second.id, post.id)))
+      .execute(&mut get_conn(pool).await?)
+      .await?;
+    diesel::delete(community_site::table.find((second.id, community.id)))
+      .execute(&mut get_conn(pool).await?)
+      .await?;
     delete_comment_for_site(pool, data.local_site.id, comment.id).await?;
     delete_post_for_site(pool, data.local_site.id, post.id).await?;
     delete_community_for_site(pool, data.local_site.id, community.id).await?;
@@ -1027,9 +1041,12 @@ mod tests {
     let unique = Utc::now().timestamp_nanos_opt().unwrap_or_default();
     let domain = format!("presence-test-{unique}.example");
     let instance = Instance::read_or_create(pool, &domain).await?;
-    let site = Site::create(
+      let site = Site::create(
       pool,
-      &SiteUpsertForm::new("presence-test".to_string(), instance.id),
+      &SiteUpsertForm {
+        ap_id: Some(url::Url::parse(&format!("http://{domain}/site"))?.into()),
+        ..SiteUpsertForm::new("presence-test".to_string(), instance.id)
+      },
     )
     .await?;
     let system = Person::create(

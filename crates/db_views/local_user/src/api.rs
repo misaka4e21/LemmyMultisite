@@ -8,6 +8,7 @@ use serde_with::skip_serializing_none;
 #[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-rs", ts(optional_fields, export))]
 pub struct AdminListUsers {
+  pub search_term: Option<String>,
   pub banned_only: Option<bool>,
   pub page_cursor: Option<PaginationCursor>,
   pub sort: Option<LocalUserSortType>,

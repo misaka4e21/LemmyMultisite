@@ -123,12 +123,12 @@ async fn non_federated_users_and_moderators_can_use_chinese_actor_names() -> Lem
 
     let authenticated = login(
       Json(Login {
-        username_or_email: username.into(),
+        username_or_email: username.to_string().into(),
         password: "valid_password".to_string().into(),
         ..Default::default()
       }),
       TestRequest::default().to_http_request(),
-      context.clone(),
+      actix_web::web::Data::new(context.app_data().clone()),
       tenant.clone(),
     )
     .await?;
@@ -184,7 +184,7 @@ async fn non_federated_users_and_moderators_can_use_chinese_actor_names() -> Lem
   .is_err());
   assert!(save_user_settings(
     Json(SaveUserSettings {
-      username: Some("ひらがな改名".into()),
+      username: Some("ひらがな改名!".into()),
       ..Default::default()
     }),
     context.clone(),
@@ -325,6 +325,23 @@ async fn non_federated_users_and_moderators_can_use_chinese_actor_names() -> Lem
     tenant.clone(),
   )
   .await?;
+  for (old_name, new_name) in [
+    ("ひらがな登録", "hiragana_user"),
+    ("カタカナ登録", "katakana_user"),
+    ("한국어등록", "korean_user"),
+  ] {
+    let person = LocalUserView::read_from_name(pool, old_name).await?.person;
+    admin_change_username(
+      Json(AdminChangeUsername {
+        person_id: person.id,
+        username: new_name.into(),
+      }),
+      context.clone(),
+      admin.clone(),
+      tenant.clone(),
+    )
+    .await?;
+  }
   admin_change_username(
     Json(AdminChangeUsername {
       person_id: user_person.id,
@@ -380,5 +397,6 @@ async fn non_federated_users_and_moderators_can_use_chinese_actor_names() -> Lem
   .await
   .is_err());
 
-  Ok(())
+  Instance::delete(pool, foreign_instance.id).await?;
+  data.delete(pool).await
 }

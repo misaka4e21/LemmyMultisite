@@ -605,6 +605,7 @@ mod tests {
       },
     },
     traits::{Bannable, Reportable},
+    test_data::TestData,
   };
   use lemmy_db_schema_file::schema::report_combined;
   use lemmy_diesel_utils::{
@@ -619,6 +620,7 @@ mod tests {
     instance: Instance,
     timmy: Person,
     sara: Person,
+    sara_local_user: LocalUser,
     jessica: Person,
     timmy_view: LocalUserView,
     admin_view: LocalUserView,
@@ -629,11 +631,18 @@ mod tests {
   }
 
   async fn init_data(pool: &mut DbPool<'_>) -> LemmyResult<Data> {
+    let test_data = TestData::create(pool).await?;
     let inserted_instance = Instance::read_or_create(pool, "my_domain.tld").await?;
 
-    let timmy_form = PersonInsertForm::test_form(inserted_instance.id, "timmy_rcv");
+    let timmy_form = PersonInsertForm {
+      origin_local_site_id: Some(test_data.local_site.id),
+      ..PersonInsertForm::test_form(inserted_instance.id, "timmy_rcv")
+    };
     let inserted_timmy = Person::create(pool, &timmy_form).await?;
-    let timmy_local_user_form = LocalUserInsertForm::test_form(inserted_timmy.id);
+    let timmy_local_user_form = LocalUserInsertForm {
+      local_site_id: test_data.local_site.id,
+      ..LocalUserInsertForm::test_form(inserted_timmy.id)
+    };
     let timmy_local_user = LocalUser::create(pool, &timmy_local_user_form, vec![]).await?;
     let timmy_view = LocalUserView {
       local_user: timmy_local_user,
@@ -643,9 +652,15 @@ mod tests {
     };
 
     // Make an admin, to be able to see private message reports.
-    let admin_form = PersonInsertForm::test_form(inserted_instance.id, "admin_rcv");
+    let admin_form = PersonInsertForm {
+      origin_local_site_id: Some(test_data.local_site.id),
+      ..PersonInsertForm::test_form(inserted_instance.id, "admin_rcv")
+    };
     let inserted_admin = Person::create(pool, &admin_form).await?;
-    let admin_local_user_form = LocalUserInsertForm::test_form_admin(inserted_admin.id);
+    let admin_local_user_form = LocalUserInsertForm {
+      local_site_id: test_data.local_site.id,
+      ..LocalUserInsertForm::test_form_admin(inserted_admin.id)
+    };
     let admin_local_user = LocalUser::create(pool, &admin_local_user_form, vec![]).await?;
     let admin_view = LocalUserView {
       local_user: admin_local_user,
@@ -654,17 +669,44 @@ mod tests {
       ban_expires_at: None,
     };
 
-    let sara_form = PersonInsertForm::test_form(inserted_instance.id, "sara_rcv");
+    let sara_form = PersonInsertForm {
+      origin_local_site_id: Some(test_data.local_site.id),
+      ..PersonInsertForm::test_form(inserted_instance.id, "sara_rcv")
+    };
     let inserted_sara = Person::create(pool, &sara_form).await?;
+    let sara_local_user = LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        local_site_id: test_data.local_site.id,
+        ..LocalUserInsertForm::test_form(inserted_sara.id)
+      },
+      vec![],
+    )
+    .await?;
 
-    let jessica_form = PersonInsertForm::test_form(inserted_instance.id, "jessica_mrv");
+    let jessica_form = PersonInsertForm {
+      origin_local_site_id: Some(test_data.local_site.id),
+      ..PersonInsertForm::test_form(inserted_instance.id, "jessica_mrv")
+    };
     let inserted_jessica = Person::create(pool, &jessica_form).await?;
+    LocalUser::create(
+      pool,
+      &LocalUserInsertForm {
+        local_site_id: test_data.local_site.id,
+        ..LocalUserInsertForm::test_form(inserted_jessica.id)
+      },
+      vec![],
+    )
+    .await?;
 
-    let community_form = CommunityInsertForm::new(
-      inserted_instance.id,
-      "test community crv".to_string(),
-      "pubkey".to_string(),
-    );
+    let community_form = CommunityInsertForm {
+      origin_local_site_id: Some(test_data.local_site.id),
+      ..CommunityInsertForm::new(
+        inserted_instance.id,
+        "test_community_crv".to_string(),
+        "pubkey".to_string(),
+      )
+    };
     let inserted_community = Community::create(pool, &community_form).await?;
 
     // Make timmy a mod
@@ -672,18 +714,24 @@ mod tests {
       CommunityModeratorForm::new(inserted_community.id, inserted_timmy.id);
     CommunityActions::join(pool, &timmy_moderator_form).await?;
 
-    let post_form = PostInsertForm::new(
-      "A test post crv".into(),
-      inserted_timmy.id,
-      inserted_community.id,
-    );
+    let post_form = PostInsertForm {
+      origin_local_site_id: Some(test_data.local_site.id),
+      ..PostInsertForm::new(
+        "A test post crv".into(),
+        inserted_timmy.id,
+        inserted_community.id,
+      )
+    };
     let inserted_post = Post::create(pool, &post_form).await?;
 
-    let new_post_2 = PostInsertForm::new(
-      "A test post crv 2".into(),
-      inserted_timmy.id,
-      inserted_community.id,
-    );
+    let new_post_2 = PostInsertForm {
+      origin_local_site_id: Some(test_data.local_site.id),
+      ..PostInsertForm::new(
+        "A test post crv 2".into(),
+        inserted_timmy.id,
+        inserted_community.id,
+      )
+    };
     let inserted_post_2 = Post::create(pool, &new_post_2).await?;
 
     // Timmy creates a comment
@@ -699,6 +747,7 @@ mod tests {
       instance: inserted_instance,
       timmy: inserted_timmy,
       sara: inserted_sara,
+      sara_local_user,
       jessica: inserted_jessica,
       admin_view,
       timmy_view,
@@ -730,17 +779,8 @@ mod tests {
     let pool = &mut pool.into();
     let _site = lemmy_db_schema::test_data::TestData::create(pool).await?;
     let data = init_data(pool).await?;
-    let sara_user = LocalUser::create(
-      pool,
-      &LocalUserInsertForm {
-        local_site_id: data.admin_view.local_user.local_site_id,
-        ..LocalUserInsertForm::test_form(data.sara.id)
-      },
-      vec![],
-    )
-    .await?;
     let sara_view = LocalUserView {
-      local_user: sara_user,
+      local_user: data.sara_local_user.clone(),
       person: data.sara.clone(),
       banned: false,
       ban_expires_at: None,

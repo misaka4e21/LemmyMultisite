@@ -631,7 +631,7 @@ mod tests {
     )
     .await?;
 
-    let username = format!("same_name_{suffix}");
+    let username = format!("same_{}", suffix % 1_000_000);
     let first_person = Person::create(
       pool,
       &PersonInsertForm {
@@ -701,7 +701,7 @@ mod tests {
         .is_err()
     );
 
-    let community_name = format!("same_community_{suffix}");
+    let community_name = format!("same_{}", suffix % 1_000_000);
     let first_community = Community::create(
       pool,
       &CommunityInsertForm {
@@ -761,6 +761,7 @@ mod tests {
       account_linking_enabled: None,
       use_pkce: None,
       enabled: None,
+      username_claim: None,
     };
     let first_provider = AdminOAuthProvider::create(pool, &oauth_form).await?;
     assert!(AdminOAuthProvider::create(pool, &oauth_form).await.is_err());

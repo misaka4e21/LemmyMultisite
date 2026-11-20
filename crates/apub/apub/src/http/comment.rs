@@ -81,10 +81,14 @@ mod tests {
   async fn test_get_apub_comment_scheduled_then_published() -> LemmyResult<()> {
     let context = LemmyContext::init_test_context().await;
     let data = TestData::create(&mut context.pool()).await?;
+    let context = LemmyContext::with_test_tenant(&context, data.local_site.id).await?;
 
     let community = Community::create(
       &mut context.pool(),
-      &CommunityInsertForm::new(data.instance.id, "acomm_sched".into(), "pubkey".into()),
+      &CommunityInsertForm {
+        origin_local_site_id: Some(data.local_site.id),
+        ..CommunityInsertForm::new(data.instance.id, "acomm_sched".into(), "pubkey".into())
+      },
     )
     .await?;
 
@@ -93,6 +97,7 @@ mod tests {
       &mut context.pool(),
       &PostInsertForm {
         scheduled_publish_time_at: Some(future_time),
+        origin_local_site_id: Some(data.local_site.id),
         ..PostInsertForm::new("scheduled post".into(), data.person.id, community.id)
       },
     )
@@ -100,12 +105,15 @@ mod tests {
 
     let comment = Comment::create(
       &mut context.pool(),
-      &CommentInsertForm::new(
-        data.person.id,
-        post.id,
-        community.id,
-        "comment on post".into(),
-      ),
+      &CommentInsertForm {
+        origin_local_site_id: Some(data.local_site.id),
+        ..CommentInsertForm::new(
+          data.person.id,
+          post.id,
+          community.id,
+          "comment on post".into(),
+        )
+      },
       None,
     )
     .await?;

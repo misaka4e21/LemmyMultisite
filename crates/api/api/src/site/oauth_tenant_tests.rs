@@ -138,6 +138,7 @@ async fn oauth_provider_is_bound_to_request_site() -> LemmyResult<()> {
       account_linking_enabled: None,
       use_pkce: Some(false),
       enabled: Some(true),
+      username_claim: None,
     },
   )
   .await?;

@@ -19,6 +19,9 @@ pub struct Claims {
   pub iat: i64,
   /// Expiration timestamp
   pub exp: i64,
+  /// Unique token identifier so logins within the same second do not collide.
+  #[serde(default)]
+  pub jti: String,
   /// The site that issued this token.
   pub local_site_id: LocalSiteId,
 }
@@ -56,6 +59,7 @@ impl Claims {
       iss: context.hostname().to_string(),
       iat: Utc::now().timestamp(),
       exp: exp.timestamp(),
+      jti: uuid::Uuid::new_v4().to_string(),
       local_site_id,
     };
     let secret = &context.secret().jwt_secret;

@@ -174,14 +174,20 @@ mod tests {
   ) -> LemmyResult<(TestData, Person, Community)> {
     let data = TestData::create(pool).await?;
 
-    let new_person = PersonInsertForm::test_form(data.instance.id, "thommy_site_agg");
+    let new_person = PersonInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..PersonInsertForm::test_form(data.instance.id, "thommy_site_agg")
+    };
     let inserted_person = Person::create(pool, &new_person).await?;
 
-    let new_community = CommunityInsertForm::new(
-      data.instance.id,
-      "TIL_site_agg".into(),
-      "pubkey".to_string(),
-    );
+    let new_community = CommunityInsertForm {
+      origin_local_site_id: Some(data.local_site.id),
+      ..CommunityInsertForm::new(
+        data.instance.id,
+        "TIL_site_agg".into(),
+        "pubkey".to_string(),
+      )
+    };
 
     let inserted_community = Community::create(pool, &new_community).await?;
 
@@ -267,6 +273,7 @@ mod tests {
     .await?;
     assert!(read_local_site(pool).await?.federation_enabled);
 
+    data.delete(pool).await?;
     Ok(())
   }
 

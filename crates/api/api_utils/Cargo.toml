@@ -88,6 +88,7 @@ lemmy_diesel_utils = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
 rustls = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 serial_test = { workspace = true }

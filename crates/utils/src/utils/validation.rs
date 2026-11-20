@@ -57,7 +57,7 @@ pub fn is_valid_local_actor_name(name: &str, federation_enabled: bool) -> LemmyR
 
   #[expect(clippy::expect_used)]
   static VALID_NON_FEDERATED_ACTOR_NAME_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}a-zA-Z0-9_]+$").expect("compile regex"));
+    LazyLock::new(|| Regex::new(r"^[\p{Han}\p{Hiragana}\p{Katakana}ー・\p{Hangul}a-zA-Z0-9_]+$").expect("compile regex"));
 
   min_length_check(name, 2, LemmyErrorType::InvalidName)?;
   max_length_check(name, ACTOR_NAME_MAX_LENGTH, LemmyErrorType::InvalidName)?;

@@ -60,7 +60,7 @@ RUN if [ "${RUST_RELEASE_MODE}" = "release" ]; \
 FROM ${RUNNER_IMAGE} AS runner
 
 # Add system packages that are needed: federation needs CA certificates, curl can be used for healthchecks
-RUN apt update && apt install -y libssl-dev libpq-dev ca-certificates curl git
+RUN apt update && apt install -y libssl-dev libpq-dev postgresql-client pigz ca-certificates curl git
 
 COPY --from=builder --chmod=0755 /lemmy/lemmy_server /usr/local/bin
 COPY --from=builder --chmod=0755 /lemmy/lemmy-discourse-import /usr/local/bin

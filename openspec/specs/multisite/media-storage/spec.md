@@ -96,9 +96,25 @@ Remote images SHALL be tracked by source URL at installation level. Image detail
 ### Requirement: Media access control
 The image endpoint SHALL apply the current site's private instance policy. A site MUST NOT enumerate another site's media references.
 
+Protected media references SHALL be authorized against each associated private message or post on every original or processed image request. An unbound reference marked protected MUST be denied. Existing unprotected references SHALL retain the current site-level policy. The image proxy MUST perform authorization before contacting pict-rs and MUST NOT cache a successful authorization across requests.
+
 #### Scenario: Private site
 - **WHEN** an anonymous client requests an image from a private site
 - **THEN** the system returns 401
+
+#### Scenario: Private-message image request
+- **WHEN** a current participant requests an image attached to a private message they can still read
+- **THEN** the image endpoint serves it
+- **AND** nonparticipants and unauthenticated requesters receive no image bytes
+
+#### Scenario: Post visibility changes
+- **WHEN** a user's ability to view a post changes after an image was attached
+- **AND** that user requests any image variant
+- **THEN** the endpoint evaluates current post visibility and allows or denies the request
+
+#### Scenario: Protected image without binding
+- **WHEN** a protected image reference has no valid resource association
+- **THEN** the image endpoint denies the request without contacting pict-rs
 
 ### Requirement: S3-compatible blob storage
 pict-rs SHALL store media blobs in an S3-compatible bucket. The installation MUST configure the endpoint, bucket name, region, access key, secret key, and path-style addressing through environment variables or secret files. The backend MUST work with any S3-compatible service and MUST NOT depend on RustFS-specific APIs.

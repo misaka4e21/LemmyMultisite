@@ -1,9 +1,7 @@
 use super::utils::{adapt_request, convert_header};
+use crate::protected_media::{has_unprotected_media_reference, media_reference_has_access};
 use actix_web::{
-  HttpRequest,
-  HttpResponse,
-  HttpResponseBuilder,
-  Responder,
+  HttpRequest, HttpResponse, HttpResponseBuilder, Responder,
   body::{BodyStream, BoxBody},
   http::{StatusCode, header::CONTENT_DISPOSITION},
   web::{Data, *},
@@ -38,8 +36,27 @@ pub async fn get_image(
   let name = filename.into_inner();
 
   if let Some(media) = MediaObject::read_by_alias(&mut context.pool(), &name).await? {
-    if !MediaReference::exists_for_site(&mut context.pool(), local_site.id, media.id).await? {
+    let mut pool = context.pool();
+    let references =
+      MediaReference::list_for_site_and_media(&mut pool, local_site.id, media.id).await?;
+    if references.is_empty() {
       return Err(LemmyErrorType::NotFound.into());
+    }
+    let has_unprotected_reference =
+      has_unprotected_media_reference(&mut pool, local_site.id, media.id).await?;
+    if !has_unprotected_reference {
+      let mut authorized = false;
+      for reference in references {
+        if media_reference_has_access(&context, &tenant, local_user_view.as_ref(), reference.id)
+          .await?
+        {
+          authorized = true;
+          break;
+        }
+      }
+      if !authorized {
+        return Err(LemmyErrorType::NotFound.into());
+      }
     }
   }
 

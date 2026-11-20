@@ -32,6 +32,7 @@ use lemmy_db_schema::{
     person::{Person, PersonInsertForm},
     post::{Post, PostInsertForm},
     private_message::PrivateMessageInsertForm,
+    protected_media_reference::{ProtectedMediaReference, ProtectedMediaReferenceInsertForm},
   },
   traits::ApubActor,
 };
@@ -231,6 +232,7 @@ pub struct MediaImportReport {
   pub invalid_upload_ids: Vec<i32>,
   pub unresolved_content_source_post_ids: Vec<i32>,
   pub unresolved_private_message_source_post_ids: Vec<i32>,
+  pub unresolved_protected_upload_ids: Vec<i32>,
   pub rewritten_avatar_count: usize,
   pub unresolved_avatar_source_user_ids: Vec<i32>,
   pub rewritten_category_icon_count: usize,
@@ -1871,7 +1873,7 @@ pub async fn import_private_messages(
   }
   if report.source_chat_messages_with_attachments > 0 {
     report.warnings.push(format!(
-      "{} source direct-message Chat messages contain upload references that were not rewritten",
+      "{} source direct-message Chat messages contain attachments; media URLs are rewritten in the media phase",
       report.source_chat_messages_with_attachments
     ));
   }
@@ -2184,7 +2186,9 @@ pub async fn import_interactions(
         .await
         .map_err(convert_lemmy_error)?;
       let Some(target_person) = target_person else {
-        report.unresolved_interaction_ids.push(i64::from(bookmark.id));
+        report
+          .unresolved_interaction_ids
+          .push(i64::from(bookmark.id));
         continue;
       };
       let (target_object, is_post) = match (
@@ -2246,7 +2250,9 @@ pub async fn import_interactions(
         }
       };
       let Some(target_object) = target_object else {
-        report.unresolved_interaction_ids.push(i64::from(bookmark.id));
+        report
+          .unresolved_interaction_ids
+          .push(i64::from(bookmark.id));
         continue;
       };
       let inserted = create_imported_bookmark(
@@ -2513,11 +2519,11 @@ pub async fn import_media(
   )
   .await
   .map_err(convert_lemmy_error)?;
-  if !phase_completed(pool, run.id, "discussions")
-    .await
-    .map_err(convert_lemmy_error)?
-  {
+  if !phase_completed(pool, run.id, "discussions").await.map_err(convert_lemmy_error)? {
     bail!("import public discussions before importing media");
+  }
+  if !phase_completed(pool, run.id, "private_messages").await.map_err(convert_lemmy_error)? {
+    bail!("import private messages before importing media");
   }
   set_run_status(pool, run.id, "running")
     .await
@@ -2541,6 +2547,19 @@ pub async fn import_media(
   .load::<SourceUpload>(&mut source)
   .await
   .context("failed to read Discourse upload rows")?;
+  let private_message_upload_ids = load_private_message_upload_ids(&mut source).await?;
+  let public_post_upload_ids = load_public_post_upload_ids(&mut source).await?;
+  let chat_upload_ids = load_chat_upload_ids(&mut source).await?;
+  let avatar_upload_ids = diesel::sql_query(
+    "SELECT DISTINCT uploaded_avatar_id AS upload_id FROM users WHERE uploaded_avatar_id IS NOT NULL",
+  )
+  .load::<SourceUploadId>(&mut source)
+  .await
+  .context("failed to read Discourse avatar upload references")?
+  .into_iter()
+  .map(|upload| upload.upload_id)
+  .collect::<HashSet<_>>();
+  let protected_targets = load_protected_upload_targets(&mut source).await?;
   let pictrs = SETTINGS.pictrs().map_err(convert_lemmy_error)?;
   let image_endpoint = format!("{}/image", pictrs.url.as_str().trim_end_matches('/'));
   let client = reqwest::Client::builder()
@@ -2565,6 +2584,7 @@ pub async fn import_media(
     invalid_upload_ids: Vec::new(),
     unresolved_content_source_post_ids: Vec::new(),
     unresolved_private_message_source_post_ids: Vec::new(),
+    unresolved_protected_upload_ids: Vec::new(),
     rewritten_avatar_count: 0,
     unresolved_avatar_source_user_ids: Vec::new(),
     rewritten_category_icon_count: 0,
@@ -2577,6 +2597,43 @@ pub async fn import_media(
   let mut media_items = Vec::new();
   let mut all_source_tokens = Vec::new();
   for upload in &uploads {
+    let target_scopes = protected_targets
+      .get(&upload.id)
+      .cloned()
+      .unwrap_or_default();
+    let has_private_reference = target_scopes.iter().any(|scope| {
+      matches!(
+        scope,
+        SourceProtectedTarget::PrivatePost(_) | SourceProtectedTarget::ChatMessage(_, _)
+      )
+    });
+    let has_post_reference = target_scopes
+      .iter()
+      .any(|scope| matches!(scope, SourceProtectedTarget::Post(_)));
+    let access_control_is_mapped = upload.access_control_post_id.is_some_and(|source_post_id| {
+      target_scopes.iter().any(|scope| matches!(scope, SourceProtectedTarget::Post(post_id) if i64::from(*post_id) == source_post_id))
+    });
+    let has_unmappable_secure_rule =
+      upload.secure && target_scopes.is_empty() && upload.access_control_post_id.is_none();
+    if has_unmappable_secure_rule {
+      report.unresolved_protected_upload_ids.push(upload.id);
+    }
+    let is_public = !upload.secure
+      && upload.access_control_post_id.is_none()
+      && !has_private_reference
+      && !chat_upload_ids.contains(&upload.id)
+      && (!private_message_upload_ids.contains(&upload.id)
+        || public_post_upload_ids.contains(&upload.id)
+        || avatar_upload_ids.contains(&upload.id));
+    let is_protected = !is_public || has_private_reference || has_post_reference;
+    if (upload.access_control_post_id.is_some() && !access_control_is_mapped)
+      || (upload.secure && !has_private_reference && !has_post_reference)
+    {
+      report.unresolved_protected_upload_ids.push(upload.id);
+    }
+    if is_protected && target_scopes.is_empty() {
+      report.unresolved_protected_upload_ids.push(upload.id);
+    }
     let source_sha1 = upload_source_sha1(upload);
     let mut source_tokens = upload_source_reference_tokens(upload);
     let optimized_images =
@@ -2602,18 +2659,6 @@ pub async fn import_media(
       &upload.original_filename,
       &members,
     );
-    if upload.secure || upload.access_control_post_id.is_some() {
-      report.retained_secure_upload_ids.push(upload.id);
-      report.retained_upload_manifest.push(RetainedUpload {
-        source_upload_id: upload.id,
-        original_filename: upload.original_filename.clone(),
-        source_url: upload.url.clone(),
-        archive_member,
-        filesize_bytes: upload.filesize,
-        reason: "source access control cannot be represented safely",
-      });
-      continue;
-    }
     let extension = upload
       .extension
       .as_deref()
@@ -2693,8 +2738,24 @@ pub async fn import_media(
               reference.public_id,
               urlencoding::encode(&filename)
             );
+            diesel::sql_query("UPDATE file_reference SET is_public = $1 WHERE id = $2")
+              .bind::<Bool, _>(is_public)
+              .bind::<Integer, _>(reference.id)
+              .execute(&mut get_conn(pool).await?)
+              .await
+              .context("failed to apply imported file visibility")?;
+            if is_protected {
+              let scopes = load_source_protected_scopes(&mut source, upload.id).await?;
+              for scope in scopes {
+                bind_imported_media_scope(pool, site_id, run.id, scope, Some(reference.id), None).await?;
+              }
+            }
             media_items.push(ImportedMediaItem {
+              source_upload_id: upload.id,
               media_id: None,
+              file_reference_id: Some(reference.id),
+              media_reference_id: None,
+              is_protected,
               target_url,
               replacements: source_tokens,
             });
@@ -2707,12 +2768,13 @@ pub async fn import_media(
             "SELECT fr.id, fr.public_id::text, fo.content_hash FROM file_reference fr \
              JOIN file_object fo ON fo.id = fr.file_id WHERE fr.local_site_id = $1 \
              AND fr.file_id = $2 AND fr.owner_person_id = $3 \
-             AND fr.original_filename = $4 LIMIT 1",
+             AND fr.original_filename = $4 AND fr.is_public = $5 LIMIT 1",
           )
           .bind::<Integer, _>(site_id.0)
           .bind::<Integer, _>(object.id.0)
           .bind::<Integer, _>(target_owner_id.0)
           .bind::<Text, _>(&filename)
+          .bind::<Bool, _>(is_public)
           .get_result::<TargetFileReference>(&mut get_conn(pool).await?)
           .await
           .optional()
@@ -2728,6 +2790,7 @@ pub async fn import_media(
                 file_id: object.id,
                 owner_person_id: target_owner_id,
                 original_filename: filename.clone(),
+                is_public,
               },
             )
             .await
@@ -2747,6 +2810,12 @@ pub async fn import_media(
           )
           .await
           .map_err(convert_lemmy_error)?;
+          if is_protected {
+            let scopes = load_source_protected_scopes(&mut source, upload.id).await?;
+            for scope in scopes {
+              bind_imported_media_scope(pool, site_id, run.id, scope, Some(reference.id), None).await?;
+            }
+          }
           let target_url = format!(
             "{}://{}/api/v4/file/{}/{}",
             SETTINGS.get_protocol_string(),
@@ -2755,7 +2824,11 @@ pub async fn import_media(
             urlencoding::encode(&filename)
           );
           media_items.push(ImportedMediaItem {
+            source_upload_id: upload.id,
             media_id: None,
+            file_reference_id: Some(reference.id),
+            media_reference_id: None,
+            is_protected,
             target_url,
             replacements: source_tokens,
           });
@@ -2765,6 +2838,9 @@ pub async fn import_media(
       }
       if !imported {
         report.retained_non_image_upload_ids.push(upload.id);
+        if is_protected {
+          report.unresolved_protected_upload_ids.push(upload.id);
+        }
         report.retained_upload_manifest.push(RetainedUpload {
           source_upload_id: upload.id,
           original_filename: upload.original_filename.clone(),
@@ -2782,16 +2858,25 @@ pub async fn import_media(
     }
     let Some(member) = archive_member else {
       report.missing_archive_upload_ids.push(upload.id);
+      if is_protected {
+        report.unresolved_protected_upload_ids.push(upload.id);
+      }
       continue;
     };
     if upload.filesize < 0 || upload.filesize as u64 > MAX_IMAGE_BYTES {
       report.invalid_upload_ids.push(upload.id);
+      if is_protected {
+        report.unresolved_protected_upload_ids.push(upload.id);
+      }
       continue;
     }
     let bytes = match super::read_archive_member(archive, &member, MAX_IMAGE_BYTES) {
       Ok(bytes) if bytes.len() as i64 == upload.filesize => bytes,
       _ => {
         report.invalid_upload_ids.push(upload.id);
+        if is_protected {
+          report.unresolved_protected_upload_ids.push(upload.id);
+        }
         continue;
       }
     };
@@ -2802,6 +2887,9 @@ pub async fn import_media(
       .is_some_and(|expected| !expected.eq_ignore_ascii_case(&source_sha1_hex))
     {
       report.invalid_upload_ids.push(upload.id);
+      if is_protected {
+        report.unresolved_protected_upload_ids.push(upload.id);
+      }
       continue;
     }
     let content_hash = hex::encode(<Sha256 as Sha2Digest>::digest(&bytes));
@@ -2815,6 +2903,21 @@ pub async fn import_media(
           .get_result::<TargetMediaObject>(&mut get_conn(pool).await?)
           .await
           .context("mapped target media object no longer exists")?;
+      if is_protected {
+        let reference_id = ensure_protected_media_reference(pool, site_id, media.id).await?;
+        for scope in &target_scopes {
+          bind_imported_media_scope(pool, site_id, run.id, scope.clone(), None, Some(media.id)).await?;
+        }
+        media_items.push(ImportedMediaItem {
+          source_upload_id: upload.id,
+          media_id: Some(media.id),
+          file_reference_id: None,
+          media_reference_id: Some(reference_id),
+          is_protected: true,
+          target_url: format!("{}://{}/api/v4/image/{}", SETTINGS.get_protocol_string(), target_site.hostname, media.canonical_pictrs_alias),
+          replacements: source_tokens.clone(),
+        });
+      }
       (media, true)
     } else {
       let file_name = Path::new(&upload.original_filename)
@@ -2885,18 +2988,30 @@ pub async fn import_media(
       .await
       .map_err(convert_lemmy_error)?
       .map(|id| lemmy_db_schema_file::PersonId(id as i32));
-    MediaReference::ensure(
-      pool,
-      &MediaReferenceInsertForm {
-        local_site_id: site_id,
-        media_id: media.id,
-        owner_person_id,
-        post_id: None,
-        purpose: "other".to_string(),
-      },
-    )
-    .await
-    .map_err(convert_lemmy_error)?;
+    if is_public {
+      MediaReference::ensure(
+        pool,
+        &MediaReferenceInsertForm {
+          local_site_id: site_id,
+          media_id: media.id,
+          owner_person_id,
+          post_id: None,
+          purpose: "other".to_string(),
+        },
+      )
+      .await
+      .map_err(convert_lemmy_error)?;
+    }
+    let media_reference_id = if is_protected {
+      Some(ensure_protected_media_reference(pool, site_id, media.id).await?)
+    } else {
+      None
+    };
+    if is_protected {
+      for scope in &target_scopes {
+        bind_imported_media_scope(pool, site_id, run.id, scope.clone(), None, Some(media.id)).await?;
+      }
+    }
     if resumed {
       report.resumed_image_count += 1;
     } else {
@@ -2909,7 +3024,11 @@ pub async fn import_media(
       media.canonical_pictrs_alias
     );
     media_items.push(ImportedMediaItem {
+      source_upload_id: upload.id,
       media_id: Some(media.id),
+      file_reference_id: None,
+      media_reference_id,
+      is_protected,
       target_url,
       replacements: source_tokens,
     });
@@ -3091,11 +3210,14 @@ pub async fn import_media(
     .unresolved_private_message_source_post_ids
     .sort_unstable();
   report.unresolved_private_message_source_post_ids.dedup();
+  report.unresolved_protected_upload_ids.sort_unstable();
+  report.unresolved_protected_upload_ids.dedup();
   report.unresolved_avatar_source_user_ids.sort_unstable();
   report.unresolved_avatar_source_user_ids.dedup();
   report.unresolved_category_image_ids.sort_unstable();
   report.unresolved_category_image_ids.dedup();
-  let unresolved = !report.missing_archive_upload_ids.is_empty()
+  let unresolved = !report.unresolved_protected_upload_ids.is_empty()
+    || !report.missing_archive_upload_ids.is_empty()
     || !report.invalid_upload_ids.is_empty()
     || !report.unresolved_content_source_post_ids.is_empty()
     || !report.unresolved_private_message_source_post_ids.is_empty();
@@ -3805,6 +3927,37 @@ pub async fn validate_import(
       source_counts["upload_records"]
     ));
   }
+  let unresolved_protected_binding_count = diesel::sql_query(
+    "SELECT COUNT(DISTINCT pmr.id) AS count FROM protected_media_reference pmr \
+     LEFT JOIN file_reference fr ON fr.id = pmr.file_reference_id \
+     LEFT JOIN media_reference mr ON mr.id = pmr.media_reference_id \
+     WHERE pmr.local_site_id = $1 AND ((pmr.file_reference_id IS NOT NULL AND fr.id IS NULL) \
+       OR (pmr.media_reference_id IS NOT NULL AND mr.id IS NULL) \
+       OR (pmr.post_id IS NULL AND pmr.private_message_id IS NULL))",
+  )
+  .bind::<Integer, _>(site_id.0)
+  .get_result::<CountResult>(&mut get_conn(pool).await?)
+  .await
+  .context("failed to validate protected media bindings")?.count;
+  if unresolved_protected_binding_count > 0 {
+    blocking_reasons.push(format!("{unresolved_protected_binding_count} protected media bindings are invalid"));
+  }
+  let unbound_protected_upload_count = diesel::sql_query(
+    "SELECT COUNT(*) AS count FROM (SELECT DISTINCT ON (fr.id) fr.id, map.source_id::integer AS source_upload_id \
+     FROM file_reference fr JOIN discourse_import_mapping map ON map.run_id = $1 \
+       AND map.entity_type = 'file_upload' AND map.target_id = fr.id \
+     WHERE fr.local_site_id = $2 AND NOT fr.is_public) candidates \
+     WHERE NOT EXISTS (SELECT 1 FROM protected_media_reference pmr \
+       WHERE pmr.file_reference_id = candidates.id)",
+  )
+  .bind::<BigInt, _>(run.id)
+  .bind::<Integer, _>(site_id.0)
+  .get_result::<CountResult>(&mut get_conn(pool).await?)
+  .await
+  .context("failed to validate protected file reference bindings")?.count;
+  if unbound_protected_upload_count > 0 {
+    blocking_reasons.push(format!("{unbound_protected_upload_count} protected file references have no resource binding"));
+  }
   blocking_reasons.sort();
   blocking_reasons.dedup();
   let is_valid = blocking_reasons.is_empty();
@@ -3866,6 +4019,51 @@ struct SourceUploadVariant {
 }
 
 #[derive(QueryableByName)]
+struct SourceUploadId {
+  #[diesel(sql_type = Integer)]
+  upload_id: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceProtectedTarget {
+  Post(i32),
+  PrivatePost(i32),
+  ChatMessage(i64, i64),
+}
+
+#[derive(QueryableByName)]
+struct SourceUploadTarget {
+  #[diesel(sql_type = Integer)]
+  upload_id: i32,
+  #[diesel(sql_type = Text)]
+  target_type: String,
+  #[diesel(sql_type = BigInt)]
+  target_id: i64,
+  #[diesel(sql_type = Nullable<BigInt>)]
+  channel_id: Option<i64>,
+}
+
+#[derive(QueryableByName)]
+struct TargetMessageMapping {
+  #[diesel(sql_type = BigInt)]
+  target_id: i64,
+}
+
+#[derive(QueryableByName)]
+struct SourcePostTopic {
+  #[diesel(sql_type = Integer)]
+  topic_id: i32,
+}
+
+#[derive(QueryableByName)]
+struct SourcePostTarget {
+  #[diesel(sql_type = Text)]
+  archetype: String,
+  #[diesel(sql_type = Integer)]
+  id: i32,
+}
+
+#[derive(QueryableByName)]
 struct SourceAvatar {
   #[diesel(sql_type = Integer)]
   user_id: i32,
@@ -3905,7 +4103,11 @@ struct PictrsUploadDetails {
 }
 
 struct ImportedMediaItem {
+  source_upload_id: i32,
   media_id: Option<i64>,
+  file_reference_id: Option<i32>,
+  media_reference_id: Option<i64>,
+  is_protected: bool,
   target_url: String,
   replacements: Vec<String>,
 }
@@ -3947,9 +4149,304 @@ struct SourcePrivatePostRaw {
 }
 
 #[derive(QueryableByName)]
+struct SourceChatRaw {
+  #[diesel(sql_type = BigInt)]
+  id: i64,
+  #[diesel(sql_type = BigInt)]
+  channel_id: i64,
+  #[diesel(sql_type = Text)]
+  raw: String,
+}
+
+#[derive(QueryableByName)]
 struct TargetMediaContent {
   #[diesel(sql_type = Nullable<Text>)]
   content: Option<String>,
+}
+
+async fn ensure_protected_media_reference(
+  pool: &mut DbPool<'_>,
+  site_id: LocalSiteId,
+  media_id: i64,
+) -> Result<i64> {
+  MediaReference::ensure(
+    pool,
+    &MediaReferenceInsertForm {
+      local_site_id: site_id,
+      media_id,
+      owner_person_id: None,
+      post_id: None,
+      purpose: "protected".to_string(),
+    },
+  )
+  .await
+  .map_err(convert_lemmy_error)?;
+  let references = MediaReference::list_for_site_and_media(pool, site_id, media_id)
+    .await
+    .map_err(convert_lemmy_error)?;
+  references
+    .into_iter()
+    .find(|reference| {
+      reference.owner_person_id.is_none()
+        && reference.post_id.is_none()
+        && reference.purpose == "protected"
+    })
+    .map(|reference| reference.id)
+    .ok_or_else(|| anyhow!("protected media reference was not created"))
+}
+
+async fn load_protected_upload_targets(
+  source: &mut AsyncPgConnection,
+) -> Result<HashMap<i32, Vec<SourceProtectedTarget>>> {
+  let targets = diesel::sql_query(
+    "SELECT ur.upload_id, ur.target_type, ur.target_id, \
+       CASE WHEN ur.target_type = 'ChatMessage' THEN m.chat_channel_id::bigint ELSE NULL END AS channel_id \
+     FROM upload_references ur LEFT JOIN chat_messages m \
+       ON ur.target_type = 'ChatMessage' AND m.id = ur.target_id \
+     WHERE ur.target_type IN ('Post', 'ChatMessage') ORDER BY ur.upload_id, ur.target_id",
+  )
+  .load::<SourceUploadTarget>(source)
+  .await
+  .context("failed to read source upload-to-message references")?;
+  let mut result = HashMap::<i32, Vec<SourceProtectedTarget>>::new();
+  for target in targets {
+    let upload_id = target.upload_id;
+    let target = match target.target_type.as_str() {
+      "Post" => {
+        let post = diesel::sql_query(
+          "SELECT t.archetype, p.id FROM posts p JOIN topics t ON t.id = p.topic_id WHERE p.id = $1",
+        )
+        .bind::<BigInt, _>(target.target_id)
+        .get_result::<SourcePostTarget>(source)
+        .await
+        .optional()
+        .context("failed to resolve uploaded post reference")?;
+        if let Some(post) = post {
+          if post.archetype == "private_message" {
+            Some(SourceProtectedTarget::PrivatePost(post.id))
+          } else {
+            Some(SourceProtectedTarget::Post(post.id))
+          }
+        } else {
+          None
+        }
+      }
+      "ChatMessage" => target
+        .channel_id
+        .map(|channel_id| SourceProtectedTarget::ChatMessage(target.target_id, channel_id)),
+      _ => None,
+    };
+    if let Some(target) = target {
+      result.entry(upload_id).or_default().push(target);
+    }
+  }
+  Ok(result)
+}
+
+async fn load_private_message_upload_ids(source: &mut AsyncPgConnection) -> Result<HashSet<i32>> {
+  let ids = diesel::sql_query(
+    "SELECT DISTINCT ur.upload_id FROM upload_references ur \
+     JOIN posts p ON ur.target_type = 'Post' AND p.id = ur.target_id \
+     JOIN topics t ON t.id = p.topic_id WHERE t.archetype = 'private_message'",
+  )
+  .load::<SourceUploadId>(source)
+  .await
+  .context("failed to read private-message upload references")?;
+  Ok(ids.into_iter().map(|row| row.upload_id).collect())
+}
+
+async fn load_public_post_upload_ids(source: &mut AsyncPgConnection) -> Result<HashSet<i32>> {
+  let ids = diesel::sql_query(
+    "SELECT DISTINCT ur.upload_id FROM upload_references ur \
+     JOIN posts p ON ur.target_type = 'Post' AND p.id = ur.target_id \
+     JOIN topics t ON t.id = p.topic_id WHERE t.archetype <> 'private_message'",
+  )
+  .load::<SourceUploadId>(source)
+  .await
+  .context("failed to read public-post upload references")?;
+  Ok(ids.into_iter().map(|row| row.upload_id).collect())
+}
+
+async fn load_chat_upload_ids(source: &mut AsyncPgConnection) -> Result<HashSet<i32>> {
+  let chat_tables = diesel::sql_query(
+    "SELECT to_regclass('public.chat_messages') IS NOT NULL AS has_messages, \
+     to_regclass('public.chat_channels') IS NOT NULL AS has_channels, \
+     to_regclass('public.direct_message_channels') IS NOT NULL AS has_dm_channels, \
+     to_regclass('public.direct_message_users') IS NOT NULL AS has_dm_users",
+  ).get_result::<SourceChatTables>(source).await?;
+  if !(chat_tables.has_messages && chat_tables.has_channels && chat_tables.has_dm_channels && chat_tables.has_dm_users) {
+    return Ok(HashSet::new());
+  }
+  let ids = diesel::sql_query(
+    "SELECT DISTINCT ur.upload_id FROM upload_references ur WHERE ur.target_type = 'ChatMessage'",
+  )
+  .load::<SourceUploadId>(source).await
+  .context("failed to read Chat upload references")?;
+  Ok(ids.into_iter().map(|row| row.upload_id).collect())
+}
+
+async fn load_private_message_copies(
+  pool: &mut DbPool<'_>,
+  run_id: i64,
+  source_post_id: i32,
+) -> Result<Vec<TargetMessageMapping>> {
+  diesel::sql_query(
+    "SELECT target_id FROM discourse_import_mapping WHERE run_id = $1 \
+     AND entity_type = 'private_message' AND source_id ~ $2 ORDER BY target_id",
+  )
+  .bind::<BigInt, _>(run_id)
+  .bind::<Text, _>(format!("^[0-9]+:{source_post_id}:[0-9]+$"))
+  .load::<TargetMessageMapping>(&mut get_conn(pool).await?)
+  .await
+  .context("failed to resolve imported private-message copies")
+}
+
+async fn load_chat_message_copies(
+  pool: &mut DbPool<'_>,
+  run_id: i64,
+  source_message_id: i64,
+  channel_id: i64,
+) -> Result<Vec<TargetMessageMapping>> {
+  diesel::sql_query(
+    "SELECT target_id FROM discourse_import_mapping WHERE run_id = $1 \
+     AND entity_type = 'private_message' AND source_id ~ $2 ORDER BY target_id",
+  )
+  .bind::<BigInt, _>(run_id)
+  .bind::<Text, _>(format!("^0:{source_message_id}:{channel_id}:[0-9]+$"))
+  .load::<TargetMessageMapping>(&mut get_conn(pool).await?)
+  .await
+  .context("failed to resolve imported Chat message copies")
+}
+
+async fn load_source_protected_scopes(
+  source: &mut AsyncPgConnection,
+  upload_id: i32,
+) -> Result<Vec<SourceProtectedTarget>> {
+  let scopes = diesel::sql_query(
+    "SELECT ur.upload_id, ur.target_type, ur.target_id, \
+       CASE WHEN ur.target_type = 'ChatMessage' THEN m.chat_channel_id::bigint ELSE NULL END AS channel_id \
+     FROM upload_references ur LEFT JOIN chat_messages m \
+       ON ur.target_type = 'ChatMessage' AND m.id = ur.target_id \
+     WHERE ur.upload_id = $1 AND ur.target_type IN ('Post', 'ChatMessage') ORDER BY ur.target_id",
+  )
+  .bind::<Integer, _>(upload_id)
+  .load::<SourceUploadTarget>(source)
+  .await
+  .context("failed to resolve protected source upload targets")?;
+  let mut result = Vec::new();
+  for scope in scopes {
+    let resolved = match scope.target_type.as_str() {
+      "Post" => {
+        let post = diesel::sql_query(
+          "SELECT t.archetype, p.id FROM posts p JOIN topics t ON t.id = p.topic_id WHERE p.id = $1",
+        )
+        .bind::<BigInt, _>(scope.target_id)
+        .get_result::<SourcePostTarget>(source)
+        .await
+        .optional()?;
+        post.map(|post| {
+          if post.archetype == "private_message" {
+            SourceProtectedTarget::PrivatePost(post.id)
+          } else {
+            SourceProtectedTarget::Post(post.id)
+          }
+        })
+      }
+      "ChatMessage" => scope
+        .channel_id
+        .map(|channel_id| SourceProtectedTarget::ChatMessage(scope.target_id, channel_id)),
+      _ => None,
+    };
+    if let Some(resolved) = resolved {
+      result.push(resolved);
+    }
+  }
+  Ok(result)
+}
+
+async fn bind_imported_media_scope(
+  pool: &mut DbPool<'_>, site_id: LocalSiteId, run_id: i64,
+  scope: SourceProtectedTarget, file_reference_id: Option<i32>, media_id: Option<i64>,
+) -> Result<()> {
+  let media_reference_id = match media_id {
+    Some(media_id) => Some(ensure_protected_media_reference(pool, site_id, media_id).await?),
+    None => None,
+  };
+  match scope {
+    SourceProtectedTarget::Post(source_post_id) => {
+      let Some(_) = read_mapping(pool, run_id, "source_discussion_post", &source_post_id.to_string()).await.map_err(convert_lemmy_error)? else { return Ok(()) };
+      let source_post = diesel::sql_query("SELECT topic_id FROM posts WHERE id = $1")
+        .bind::<Integer, _>(source_post_id).get_result::<SourcePostTopic>(&mut get_conn(pool).await?).await?;
+      let Some(root_id) = read_mapping(pool, run_id, "topic", &source_post.topic_id.to_string()).await.map_err(convert_lemmy_error)? else { return Ok(()) };
+      ensure_protected_media_binding(pool, site_id, file_reference_id, media_reference_id, Some(PostId(root_id as i32)), None).await?;
+    }
+    SourceProtectedTarget::PrivatePost(source_post_id) => {
+      for copy in load_private_message_copies(pool, run_id, source_post_id).await? {
+        ensure_protected_media_binding(pool, site_id, file_reference_id, media_reference_id, None, Some(PrivateMessageId(copy.target_id as i32))).await?;
+      }
+    }
+    SourceProtectedTarget::ChatMessage(source_message_id, channel_id) => {
+      for copy in load_chat_message_copies(pool, run_id, source_message_id, channel_id).await? {
+        ensure_protected_media_binding(pool, site_id, file_reference_id, media_reference_id, None, Some(PrivateMessageId(copy.target_id as i32))).await?;
+      }
+    }
+  }
+  Ok(())
+}
+
+async fn ensure_protected_media_binding(
+  pool: &mut DbPool<'_>,
+  site_id: LocalSiteId,
+  file_reference_id: Option<i32>,
+  media_reference_id: Option<i64>,
+  post_id: Option<PostId>,
+  private_message_id: Option<PrivateMessageId>,
+) -> Result<()> {
+  if file_reference_id.is_none() && media_reference_id.is_none() {
+    return Ok(());
+  }
+  ProtectedMediaReference::ensure(
+    pool,
+    &ProtectedMediaReferenceInsertForm {
+      local_site_id: site_id,
+      file_reference_id,
+      media_reference_id,
+      post_id,
+      private_message_id,
+    },
+  )
+  .await
+  .map_err(convert_lemmy_error)?;
+  Ok(())
+}
+
+async fn read_imported_private_message_content(pool: &mut DbPool<'_>, message_id: i32) -> Result<String> {
+  diesel::sql_query("SELECT content FROM private_message WHERE id = $1")
+    .bind::<Integer, _>(message_id)
+    .get_result::<TargetMediaContent>(&mut get_conn(pool).await?)
+    .await
+    .context("failed to read imported private message for media rewrite")
+    .map(|row| row.content.unwrap_or_default())
+}
+
+async fn update_imported_private_message_content(
+  pool: &mut DbPool<'_>, message_id: i32, content: &str,
+) -> Result<()> {
+  diesel::sql_query("UPDATE private_message SET content = $1 WHERE id = $2")
+    .bind::<Text, _>(content)
+    .bind::<Integer, _>(message_id)
+    .execute(&mut get_conn(pool).await?)
+    .await
+    .context("failed to rewrite imported private-message media URL")?;
+  Ok(())
+}
+
+fn replace_media_tokens(content: &mut String, item: &ImportedMediaItem) {
+  for token in &item.replacements {
+    if !token.is_empty() {
+      *content = content.replace(token, &item.target_url);
+    }
+  }
 }
 
 async fn rewrite_imported_media_references(
@@ -4014,7 +4511,28 @@ async fn rewrite_imported_media_references(
           changed = true;
         }
       }
-      if let Some(media_id) = item.media_id {
+      if item.is_protected {
+        let target_post_id = PostId(root_post_id as i32);
+        let media_reference_id = if let Some(reference_id) = item.media_reference_id {
+          Some(reference_id)
+        } else if let Some(media_id) = item.media_id {
+          Some(ensure_protected_media_reference(pool, site_id, media_id).await?)
+        } else {
+          None
+        };
+        ensure_protected_media_binding(
+          pool,
+          site_id,
+          item.file_reference_id,
+          media_reference_id,
+          Some(target_post_id),
+          None,
+        )
+        .await?;
+        if item.media_id.is_some() {
+          report.rewritten_media_reference_count += 1;
+        }
+      } else if let Some(media_id) = item.media_id {
         MediaReference::ensure(
           pool,
           &MediaReferenceInsertForm {
@@ -4053,6 +4571,118 @@ async fn rewrite_imported_media_references(
       report.rewritten_source_post_count += 1;
     }
   }
+  for item in media_items {
+    if item.is_protected {
+      let scopes = load_source_protected_scopes(source, item.source_upload_id).await?;
+      let mut bound_any = false;
+      for scope in scopes {
+        match scope {
+          SourceProtectedTarget::Post(source_post_id) => {
+            if read_mapping(pool, run_id, "source_discussion_post", &source_post_id.to_string())
+              .await.map_err(convert_lemmy_error)?.is_none() {
+              report
+                .unresolved_protected_upload_ids
+                .push(item.source_upload_id);
+              continue;
+            };
+            let source_post = diesel::sql_query("SELECT topic_id FROM posts WHERE id = $1")
+              .bind::<Integer, _>(source_post_id)
+              .get_result::<SourcePostTopic>(source)
+              .await?;
+            let root_id = read_mapping(pool, run_id, "topic", &source_post.topic_id.to_string())
+              .await
+              .map_err(convert_lemmy_error)?;
+            let Some(root_id) = root_id else {
+              report
+                .unresolved_protected_upload_ids
+                .push(item.source_upload_id);
+              continue;
+            };
+            let media_reference_id = match (item.media_reference_id, item.media_id) {
+              (Some(id), _) => Some(id),
+              (None, Some(media_id)) => {
+                Some(ensure_protected_media_reference(pool, site_id, media_id).await?)
+              }
+              _ => None,
+            };
+            ensure_protected_media_binding(
+              pool,
+              site_id,
+              item.file_reference_id,
+              media_reference_id,
+              Some(PostId(root_id as i32)),
+              None,
+            )
+            .await?;
+            bound_any = true;
+          }
+          SourceProtectedTarget::PrivatePost(source_post_id) => {
+            let copies = load_private_message_copies(pool, run_id, source_post_id).await?;
+            let mut bound = false;
+            for copy in copies {
+              let media_reference_id = match (item.media_reference_id, item.media_id) {
+                (Some(id), _) => Some(id),
+                (None, Some(media_id)) => {
+                  Some(ensure_protected_media_reference(pool, site_id, media_id).await?)
+                }
+                _ => None,
+              };
+              ensure_protected_media_binding(
+                pool,
+                site_id,
+                item.file_reference_id,
+                media_reference_id,
+                None,
+                Some(PrivateMessageId(copy.target_id as i32)),
+              )
+              .await?;
+              bound_any = true;
+              bound = true;
+            }
+            if !bound {
+              report
+                .unresolved_protected_upload_ids
+                .push(item.source_upload_id);
+            }
+          }
+          SourceProtectedTarget::ChatMessage(source_chat_id, channel_id) => {
+            let copies = load_chat_message_copies(pool, run_id, source_chat_id, channel_id).await?;
+            let mut bound = false;
+            for copy in copies {
+              let media_reference_id = match (item.media_reference_id, item.media_id) {
+                (Some(id), _) => Some(id),
+                (None, Some(media_id)) => {
+                  Some(ensure_protected_media_reference(pool, site_id, media_id).await?)
+                }
+                _ => None,
+              };
+              ensure_protected_media_binding(
+                pool,
+                site_id,
+                item.file_reference_id,
+                media_reference_id,
+                None,
+                Some(PrivateMessageId(copy.target_id as i32)),
+              )
+              .await?;
+              bound_any = true;
+              bound = true;
+            }
+            if !bound {
+              report
+                .unresolved_protected_upload_ids
+                .push(item.source_upload_id);
+            }
+          }
+        }
+      }
+      if !bound_any {
+        report
+          .unresolved_protected_upload_ids
+          .push(item.source_upload_id);
+      }
+    }
+  }
   let private_posts = diesel::sql_query(
     "SELECT p.id, COALESCE(p.raw, '') AS raw FROM posts p JOIN topics t ON t.id = p.topic_id \
      WHERE t.archetype = 'private_message' AND p.post_type = 1",
@@ -4060,14 +4690,44 @@ async fn rewrite_imported_media_references(
   .load::<SourcePrivatePostRaw>(source)
   .await
   .context("failed to scan private messages for media references")?;
+  let chat_messages = diesel::sql_query(
+    "SELECT m.id, dmc.id AS channel_id, COALESCE(m.message, m.cooked, '') AS raw FROM chat_messages m \\
+     JOIN chat_channels cc ON cc.id = m.chat_channel_id AND cc.chatable_type = 'DirectMessage' \\
+     JOIN direct_message_channels dmc ON dmc.id = cc.chatable_id",
+  )
+  .load::<SourceChatRaw>(source)
+  .await
+  .context("failed to scan Chat messages for media references")?;
+  for chat_message in chat_messages {
+    let copies = load_chat_message_copies(pool, run_id, chat_message.id, chat_message.channel_id).await?;
+    for item in media_items.iter().filter(|item| item.is_protected) {
+      if item.replacements.iter().any(|token| !token.is_empty() && chat_message.raw.contains(token)) {
+        for copy in &copies {
+          let mut content = read_imported_private_message_content(pool, copy.target_id as i32).await?;
+          replace_media_tokens(&mut content, item);
+          update_imported_private_message_content(pool, copy.target_id as i32, &content).await?;
+        }
+      }
+    }
+    if all_source_tokens.iter().any(|token| !token.is_empty() && chat_message.raw.contains(token)) && copies.is_empty() {
+      report.unresolved_protected_upload_ids.extend(media_items.iter().filter(|item| item.is_protected).map(|item| item.source_upload_id));
+    }
+  }
   for private_post in private_posts {
-    if all_source_tokens
-      .iter()
-      .any(|token| !token.is_empty() && private_post.raw.contains(token))
+    let copies = load_private_message_copies(pool, run_id, private_post.id).await?;
+    for item in media_items.iter().filter(|item| item.is_protected) {
+      if item.replacements.iter().any(|token| !token.is_empty() && private_post.raw.contains(token)) {
+        for copy in &copies {
+          let mut content = read_imported_private_message_content(pool, copy.target_id as i32).await?;
+          replace_media_tokens(&mut content, item);
+          update_imported_private_message_content(pool, copy.target_id as i32, &content).await?;
+        }
+      }
+    }
+    if all_source_tokens.iter().any(|token| !token.is_empty() && private_post.raw.contains(token))
+      && copies.is_empty()
     {
-      report
-        .unresolved_private_message_source_post_ids
-        .push(private_post.id);
+      report.unresolved_private_message_source_post_ids.push(private_post.id);
     }
   }
   Ok(())

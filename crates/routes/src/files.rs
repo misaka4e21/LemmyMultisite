@@ -1,3 +1,4 @@
+use crate::protected_media::file_reference_has_access;
 use actix_multipart::Multipart;
 use actix_web::{
   HttpResponse,
@@ -201,6 +202,7 @@ pub async fn upload_file(
       file_id: object.id,
       owner_person_id: user.person.id,
       original_filename: original_filename.clone(),
+      is_public: true,
     },
   )
   .await?;
@@ -256,6 +258,17 @@ pub async fn download_file(
   let reference = FileReference::read_by_public_id(&mut context.pool(), site.id, public_id)
     .await?
     .ok_or(LemmyErrorType::FileNotFound)?;
+  if !file_reference_has_access(
+    &context,
+    &tenant,
+    user.as_ref(),
+    reference.id,
+    reference.is_public,
+  )
+  .await?
+  {
+    return Ok(HttpResponse::NotFound().finish());
+  }
   let object = FileObject::read(reference.file_id, &mut context.pool()).await?;
   let storage = STORAGE
     .as_ref()

@@ -512,7 +512,20 @@ diesel::table! {
         file_id -> Int4,
         owner_person_id -> Int4,
         original_filename -> Text,
+        is_public -> Bool,
         published_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    protected_media_reference (id) {
+        id -> Int8,
+        local_site_id -> Int4,
+        file_reference_id -> Nullable<Int4>,
+        media_reference_id -> Nullable<Int8>,
+        post_id -> Nullable<Int4>,
+        private_message_id -> Nullable<Int4>,
+        created_at -> Timestamptz,
     }
 }
 
@@ -1249,6 +1262,11 @@ diesel::joinable!(local_site_rate_limit -> local_site (local_site_id));
 diesel::joinable!(file_reference -> file_object (file_id));
 diesel::joinable!(file_reference -> local_site (local_site_id));
 diesel::joinable!(file_reference -> person (owner_person_id));
+diesel::joinable!(protected_media_reference -> file_reference (file_reference_id));
+diesel::joinable!(protected_media_reference -> media_reference (media_reference_id));
+diesel::joinable!(protected_media_reference -> post (post_id));
+diesel::joinable!(protected_media_reference -> private_message (private_message_id));
+diesel::joinable!(protected_media_reference -> local_site (local_site_id));
 diesel::joinable!(local_user -> local_site (local_site_id));
 diesel::joinable!(local_user -> person (person_id));
 diesel::joinable!(local_user_invite -> local_user (local_user_id));
@@ -1355,6 +1373,7 @@ diesel::allow_tables_to_appear_in_same_query!(
   oauth_provider,
   password_reset_request,
   person,
+  protected_media_reference,
   person_content_combined,
   person_liked_combined,
   person_saved_combined,

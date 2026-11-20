@@ -41,6 +41,7 @@ pub mod post_thumbnail;
 pub mod presence;
 pub mod private_message;
 pub mod private_message_report;
+pub mod protected_media_reference;
 pub mod purge_guard;
 pub mod registration_application;
 pub mod secret;

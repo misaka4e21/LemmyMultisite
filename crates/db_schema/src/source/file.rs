@@ -40,6 +40,7 @@ pub struct FileReference {
   pub file_id: FileId,
   pub owner_person_id: PersonId,
   pub original_filename: String,
+  pub is_public: bool,
   pub published_at: DateTime<Utc>,
 }
 
@@ -52,4 +53,5 @@ pub struct FileReferenceInsertForm {
   pub file_id: FileId,
   pub owner_person_id: PersonId,
   pub original_filename: String,
+  pub is_public: bool,
 }

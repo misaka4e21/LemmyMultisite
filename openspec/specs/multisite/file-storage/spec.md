@@ -97,6 +97,23 @@ Document downloads SHALL stream through Lemmy from S3. Responses MUST use `Conte
 - **THEN** the stored filename is sanitized
 - **AND** the response header cannot be split or redirected by the filename
 
+### Requirement: Request-time authorization for protected files
+File references associated with a private message or post SHALL be authorized against that target resource on every download request. When a reference is protected but has no valid resource binding, the server MUST deny it. Existing public references without bindings SHALL retain the site's current access behavior.
+
+#### Scenario: Private-message file request
+- **WHEN** a current participant requests a file attached to a private message they can still read
+- **THEN** Lemmy streams the file
+- **AND** a nonparticipant, anonymous requester, removed participant, or user whose message is deleted for them receives no bytes
+
+#### Scenario: Post visibility changes
+- **WHEN** a user's permission to view a bound post changes
+- **AND** the user requests its attached file
+- **THEN** the server uses the post's current visibility to allow or deny the download
+
+#### Scenario: Protected reference without binding
+- **WHEN** a file reference is marked private and has no valid message or post binding
+- **THEN** the server denies the request before reading from S3
+
 ### Requirement: Deletion and reference counting
 Deleting a file SHALL remove only the current site's reference. The stored object and object row SHALL be deleted only when no reference remains. Only the owner or a site administrator SHALL delete a reference.
 

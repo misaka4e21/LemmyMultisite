@@ -102,11 +102,28 @@ The importer SHALL migrate topics, posts, reply relationships, private messages,
 #### Scenario: Import public non-image attachments when target policy allows
 - **WHEN** an archived non-image upload is public, its owner is mapped, generic file storage is configured, and its detected MIME type and size satisfy the selected site's upload policy
 - **THEN** the importer stores it in site-scoped generic file storage and rewrites its references in public imported content
-- **AND** it retains secure, post-restricted, missing, disallowed, or ownerless files in the upload manifest without making them public
+- **AND** it retains missing, disallowed, or ownerless files in the upload manifest without making them public
+
+#### Scenario: Import private-message media with participant access
+- **WHEN** an archived image or document is referenced by an imported private message, including a supported direct-message Chat message, and its referenced users map to target accounts
+- **THEN** the importer stores the media and associates it with the corresponding target private message
+- **AND** a download request is allowed only when the current requester is a participant who can currently read that target message
+- **AND** group-message fan-out copies authorize only their respective sender and recipient
+
+#### Scenario: Import post-restricted uploads with live post access
+- **WHEN** an archived image or document is marked secure or references a Discourse post through `access_control_post_id`, and an equivalent target post with enforceable current visibility exists
+- **THEN** the importer stores the media and associates it with that target post
+- **AND** each download request is allowed only when the requester can currently view the associated target post
+- **AND** permission changes to the target post take effect on the next media request without rerunning the import
+
+#### Scenario: Protected upload has no equivalent target authorization
+- **WHEN** a protected upload's source access rule cannot be mapped to an enforceable target message or post authorization rule
+- **THEN** the importer records the upload and authorization mapping as unresolved
+- **AND** it does not expose the file through a public URL or mark the media phase complete
 
 #### Scenario: Import direct-message Chat history
 - **WHEN** the source archive has Discourse Chat direct-message channels and messages
-- **THEN** the importer copies messages between currently mapped channel participants into site-owned Lemmy private messages, fans group-channel messages out per recipient, and reports unresolved messages and unsupported channel/thread/attachment semantics
+- **THEN** the importer copies messages between currently mapped channel participants into site-owned Lemmy private messages, fans group-channel messages out per recipient, and reports unresolved messages and unsupported channel/thread semantics
 - **AND** it reports that departed channel members cannot be reconstructed from Discourse's current membership table
 - **AND** preview marks Chat message and channel tables as partially imported rather than fully supported or wholly unsupported
 
@@ -120,6 +137,10 @@ The importer SHALL produce a durable report of imported, skipped, transformed, a
 #### Scenario: Validation finds missing generic file objects
 - **WHEN** an imported generic attachment has a missing database reference or its S3 object cannot be verified
 - **THEN** validation reports the attachment failure and does not mark the import complete
+
+#### Scenario: Validate protected media authorization mappings
+- **WHEN** an imported private-message or post-restricted media reference has no matching target message/post association or its backing object cannot be verified
+- **THEN** validation reports the unresolved media or authorization mapping and does not mark the import complete
 
 #### Scenario: Validation finds a failed phase with zero counted source rows
 - **WHEN** an import phase fails because its source schema is incomplete, even if source row counts are zero
